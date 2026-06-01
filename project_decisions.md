@@ -292,6 +292,57 @@ affordable without tripping rate limits. Cost-tiering (cheap models for bulk
 classification) remains available but is secondary; the rotation engine, not
 tier-downgrading, is the primary throughput mechanism.
 
+### [0014] `hypothesis/ears.py`
+
+**What it is:** Deterministic EARS classifier, validator, and canonical-sentence synthesizer.
+Pure Python, no model calls, fully unit-testable without an API key. 32 tests, all green.
+
+**Why it exists:** Makes [0008]'s "slots are authoritative" real. `RequirementCandidate.text`
+must be synthesized from the slots by this single authoritative function — never hand-authored,
+never LLM-written. Every stage that produces or mutates a requirement calls `ears.apply()`.
+
+**Key choices baked in:**
+- `CLAUSE_SLOTS` constant defines canonical ordering for both classification and synthesis —
+  they cannot silently diverge.
+- `_normalize()` collapses None/empty/whitespace-only to None before any logic runs; an LLM
+  emitting `""` or `"  "` for an unused slot is treated as absent.
+- `COMPLEX` is a **structural composition label** (≥2 clause slots filled), NOT a normative EARS
+  pattern from Mavin et al. (2009). Pre-existing in `EarsPattern` ([0008]); future consumers must
+  not treat it as a sixth normative pattern.
+- Synthesis preserves all clause content exactly — `OAuth`, `iPhone`, `gRPC`, `Auth0` unchanged.
+  Only the first character of the whole sentence is uppercased.
+- `_article()` prevents double-article ("The The Payment System shall...") in all sentence templates,
+  not just UBIQUITOUS.
+- "then" appears in UNWANTED (sole precondition) per EARS canonical form; omitted in COMPLEX
+  patterns where precondition is one of several clauses.
+- `synthesize()` returns `""` for INVALID requirements — stale text is never preserved.
+- `apply()` uses `model_validate` (not `model_copy`) so `_ears_invariant` and all field
+  validators re-run on the result. `model_copy` uses `model_construct` and bypasses them silently.
+- `ears_valid` is derived from `validate()`, not `classify()` — `validate()` is the single
+  source of truth for validity, preventing divergence if `validate()` gains new checks later.
+- Named `ERR_*` constants freeze the validation message contract for tests and downstream tooling.
+- `validate()`'s third check (INVALID after floor fields pass) is currently dead code — no input
+  reaches it. Retained as a forward-compatibility gate; noted here so future readers don't trace it.
+
+**Test notes (caught during testing):**
+- `"then"` as a substring check is ambiguous — "au**then**ticate" contains it. Tests correctly
+  check for `", then "` (the UNWANTED construct) to avoid false positives.
+- Parametrized whitespace test covers `""`, `" "`, `"\t"`, `"\n"`, `"  \t  "` for clause slots.
+- Two test assertions needed fixing after first run (substring vs. lowercased search); implementation
+  was correct throughout. Noted per "test the deterministic pieces yourself" working agreement.
+
+**Follow-up items (not in scope for Phase 0):**
+- `_normalize()` is private to `ears.py`. When `smells.py` needs the same logic, extract to
+  `hypothesis/utils.py`. Do not extract prematurely.
+- Interrogate stage question count: default 5, LLM-determined (not hard-capped). Implemented
+  in `prompts/interrogate.md` when that stage is built; no models or ears change needed.
+- `models.py` `_ears_invariant` whitespace gap closed by `@field_validator` on `system_name`/
+  `system_response` added in commit 2 of this session.
+
+**Anticipates / will be replaced by:** Phase 1 may add composite-part nesting if flat slots prove
+insufficient ([0008] DECLINE). Template strings may be externalized to `prompts/` for per-domain
+variants. Next file: `hypothesis/smells.py` (deterministic smell detector).
+
 ---
 
 ## Entry template (copy for each new file)
