@@ -1,5 +1,12 @@
 from __future__ import annotations
+import json
 import re
+
+
+def judge_text(j: dict) -> str:
+    #   a judge's produced text lives under "output" (generic /api/panel) or
+    #   "critique" (legacy /api/critique). tolerate both.
+    return (j.get("output") or j.get("critique") or "") if j.get("ok") else ""
 
 # deterministic merge of the judge panel's critiques into one consolidated list.
 #
@@ -55,10 +62,11 @@ def merge_critiques(judges: list[dict]) -> str:
     groups: list[dict] = []   # {"text": str, "tokens": set, "judges": set[str]}
 
     for j in judges:
-        if not j.get("ok") or not j.get("critique"):
+        text = judge_text(j)
+        if not text:
             continue
         model = j.get("model", "?")
-        for bullet in _extract_bullets(j["critique"]):
+        for bullet in _extract_bullets(text):
             toks = _tokens(bullet)
             placed = False
             for g in groups:
@@ -85,3 +93,74 @@ def merge_critiques(judges: list[dict]) -> str:
         tag = f" _(flagged by {n} judges)_" if n > 1 else ""
         lines.append(f"- {g['text']}{tag}")
     return "\n".join(lines)
+
+
+_PASS_RE = re.compile(r'pass["\']?\s*[:=]\s*(true|false|yes|no)', re.IGNORECASE)
+
+
+def _verdict(text: str) -> tuple[bool | None, str]:
+    #   parse a verifier judge's {"pass": bool, "reason": str}. tolerant of fences
+    #   and of small models that answer in prose ("pass: yes because ...").
+    t = text.strip()
+    if t.startswith("```"):
+        nl, last = t.find("\n"), t.rfind("```")
+        if nl != -1 and last > nl:
+            t = t[nl + 1:last].strip()
+    try:
+        obj = json.loads(t)
+        if isinstance(obj, dict) and "pass" in obj:
+            return bool(obj["pass"]), str(obj.get("reason", ""))[:300]
+    except (ValueError, TypeError):
+        pass
+    m = _PASS_RE.search(t)
+    if m:
+        return m.group(1).lower() in ("true", "yes"), t[:300]
+    return None, t[:300]
+
+
+def merge_votes(judges: list[dict]) -> str:
+    #   tally verifier verdicts into a consensus PASS/FAIL with per-judge reasons.
+    passes = fails = 0
+    rows: list[str] = []
+    for j in judges:
+        text = judge_text(j)
+        if not text:
+            continue
+        verdict, reason = _verdict(text)
+        if verdict is True:
+            passes += 1
+            mark = "PASS"
+        elif verdict is False:
+            fails += 1
+            mark = "FAIL"
+        else:
+            mark = "?"
+        rows.append(f"- **{j.get('model', '?')}**: {mark} — {reason}")
+    total = passes + fails
+    if total == 0:
+        return ""
+    overall = "PASS" if passes > fails else ("FAIL" if fails > passes else "SPLIT")
+    head = f"VERDICT: {overall} ({passes}/{total} judges voted pass)"
+    return head + "\n" + "\n".join(rows)
+
+
+def merge_concat(judges: list[dict]) -> str:
+    #   label each judge's full output and stack them. used for generate/transform
+    #   style tasks where you want to see and compare all N answers.
+    parts = []
+    for j in judges:
+        text = judge_text(j)
+        if text:
+            parts.append(f"### {j.get('model', '?')}\n\n{text}")
+    return "\n\n---\n\n".join(parts)
+
+
+def merge_panel(judges: list[dict], mode: str) -> str:
+    #   dispatch to the requested merge strategy.
+    if mode == "dedupe":
+        return merge_critiques(judges)
+    if mode == "vote":
+        return merge_votes(judges)
+    if mode == "concat":
+        return merge_concat(judges)
+    return ""  # "none"

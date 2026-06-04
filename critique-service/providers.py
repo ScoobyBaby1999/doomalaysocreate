@@ -212,6 +212,41 @@ def make_provider_registry() -> list[provider]:
             note="native GLM access (z.ai). latest GLM without OpenRouter's paid passthrough.",
         ))
 
+    # moonshot (kimi) - native Kimi access, OpenAI-compatible. signup grants free
+    # trial credits; kimi-k2.6 is the current frontier model (apr 2026).
+    tempkey = os.environ.get("MOONSHOT_API_KEY", "").strip()
+    if tempkey:
+        providers.append(provider(
+            name="moonshot",
+            url="https://api.moonshot.ai/v1/chat/completions",
+            api_key=tempkey,
+            models=(
+                "kimi-k2.6",
+                "kimi-k2.5",
+                "kimi-k2-0905-preview",
+            ),
+            rpm=30,
+            note="native Kimi (Moonshot). frontier model, OpenAI-compatible.",
+        ))
+
+    # google gemini - OpenAI-compatible endpoint, free tier via AI Studio. modest
+    # rpm but fine for an occasional judge panel. not in the default panel, but
+    # registered so it can be baked off via a panel override.
+    tempkey = os.environ.get("GOOGLE_API_KEY", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
+    if tempkey:
+        providers.append(provider(
+            name="google",
+            url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            api_key=tempkey,
+            models=(
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+                "gemini-2.0-flash",
+            ),
+            rpm=15,
+            note="gemini via openai-compat endpoint. free tier, modest rpm.",
+        ))
+
     return providers
 
 

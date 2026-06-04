@@ -1,27 +1,25 @@
 {
-  "//": "The judge panel. EDIT THIS FILE to change judges - no code changes needed.",
+  "//": "The judge/model panel. EDIT THIS FILE to change models - no code changes.",
   "//1": "Each 'slot' is 'provider/model'. Any provider/model named here is registered",
   "//2": "on the fly against that provider's API key.",
   "//3": "",
-  "//4": "STRATEGY: one judge per provider, each on its OWN free channel - so we don't",
-  "//5": "stress OpenRouter's shared quota and every model runs at full free access:",
-  "//6": "  - zai/glm-5.1                              -> latest GLM, free via Z.ai (ZAI_API_KEY)",
-  "//7": "  - nvidia/.../nemotron-ultra-253b-v1        -> 253B Nemotron Ultra, free via NVIDIA NIM (NVIDIA_API_KEY)",
-  "//8": "  - openrouter/deepseek/deepseek-r1:free     -> DeepSeek-R1, free via OpenRouter (OPENROUTER_API_KEY)",
-  "//9": "  - cerebras/qwen-3-235b...                  -> largest Qwen, free via Cerebras (CEREBRAS_API_KEY)",
-  "//10": "",
-  "//11": "4 providers, 4 model families => maximally uncorrelated critiques. A judge",
-  "//12": "whose provider 429s or whose key is missing just returns ok:false; the rest",
-  "//13": "still run. To swap any judge to a better native channel, sign up there and",
-  "//14": "change its slot string (add the provider to providers.py if it's new).",
+  "//4": "DEFAULT PANEL = three frontier models, each on its OWN native channel (no",
+  "//5": "OpenRouter load), live-verified working:",
+  "//6": "  - zai/glm-5.1                      -> GLM 5.1 via Z.ai (ZAI_API_KEY)",
+  "//7": "  - nvidia/deepseek-ai/deepseek-v4-pro-> DeepSeek V4 Pro via NVIDIA NIM (NVIDIA_API_KEY)",
+  "//8": "  - moonshot/kimi-k2.6               -> Kimi K2.6 via Moonshot (MOONSHOT_API_KEY)",
+  "//9": "",
+  "//10": "OPTIONAL 4th: add a Gemini judge with 'google/gemini-2.5-pro' (GOOGLE_API_KEY),",
+  "//11": "or a free fallback 'openrouter/nvidia/nemotron-3-super-120b-a12b:free'.",
+  "//12": "Cerebras code stays in providers.py (e.g. 'cerebras/zai-glm-4.7') but is unused.",
+  "//13": "This panel powers BOTH POST /api/critique and the general POST /api/panel.",
 
   "judges": [
-    {"slot": "zai/glm-5.1",                                    "weight": 1, "note": "latest GLM via Z.ai's own API (full free access)"},
-    {"slot": "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1", "weight": 1, "note": "253B Nemotron Ultra via NVIDIA NIM data centers (free credits)"},
-    {"slot": "openrouter/deepseek/deepseek-r1:free",           "weight": 1, "note": "DeepSeek-R1 free on OpenRouter; native deepseek API exists if you want to upgrade"},
-    {"slot": "cerebras/qwen-3-235b-a22b-instruct-2507",        "weight": 1, "note": "largest Qwen, very fast (Cerebras free tier)"}
+    {"slot": "zai/glm-5.1",                        "weight": 1, "note": "GLM 5.1 via Z.ai"},
+    {"slot": "nvidia/deepseek-ai/deepseek-v4-pro", "weight": 1, "note": "DeepSeek V4 Pro via NVIDIA NIM"},
+    {"slot": "moonshot/kimi-k2.6",                 "weight": 1, "note": "Kimi K2.6 via Moonshot"}
   ],
 
-  "max_parallel": 4,
+  "max_parallel": 3,
   "rubric": "critiquer"
 }

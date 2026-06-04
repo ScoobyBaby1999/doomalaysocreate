@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 
 from content.roles import looks_like_refusal, make_prompt
-from merge import merge_critiques
+from merge import merge_critiques, merge_panel
 from oplog import log_event
 from providers import (
     make_model_family,
@@ -67,6 +67,24 @@ OUTPUT_RULES = (
 CRITIQUE_MAX_TOKENS = int(os.environ.get("CRITIQUE_MAX_TOKENS", "1500"))
 JUDGE_TIMEOUT_S = float(os.environ.get("JUDGE_TIMEOUT_S", "180"))
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", str(1_000_000)))
+
+# generalized /api/panel: any loom role (or a fully custom system prompt) fanned
+# out across the model panel. each role maps to a prompt skeleton in
+# content/prompts/<role>.md and a sensible default merge + token budget.
+VALID_ROLES = (
+    "critiquer", "schematic_critiquer", "verifier",
+    "generator", "transformer", "parser", "planner",
+)
+ROLE_DEFAULT_MERGE = {
+    "critiquer": "dedupe", "schematic_critiquer": "dedupe", "verifier": "vote",
+    "generator": "concat", "transformer": "concat", "parser": "concat",
+    "planner": "concat",
+}
+ROLE_DEFAULT_MAX_TOKENS = {
+    "critiquer": 1500, "schematic_critiquer": 1500, "verifier": 1000,
+    "parser": 1500, "planner": 3000, "generator": 4000, "transformer": 4000,
+}
+MERGE_MODES = ("dedupe", "vote", "concat", "none")
 
 
 class Panel:
@@ -163,8 +181,8 @@ def build_system_prompt(fmt: str, plan: str, inline_rubric: str | None,
 
 
 async def _run_one_judge(client: httpx.AsyncClient, scheduler: SlotScheduler,
-                         picked: slot, system_prompt: str,
-                         sem: asyncio.Semaphore) -> dict:
+                         picked: slot, system_prompt: str, sem: asyncio.Semaphore,
+                         *, user_msg: str, max_tokens: int) -> dict:
     async with sem:
         await scheduler.wait_for_provider_pacing(picked)
         try:
@@ -172,9 +190,9 @@ async def _run_one_judge(client: httpx.AsyncClient, scheduler: SlotScheduler,
                 client, picked,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "Produce the requested critique now."},
+                    {"role": "user", "content": user_msg},
                 ],
-                max_tokens=CRITIQUE_MAX_TOKENS,
+                max_tokens=max_tokens,
                 timeout_s=JUDGE_TIMEOUT_S,
             )
         except ProviderError as e:
@@ -189,23 +207,14 @@ async def _run_one_judge(client: httpx.AsyncClient, scheduler: SlotScheduler,
             return {"model": picked.who, "ok": False, "error": f"refusal: {text[:160]!r}"}
 
         scheduler.record_success(picked)
-        return {"model": picked.who, "ok": True, "critique": text}
+        return {"model": picked.who, "ok": True, "output": text}
 
 
-async def run_critique(panel: Panel, plan: str, fmt_req: str,
-                       panel_override: list[str] | None,
-                       inline_rubric: str | None) -> dict:
-    t0 = time.monotonic()
-
-    if fmt_req == "markdown":
-        fmt, _ = "markdown", None
-    elif fmt_req == "schematic":
-        fmt = "schematic"
-    else:
-        fmt, _ = detect_format(plan)
-
-    system_prompt = build_system_prompt(fmt, plan, inline_rubric, panel.default_rubric)
-
+async def run_panel(panel: Panel, system_prompt: str, panel_override: list[str] | None,
+                    *, user_msg: str, max_tokens: int) -> list[dict]:
+    #   the portable core: resolve the panel, fan out in parallel (per-provider
+    #   pacing via the scheduler), and return one result dict per judge. a judge
+    #   whose provider has no key returns ok:false rather than vanishing.
     who_list = panel_override or panel.default_panel
     picked_slots: list[slot] = []
     missing: list[dict] = []
@@ -222,16 +231,37 @@ async def run_critique(panel: Panel, plan: str, fmt_req: str,
         scheduler = SlotScheduler(picked_slots)
         sem = asyncio.Semaphore(max(1, panel.max_parallel))
         async with httpx.AsyncClient() as client:
-            tasks = [
-                _run_one_judge(client, scheduler, s, system_prompt, sem)
+            results = await asyncio.gather(*[
+                _run_one_judge(client, scheduler, s, system_prompt, sem,
+                               user_msg=user_msg, max_tokens=max_tokens)
                 for s in picked_slots
-            ]
-            results = await asyncio.gather(*tasks)
+            ])
+    return results + missing
 
-    judges = results + missing
+
+async def run_critique(panel: Panel, plan: str, fmt_req: str,
+                       panel_override: list[str] | None,
+                       inline_rubric: str | None) -> dict:
+    t0 = time.monotonic()
+
+    if fmt_req == "markdown":
+        fmt = "markdown"
+    elif fmt_req == "schematic":
+        fmt = "schematic"
+    else:
+        fmt, _ = detect_format(plan)
+
+    system_prompt = build_system_prompt(fmt, plan, inline_rubric, panel.default_rubric)
+    judges = await run_panel(panel, system_prompt, panel_override,
+                             user_msg="Produce the requested critique now.",
+                             max_tokens=CRITIQUE_MAX_TOKENS)
+    #   back-compat: legacy /api/critique exposes each judge's text as "critique".
+    for j in judges:
+        if j.get("ok") and "output" in j:
+            j["critique"] = j.pop("output")
+
     merged = merge_critiques(judges)
     ok_count = sum(1 for j in judges if j.get("ok"))
-
     elapsed = round(time.monotonic() - t0, 2)
     log_event("critique_done", format=fmt, judges_total=len(judges),
               judges_ok=ok_count, elapsed_s=elapsed)
@@ -243,7 +273,51 @@ async def run_critique(panel: Panel, plan: str, fmt_req: str,
     }
 
 
+async def run_panel_request(panel: Panel, *, input_text: str, role: str,
+                            system: str | None, instructions: str | None,
+                            output_rules: str | None, template: str | None,
+                            panel_override: list[str] | None, merge_mode: str | None,
+                            max_tokens: int | None) -> dict:
+    #   generalized fan-out: any loom role, or a fully custom system prompt. this is
+    #   what turns the "critique panel" into a general "ask my frontier-model panel
+    #   to do X" service (critique, generate, verify, transform, parse, plan).
+    t0 = time.monotonic()
+    if system:
+        system_prompt = f"{system.strip()}\n\n## Input\n{input_text}"
+        role_label = "custom"
+    else:
+        system_prompt = make_prompt(
+            role,
+            instructions=instructions or "",
+            output_rules=output_rules or "(no specific output rules)",
+            inputs=input_text,
+            template=template or "",
+        )
+        role_label = role
+
+    mode = merge_mode or ROLE_DEFAULT_MERGE.get(role, "none")
+    mt = max_tokens or ROLE_DEFAULT_MAX_TOKENS.get(role, 2000)
+    judges = await run_panel(panel, system_prompt, panel_override,
+                             user_msg="Produce the requested output now.", max_tokens=mt)
+    merged = merge_panel(judges, mode)
+    ok_count = sum(1 for j in judges if j.get("ok"))
+    elapsed = round(time.monotonic() - t0, 2)
+    log_event("panel_done", role=role_label, merge=mode,
+              judges_total=len(judges), judges_ok=ok_count, elapsed_s=elapsed)
+    return {
+        "role": role_label,
+        "merge": mode,
+        "judges": judges,
+        "merged": merged,
+        "meta": {"elapsed_s": elapsed, "judges_ok": ok_count, "judges_total": len(judges)},
+    }
+
+
 # --- HTTP layer -------------------------------------------------------------
+
+class _BadRequest(ValueError):
+    """raised by request builders to signal a 400 with a client-safe message."""
+
 
 def _token_ok(header_value: str | None) -> bool:
     expected = os.environ.get("CRITIQUE_TOKEN", "").strip()
@@ -274,78 +348,126 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.rstrip("/") in ("", "/health"):
             panel: Panel = self.server.panel  # type: ignore[attr-defined]
             self._send_json(200, {
-                "service": "loom critique panel",
+                "service": "loom model panel",
                 "status": "ok",
                 "token_required": True,
                 "token_configured": bool(os.environ.get("CRITIQUE_TOKEN", "").strip()),
                 "providers_configured": [p.name for p in panel.providers],
                 "default_panel": panel.default_panel,
                 "default_rubric": panel.default_rubric,
-                "endpoint": "POST /api/critique",
+                "endpoints": {
+                    "POST /api/critique": "critique a plan/schematic (preset)",
+                    "POST /api/panel": "general: any role or custom system prompt",
+                },
+                "roles": list(VALID_ROLES),
+                "merge_modes": list(MERGE_MODES),
             })
             return
         self._send_json(404, {"error": "not found"})
 
-    def do_POST(self) -> None:
-        if self.path.rstrip("/") != "/api/critique":
-            self._send_json(404, {"error": "not found"})
-            return
-
+    def _auth_and_body(self) -> dict | None:
+        #   shared gate for POST routes: bearer auth + JSON body parse. on any
+        #   failure it writes the error response and returns None.
         if not _token_ok(self.headers.get("Authorization")):
             if not os.environ.get("CRITIQUE_TOKEN", "").strip():
                 self._send_json(503, {"error": "CRITIQUE_TOKEN not configured on server"})
             else:
                 self._send_json(401, {"error": "missing or invalid bearer token"})
-            return
-
+            return None
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
         if length <= 0 or length > MAX_BODY_BYTES:
             self._send_json(413, {"error": f"body must be 1..{MAX_BODY_BYTES} bytes"})
-            return
-
+            return None
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as e:
             self._send_json(400, {"error": f"invalid JSON body: {e}"})
-            return
+            return None
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "body must be a JSON object"})
+            return None
+        return payload
 
-        plan = payload.get("plan")
-        if not isinstance(plan, str) or not plan.strip():
-            self._send_json(400, {"error": "'plan' (non-empty string) is required"})
-            return
+    @staticmethod
+    def _valid_panel(p) -> bool:
+        return p is None or (isinstance(p, list) and all(isinstance(x, str) for x in p))
 
-        fmt_req = payload.get("format", "auto")
-        if fmt_req not in ("auto", "markdown", "schematic"):
-            self._send_json(400, {"error": "'format' must be auto|markdown|schematic"})
+    def do_POST(self) -> None:
+        route = self.path.rstrip("/")
+        if route not in ("/api/critique", "/api/panel"):
+            self._send_json(404, {"error": "not found"})
             return
-
-        panel_override = payload.get("panel")
-        if panel_override is not None and (
-            not isinstance(panel_override, list)
-            or not all(isinstance(x, str) for x in panel_override)
-        ):
-            self._send_json(400, {"error": "'panel' must be a list of 'provider/model' strings"})
+        payload = self._auth_and_body()
+        if payload is None:
             return
-
-        inline_rubric = payload.get("rubric")
-        if inline_rubric is not None and not isinstance(inline_rubric, str):
-            self._send_json(400, {"error": "'rubric' must be a string"})
-            return
-
         panel: Panel = self.server.panel  # type: ignore[attr-defined]
+
         try:
-            result = asyncio.run(run_critique(
-                panel, plan, fmt_req, panel_override or None, inline_rubric or None,
-            ))
+            if route == "/api/critique":
+                coro = self._build_critique(payload, panel)
+            else:
+                coro = self._build_panel(payload, panel)
+        except _BadRequest as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        if coro is None:
+            return
+
+        try:
+            result = asyncio.run(coro)
         except Exception as e:  # noqa: BLE001 - never leak a stack trace to the client
-            log_event("critique_error", error=repr(e)[:300])
+            log_event("request_error", route=route, error=repr(e)[:300])
             self._send_json(500, {"error": f"internal error: {type(e).__name__}"})
             return
-
         self._send_json(200, result)
+
+    def _build_critique(self, payload: dict, panel: Panel):
+        plan = payload.get("plan")
+        if not isinstance(plan, str) or not plan.strip():
+            raise _BadRequest("'plan' (non-empty string) is required")
+        fmt_req = payload.get("format", "auto")
+        if fmt_req not in ("auto", "markdown", "schematic"):
+            raise _BadRequest("'format' must be auto|markdown|schematic")
+        panel_override = payload.get("panel")
+        if not self._valid_panel(panel_override):
+            raise _BadRequest("'panel' must be a list of 'provider/model' strings")
+        inline_rubric = payload.get("rubric")
+        if inline_rubric is not None and not isinstance(inline_rubric, str):
+            raise _BadRequest("'rubric' must be a string")
+        return run_critique(panel, plan, fmt_req, panel_override or None, inline_rubric or None)
+
+    def _build_panel(self, payload: dict, panel: Panel):
+        input_text = payload.get("input")
+        if not isinstance(input_text, str) or not input_text.strip():
+            raise _BadRequest("'input' (non-empty string) is required")
+        system = payload.get("system")
+        if system is not None and not isinstance(system, str):
+            raise _BadRequest("'system' must be a string")
+        role = payload.get("role", "critiquer")
+        if not system:
+            if not isinstance(role, str) or role not in VALID_ROLES:
+                raise _BadRequest(f"'role' must be one of {list(VALID_ROLES)} (or pass 'system')")
+        for k in ("instructions", "output_rules", "template"):
+            if payload.get(k) is not None and not isinstance(payload[k], str):
+                raise _BadRequest(f"'{k}' must be a string")
+        merge_mode = payload.get("merge")
+        if merge_mode is not None and merge_mode not in MERGE_MODES:
+            raise _BadRequest(f"'merge' must be one of {list(MERGE_MODES)}")
+        max_tokens = payload.get("max_tokens")
+        if max_tokens is not None and (not isinstance(max_tokens, int) or not 1 <= max_tokens <= 32000):
+            raise _BadRequest("'max_tokens' must be an int in 1..32000")
+        panel_override = payload.get("panel")
+        if not self._valid_panel(panel_override):
+            raise _BadRequest("'panel' must be a list of 'provider/model' strings")
+        return run_panel_request(
+            panel, input_text=input_text, role=role, system=system or None,
+            instructions=payload.get("instructions"), output_rules=payload.get("output_rules"),
+            template=payload.get("template"), panel_override=panel_override or None,
+            merge_mode=merge_mode, max_tokens=max_tokens,
+        )
 
 
 def main() -> int:
@@ -363,7 +485,7 @@ def main() -> int:
               providers=[p.name for p in panel.providers],
               default_panel=panel.default_panel,
               token_configured=bool(os.environ.get("CRITIQUE_TOKEN", "").strip()))
-    print(f"loom critique panel listening on {host}:{port}  "
+    print(f"loom model panel listening on {host}:{port}  "
           f"(providers={[p.name for p in panel.providers]})", flush=True)
     try:
         server.serve_forever()

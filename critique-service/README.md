@@ -1,36 +1,60 @@
-# loom critique panel — standalone service
+# loom model panel — standalone service
 
-A slim, token-guarded HTTP service that exposes [loom](https://github.com/)'s
-**multi-model critique capability**: a panel of judge LLMs reads a *plan* and
-returns specific, actionable critiques, which are merged into one consolidated
-list. Built to be deployed free on **Hugging Face Spaces (Docker)** and reachable
-from anywhere — including the Claude Code mobile app on Android.
+A slim, token-guarded HTTP service that exposes loom's **multi-model panel**: it
+fans an input out to a panel of frontier LLMs — each on its own provider — and
+merges their outputs. Run it as a **critique panel** (the `/api/critique` preset)
+or as a **general panel** (`/api/panel`) for any role: critique, verify, generate,
+transform, parse, plan — or a fully custom system prompt. Built to deploy free on
+**Hugging Face Spaces (Docker)**, reachable from anywhere including the Claude Code
+mobile app on Android.
 
 > Ported from loom's `backend/` — it reuses loom's provider registry, the
-> `SlotScheduler`/`call_slot` rate-limit-aware rotation, and the `critiquer`
-> rubric. The dashboard, task queue, and file-writing state machinery are left
-> behind. See `../the-loom` history / `HANDOFF.md` for the original design intent.
+> `SlotScheduler`/`call_slot` rate-limit-aware rotation, and the role rubrics. The
+> dashboard, task queue, and file-writing state machinery are left behind. The full
+> planner→runner multi-stage pipeline is a planned Phase 2.
 
 ## Why a panel
 
-Three near-identical models give false confidence. The panel is deliberately
-**diverse across model families AND providers** so the critiques are
-*uncorrelated*. Default panel (editable in `panel.json`):
+Top models as on-demand aids: Claude does the heavy lifting, a panel of frontier
+models gives critical, *uncorrelated* second opinions. Each judge runs on a
+**different provider** so no single quota is a bottleneck and a 429 on one never
+sinks the request. Default panel (editable in `panel.json`):
 
-Default panel — **one judge per provider, each on its own free channel** (so no
-single provider's quota is a bottleneck):
-
-| Judge | Channel | Model ID | Free via |
+| Judge | Channel | Model ID | Key |
 |---|---|---|---|
 | GLM 5.1 | Z.ai | `glm-5.1` | `ZAI_API_KEY` |
-| Nemotron Ultra 253B | NVIDIA NIM | `nvidia/llama-3.1-nemotron-ultra-253b-v1` | `NVIDIA_API_KEY` |
-| DeepSeek-R1 | OpenRouter | `deepseek/deepseek-r1:free` | `OPENROUTER_API_KEY` |
-| Qwen-3-235B | Cerebras | `qwen-3-235b-a22b-instruct-2507` | `CEREBRAS_API_KEY` |
+| DeepSeek V4 Pro | NVIDIA NIM | `deepseek-ai/deepseek-v4-pro` | `NVIDIA_API_KEY` |
+| Kimi K2.6 | Moonshot | `kimi-k2.6` | `MOONSHOT_API_KEY` |
+
+Optional extra judges already wired in the registry: `google/gemini-2.5-pro`
+(`GOOGLE_API_KEY`), free OpenRouter fallbacks, and the (unused but retained)
+`cerebras/*` slots.
 
 ## API
 
 ### `GET /health`
-Unauthenticated liveness + config summary (no secrets). Used by HF's healthcheck.
+Unauthenticated liveness + config summary (no secrets). Lists configured providers,
+the default panel, available roles and merge modes. Used by HF's healthcheck.
+
+### `POST /api/panel`  *(Bearer token required)* — the general endpoint
+
+```jsonc
+{
+  "input":        "<the text to operate on>",
+  "role":         "critiquer|verifier|generator|transformer|parser|planner",  // default critiquer
+  "instructions": "<task-specific directive spliced into the role rubric>",    // optional
+  "output_rules": "<formatting/constraint rules>",                             // optional
+  "system":       "<fully custom system prompt; overrides role if given>",     // optional
+  "panel":        ["provider/model", ...],   // optional; defaults to panel.json
+  "merge":        "dedupe|vote|concat|none", // optional; sensible default per role
+  "max_tokens":   1500                        // optional
+}
+```
+
+Response: `{ "role", "merge", "judges": [{model, ok, output|error}], "merged", "meta" }`.
+Merge defaults: critiquer→`dedupe` (consolidated bullets, consensus tagged),
+verifier→`vote` (PASS/FAIL tally + reasons), generator/transformer/parser/planner→`concat`
+(each model's full answer, labelled).
 
 ### `POST /api/critique`  *(Bearer token required)*
 
@@ -112,7 +136,7 @@ curl -sS -X POST http://127.0.0.1:7860/api/critique \
    - `CRITIQUE_TOKEN` — your bearer token
      (`python -c "import secrets; print(secrets.token_urlsafe(32))"`)
    - the provider keys your panel uses: `ZAI_API_KEY`, `NVIDIA_API_KEY`,
-     `OPENROUTER_API_KEY`, `CEREBRAS_API_KEY` (and `GROQ_API_KEY` if you add Groq judges).
+     `MOONSHOT_API_KEY` (and optionally `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`).
 4. The Space builds and serves on port **7860**. Public URL:
    `https://<user>-<space>.hf.space`. Test:
 

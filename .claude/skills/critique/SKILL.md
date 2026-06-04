@@ -83,6 +83,18 @@ Show the user:
 3. Only if a judge failed (`ok:false`), briefly note which and why (e.g. one was
    rate-limited) — but don't treat a partial panel as an error; that's by design.
 
+## Beyond critique — the general panel
+
+The same hosted service also exposes `POST /api/panel` for *any* role, not just
+critique. Use it when the user wants the panel to **verify** a claim, **generate**
+alternatives, **transform** text, **parse** to JSON, or run a **custom system
+prompt** — same auth, same `panel` override. Body: `{"input": "...", "role":
+"verifier|generator|transformer|parser|planner", "instructions": "...", "merge":
+"dedupe|vote|concat|none"}` (or pass `"system"` for a fully custom prompt). The
+response has the same shape with a `merged` field (verifier→PASS/FAIL vote,
+generator→each model's answer). Reach for this to make frontier models do focused
+work while you drive.
+
 ## Caveats to relay when relevant
 
 - The service is hosted on a free Hugging Face Space that **sleeps when idle**, so
