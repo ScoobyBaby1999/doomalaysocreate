@@ -1,0 +1,83 @@
+name: Deploy critique-service to HF Space
+
+# Syncs the contents of critique-service/ to the Hugging Face Space
+# ScoobyBaby1999/Loom on every push to the default branch. GitHub stays the
+# single source of truth; the Space updates itself.
+#
+# One-time setup: add your Hugging Face token as a repo secret named HF_TOKEN
+#   (Settings -> Secrets and variables -> Actions -> New repository secret).
+#   The token needs WRITE access to the Loom Space. Until it's set, this workflow
+#   runs green and simply skips the upload.
+
+on:
+  push:
+    branches: [c]
+    paths:
+      - 'critique-service/**'
+      - '.github/workflows/deploy-hf-space.yml'
+  workflow_dispatch: {}   # lets you trigger a deploy manually from the Actions tab
+
+concurrency:
+  group: hf-space-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install huggingface_hub
+        run: pip install -q "huggingface_hub>=0.25"
+
+      - name: Stage Space contents
+        run: |
+          set -euo pipefail
+          rm -rf _space && mkdir _space
+          # everything the Space needs lives in critique-service/
+          cp -a critique-service/. _space/
+          # The Space's README must carry HF frontmatter (sdk: docker, app_port).
+          # Build it with printf (indentation-immune) then append the service docs.
+          printf '%s\n' \
+            '---' \
+            'title: Loom' \
+            'emoji: "\U0001F316"' \
+            'colorFrom: yellow' \
+            'colorTo: indigo' \
+            'sdk: docker' \
+            'app_port: 7860' \
+            'pinned: false' \
+            'license: mit' \
+            'short_description: loom multi-model critique panel' \
+            '---' \
+            '' > _space/README.md
+          cat critique-service/README.md >> _space/README.md
+
+      - name: Upload to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "::warning::HF_TOKEN secret not set - skipping deploy."
+            echo "Add it under Settings -> Secrets and variables -> Actions, then re-run."
+            exit 0
+          fi
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          api.upload_folder(
+              folder_path="_space",
+              repo_id="ScoobyBaby1999/Loom",
+              repo_type="space",
+              commit_message=f"Sync critique-service from GitHub @ {os.environ.get('GITHUB_SHA','')[:7]}",
+              # remove files that no longer exist in the source (keep LFS config)
+              delete_patterns=["*", "!.gitattributes"],
+          )
+          print("Deployed to https://huggingface.co/spaces/ScoobyBaby1999/Loom")
+          PY
