@@ -68,16 +68,33 @@ jobs:
             exit 0
           fi
           python - <<'PY'
-          import os
+          import os, time
           from huggingface_hub import HfApi
+          from huggingface_hub.errors import HfHubHTTPError
           api = HfApi(token=os.environ["HF_TOKEN"])
-          api.upload_folder(
-              folder_path="_space",
-              repo_id="ScoobyBaby1999/Loom",
-              repo_type="space",
-              commit_message=f"Sync critique-service from GitHub @ {os.environ.get('GITHUB_SHA','')[:7]}",
-              # remove files that no longer exist in the source (keep LFS config)
-              delete_patterns=["*", "!.gitattributes"],
-          )
-          print("Deployed to https://huggingface.co/spaces/ScoobyBaby1999/Loom")
+          last = None
+          for attempt in range(1, 7):
+              try:
+                  api.upload_folder(
+                      folder_path="_space",
+                      repo_id="ScoobyBaby1999/Loom",
+                      repo_type="space",
+                      commit_message=f"Sync critique-service from GitHub @ {os.environ.get('GITHUB_SHA','')[:7]}",
+                      # remove files that no longer exist in the source (keep LFS config)
+                      delete_patterns=["*", "!.gitattributes"],
+                  )
+                  print("Deployed to https://huggingface.co/spaces/ScoobyBaby1999/Loom")
+                  break
+              except HfHubHTTPError as e:
+                  last = e
+                  code = getattr(getattr(e, "response", None), "status_code", None)
+                  # 429 (rate limit) / 5xx are transient - back off and retry.
+                  if code == 429 or (code or 0) >= 500:
+                      wait = min(60, 2 ** attempt)
+                      print(f"::warning::HF {code} on attempt {attempt}; retrying in {wait}s")
+                      time.sleep(wait)
+                      continue
+                  raise
+          else:
+              raise SystemExit(f"upload failed after retries: {last}")
           PY
