@@ -17,12 +17,15 @@ Three near-identical models give false confidence. The panel is deliberately
 **diverse across model families AND providers** so the critiques are
 *uncorrelated*. Default panel (editable in `panel.json`):
 
-| Judge | Provider | Why |
-|---|---|---|
-| GLM 5.1 | OpenRouter | user-confirmed good judge |
-| Nemotron Super (largest) | NVIDIA NIM | reasoning-tuned, large |
-| DeepSeek-R1 | NVIDIA NIM | reasoning model, very different error profile |
-| Qwen-3-235B | Cerebras | largest Qwen, very fast |
+Default panel — **one judge per provider, each on its own free channel** (so no
+single provider's quota is a bottleneck):
+
+| Judge | Channel | Model ID | Free via |
+|---|---|---|---|
+| GLM 5.1 | Z.ai | `glm-5.1` | `ZAI_API_KEY` |
+| Nemotron Ultra 253B | NVIDIA NIM | `nvidia/llama-3.1-nemotron-ultra-253b-v1` | `NVIDIA_API_KEY` |
+| DeepSeek-R1 | OpenRouter | `deepseek/deepseek-r1:free` | `OPENROUTER_API_KEY` |
+| Qwen-3-235B | Cerebras | `qwen-3-235b-a22b-instruct-2507` | `CEREBRAS_API_KEY` |
 
 ## API
 
@@ -108,8 +111,8 @@ curl -sS -X POST http://127.0.0.1:7860/api/critique \
 3. In **Space → Settings → Secrets**, add:
    - `CRITIQUE_TOKEN` — your bearer token
      (`python -c "import secrets; print(secrets.token_urlsafe(32))"`)
-   - the provider keys your panel uses: `OPENROUTER_API_KEY`, `NVIDIA_API_KEY`,
-     `CEREBRAS_API_KEY` (and `GROQ_API_KEY` if you add Groq judges).
+   - the provider keys your panel uses: `ZAI_API_KEY`, `NVIDIA_API_KEY`,
+     `OPENROUTER_API_KEY`, `CEREBRAS_API_KEY` (and `GROQ_API_KEY` if you add Groq judges).
 4. The Space builds and serves on port **7860**. Public URL:
    `https://<user>-<space>.hf.space`. Test:
 

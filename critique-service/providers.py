@@ -184,6 +184,7 @@ def make_provider_registry() -> list[provider]:
             api_key=tempkey,
             models=(
                 "meta/llama-3.3-70b-instruct",
+                "nvidia/llama-3.1-nemotron-ultra-253b-v1",
                 "nvidia/llama-3.3-nemotron-super-49b-v1",
                 "deepseek-ai/deepseek-r1",
                 "meta/llama-4-maverick-17b-128e-instruct",
@@ -191,6 +192,24 @@ def make_provider_registry() -> list[provider]:
             ),
             rpm=40,
             note="free credits, generous rpm, broad model lineup.",
+        ))
+
+    # z.ai (zhipu) - native GLM family, OpenAI-compatible endpoint. lets us use the
+    # latest GLM (e.g. glm-5.1) on z.ai's own free allotment instead of paying for
+    # it on OpenRouter's passthrough.
+    tempkey = os.environ.get("ZAI_API_KEY", "").strip()
+    if tempkey:
+        providers.append(provider(
+            name="zai",
+            url="https://api.z.ai/api/paas/v4/chat/completions",
+            api_key=tempkey,
+            models=(
+                "glm-5.1",
+                "glm-4.7",
+                "glm-4.5-air",
+            ),
+            rpm=30,
+            note="native GLM access (z.ai). latest GLM without OpenRouter's paid passthrough.",
         ))
 
     return providers
