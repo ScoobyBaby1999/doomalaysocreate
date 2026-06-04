@@ -95,6 +95,22 @@ response has the same shape with a `merged` field (verifier→PASS/FAIL vote,
 generator→each model's answer). Reach for this to make frontier models do focused
 work while you drive.
 
+## Slow frontier panels — use async + poll
+
+The default panel is frontier reasoning models (GLM 5.1, DeepSeek V4 Pro, Kimi) that
+can take minutes. For these, **add `"async": true`** to the POST and you get a
+`job_id` immediately, then poll:
+
+```bash
+JID=$(curl -sS -X POST "$CRITIQUE_URL/api/panel" -H "Authorization: Bearer $CRITIQUE_TOKEN" \
+  -H "Content-Type: application/json" --data @body.json | jq -r .job_id)
+# poll every ~15s until .meta.complete == true; show partial results meanwhile
+curl -sS "$CRITIQUE_URL/api/jobs/$JID" -H "Authorization: Bearer $CRITIQUE_TOKEN" | jq
+```
+
+Each judge is independent: report the ones that have `status:"done"` as they land,
+note any still `running`, and don't wait on a straggler — present what's finished.
+
 ## Caveats to relay when relevant
 
 - The service is hosted on a free Hugging Face Space that **sleeps when idle**, so

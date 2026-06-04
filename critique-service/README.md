@@ -56,6 +56,27 @@ Merge defaults: critiquer→`dedupe` (consolidated bullets, consensus tagged),
 verifier→`vote` (PASS/FAIL tally + reasons), generator/transformer/parser/planner→`concat`
 (each model's full answer, labelled).
 
+### Async jobs — decoupled judges (recommended for frontier panels)
+
+Frontier reasoning models are slow (DeepSeek V4 Pro can think for minutes). Add
+`"async": true` to any `POST /api/critique` or `POST /api/panel` and you get a
+**`job_id` back instantly** (HTTP 202). Each judge then runs **completely
+independently** on a background loop — one stalling or failing never affects the
+others — and you poll for partial results:
+
+```
+POST /api/panel  { ..., "async": true }      -> 202 { "job_id": "...", "status": "running", "judges": [pending...] }
+GET  /api/jobs/<job_id>   (same bearer token) -> { "status": "running|complete",
+                                                   "judges": [{model, status: pending|running|done|error, output|error}],
+                                                   "merged": "<merge of whatever has finished so far>",
+                                                   "meta": {judges_settled, judges_total, complete} }
+```
+
+Poll until `meta.complete` is true (or just read partial results whenever you like).
+Per-judge timeout is `JUDGE_TIMEOUT_S` (default 900s); jobs are kept in memory for
+6h. This is the decoupled, no-rotation execution model — each model is its own
+fire-and-forget task.
+
 ### `POST /api/critique`  *(Bearer token required)*
 
 ```jsonc

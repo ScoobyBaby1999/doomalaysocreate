@@ -7,10 +7,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import httpx
-
-from content.roles import looks_like_refusal, make_prompt
-from merge import merge_critiques, merge_panel
+from content.roles import make_prompt
+from jobs import JobRunner, finalize_judges, run_panel_slots
 from oplog import log_event
 from providers import (
     make_model_family,
@@ -20,7 +18,6 @@ from providers import (
     provider,
     slot,
 )
-from scheduler import ProviderError, SlotScheduler, call_slot
 
 # ---------------------------------------------------------------------------
 # loom's multi-model critique panel, exposed as a slim standalone service.
@@ -65,7 +62,7 @@ OUTPUT_RULES = (
 )
 
 CRITIQUE_MAX_TOKENS = int(os.environ.get("CRITIQUE_MAX_TOKENS", "1500"))
-JUDGE_TIMEOUT_S = float(os.environ.get("JUDGE_TIMEOUT_S", "300"))  # frontier reasoning models are slow
+JUDGE_TIMEOUT_S = float(os.environ.get("JUDGE_TIMEOUT_S", "900"))  # frontier reasoning models are slow; async mode makes long waits free
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", str(1_000_000)))
 
 # generalized /api/panel: any loom role (or a fully custom system prompt) fanned
@@ -180,111 +177,42 @@ def build_system_prompt(fmt: str, plan: str, inline_rubric: str | None,
                        output_rules=OUTPUT_RULES, inputs=plan)
 
 
-async def _run_one_judge(client: httpx.AsyncClient, scheduler: SlotScheduler,
-                         picked: slot, system_prompt: str, sem: asyncio.Semaphore,
-                         *, user_msg: str, max_tokens: int) -> dict:
-    async with sem:
-        await scheduler.wait_for_provider_pacing(picked)
-        try:
-            content = await call_slot(
-                client, picked,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_msg},
-                ],
-                max_tokens=max_tokens,
-                timeout_s=JUDGE_TIMEOUT_S,
-            )
-        except ProviderError as e:
-            err = str(e)
-            code = err.split(":", 1)[0]
-            scheduler.record_failure(picked, code, reason=err[:400])
-            return {"model": picked.who, "ok": False, "error": err[:300]}
-
-        text = content.strip()
-        if looks_like_refusal(text):
-            scheduler.record_failure(picked, "refusal", reason=text[:160])
-            return {"model": picked.who, "ok": False, "error": f"refusal: {text[:160]!r}"}
-
-        scheduler.record_success(picked)
-        return {"model": picked.who, "ok": True, "output": text}
-
-
-async def run_panel(panel: Panel, system_prompt: str, panel_override: list[str] | None,
-                    *, user_msg: str, max_tokens: int) -> list[dict]:
-    #   the portable core: resolve the panel, fan out in parallel (per-provider
-    #   pacing via the scheduler), and return one result dict per judge. a judge
-    #   whose provider has no key returns ok:false rather than vanishing.
-    who_list = panel_override or panel.default_panel
-    picked_slots: list[slot] = []
-    missing: list[dict] = []
-    for who in who_list:
-        s = panel.resolve(who)
-        if s is None:
-            missing.append({"model": who, "ok": False,
-                            "error": "not registered (provider has no API key configured)"})
-        else:
-            picked_slots.append(s)
-
-    results: list[dict] = []
-    if picked_slots:
-        scheduler = SlotScheduler(picked_slots)
-        sem = asyncio.Semaphore(max(1, panel.max_parallel))
-        async with httpx.AsyncClient() as client:
-            results = await asyncio.gather(*[
-                _run_one_judge(client, scheduler, s, system_prompt, sem,
-                               user_msg=user_msg, max_tokens=max_tokens)
-                for s in picked_slots
-            ])
-    return results + missing
-
-
-async def run_critique(panel: Panel, plan: str, fmt_req: str,
-                       panel_override: list[str] | None,
-                       inline_rubric: str | None) -> dict:
-    t0 = time.monotonic()
-
+def build_critique_params(panel: Panel, plan: str, fmt_req: str,
+                          panel_override: list[str] | None,
+                          inline_rubric: str | None) -> dict:
+    #   resolve a critique request into a provider-agnostic execution plan that
+    #   either run_sync() or the JobRunner can carry out.
     if fmt_req == "markdown":
         fmt = "markdown"
     elif fmt_req == "schematic":
         fmt = "schematic"
     else:
         fmt, _ = detect_format(plan)
-
     system_prompt = build_system_prompt(fmt, plan, inline_rubric, panel.default_rubric)
-    judges = await run_panel(panel, system_prompt, panel_override,
-                             user_msg="Produce the requested critique now.",
-                             max_tokens=CRITIQUE_MAX_TOKENS)
-    #   back-compat: legacy /api/critique exposes each judge's text as "critique".
-    for j in judges:
-        if j.get("ok") and "output" in j:
-            j["critique"] = j.pop("output")
-
-    merged = merge_critiques(judges)
-    ok_count = sum(1 for j in judges if j.get("ok"))
-    elapsed = round(time.monotonic() - t0, 2)
-    log_event("critique_done", format=fmt, judges_total=len(judges),
-              judges_ok=ok_count, elapsed_s=elapsed)
     return {
+        "kind": "critique",
+        "role": panel.default_rubric,
+        "merge": "dedupe",
+        "system_prompt": system_prompt,
+        "user_msg": "Produce the requested critique now.",
+        "max_tokens": CRITIQUE_MAX_TOKENS,
+        "who_list": list(panel_override or panel.default_panel),
         "format_detected": fmt,
-        "judges": judges,
-        "merged": merged,
-        "meta": {"elapsed_s": elapsed, "judges_ok": ok_count, "judges_total": len(judges)},
     }
 
 
-async def run_panel_request(panel: Panel, *, input_text: str, role: str,
-                            system: str | None, instructions: str | None,
-                            output_rules: str | None, template: str | None,
-                            panel_override: list[str] | None, merge_mode: str | None,
-                            max_tokens: int | None) -> dict:
-    #   generalized fan-out: any loom role, or a fully custom system prompt. this is
-    #   what turns the "critique panel" into a general "ask my frontier-model panel
-    #   to do X" service (critique, generate, verify, transform, parse, plan).
-    t0 = time.monotonic()
+def build_panel_params(panel: Panel, *, input_text: str, role: str,
+                       system: str | None, instructions: str | None,
+                       output_rules: str | None, template: str | None,
+                       panel_override: list[str] | None, merge_mode: str | None,
+                       max_tokens: int | None) -> dict:
+    #   generalized: any loom role, or a fully custom system prompt. this is what
+    #   turns the critique panel into a general "ask my frontier panel to do X".
     if system:
         system_prompt = f"{system.strip()}\n\n## Input\n{input_text}"
         role_label = "custom"
+        mode = merge_mode or "concat"
+        mt = max_tokens or 4000
     else:
         system_prompt = make_prompt(
             role,
@@ -294,23 +222,54 @@ async def run_panel_request(panel: Panel, *, input_text: str, role: str,
             template=template or "",
         )
         role_label = role
-
-    mode = merge_mode or ROLE_DEFAULT_MERGE.get(role, "none")
-    mt = max_tokens or ROLE_DEFAULT_MAX_TOKENS.get(role, 2000)
-    judges = await run_panel(panel, system_prompt, panel_override,
-                             user_msg="Produce the requested output now.", max_tokens=mt)
-    merged = merge_panel(judges, mode)
-    ok_count = sum(1 for j in judges if j.get("ok"))
-    elapsed = round(time.monotonic() - t0, 2)
-    log_event("panel_done", role=role_label, merge=mode,
-              judges_total=len(judges), judges_ok=ok_count, elapsed_s=elapsed)
+        mode = merge_mode or ROLE_DEFAULT_MERGE.get(role, "none")
+        mt = max_tokens or ROLE_DEFAULT_MAX_TOKENS.get(role, 2000)
     return {
+        "kind": "panel",
         "role": role_label,
         "merge": mode,
-        "judges": judges,
-        "merged": merged,
-        "meta": {"elapsed_s": elapsed, "judges_ok": ok_count, "judges_total": len(judges)},
+        "system_prompt": system_prompt,
+        "user_msg": "Produce the requested output now.",
+        "max_tokens": mt,
+        "who_list": list(panel_override or panel.default_panel),
     }
+
+
+async def run_sync(panel: Panel, params: dict) -> dict:
+    #   synchronous execution: every judge in parallel and independent, returns
+    #   once all have settled. for slow frontier panels prefer async (JobRunner).
+    t0 = time.monotonic()
+    judges = await run_panel_slots(
+        panel, params["who_list"], params["system_prompt"],
+        user_msg=params["user_msg"], max_tokens=params["max_tokens"],
+        timeout_s=JUDGE_TIMEOUT_S,
+    )
+    finished, merged = finalize_judges(judges, params["kind"], params["merge"])
+    ok_count = sum(1 for j in finished if j.get("ok"))
+    elapsed = round(time.monotonic() - t0, 2)
+    log_event("panel_sync_done", req_kind=params["kind"], role=params["role"],
+              merge=params["merge"], judges_total=len(finished),
+              judges_ok=ok_count, elapsed_s=elapsed)
+    resp: dict = {
+        "role": params["role"],
+        "merge": params["merge"],
+        "judges": finished,
+        "merged": merged,
+        "meta": {"elapsed_s": elapsed, "judges_ok": ok_count, "judges_total": len(finished)},
+    }
+    if params["kind"] == "critique":
+        return {"format_detected": params.get("format_detected"), **resp}
+    return resp
+
+
+def submit_async(server_jobs: JobRunner, params: dict) -> dict:
+    #   hand the execution plan to the background JobRunner; returns the initial
+    #   (all-pending) snapshot immediately. the client polls GET /api/jobs/<id>.
+    return server_jobs.submit(
+        who_list=params["who_list"], system_prompt=params["system_prompt"],
+        user_msg=params["user_msg"], max_tokens=params["max_tokens"],
+        role=params["role"], merge_mode=params["merge"], kind=params["kind"],
+    )
 
 
 # --- HTTP layer -------------------------------------------------------------
@@ -345,7 +304,8 @@ class Handler(BaseHTTPRequestHandler):
         return  # telemetry goes through oplog; suppress the stderr access log spam
 
     def do_GET(self) -> None:
-        if self.path.rstrip("/") in ("", "/health"):
+        route = self.path.rstrip("/")
+        if route in ("", "/health"):
             panel: Panel = self.server.panel  # type: ignore[attr-defined]
             self._send_json(200, {
                 "service": "loom model panel",
@@ -358,10 +318,25 @@ class Handler(BaseHTTPRequestHandler):
                 "endpoints": {
                     "POST /api/critique": "critique a plan/schematic (preset)",
                     "POST /api/panel": "general: any role or custom system prompt",
+                    "GET /api/jobs/<id>": "poll an async job (when called with async:true)",
                 },
+                "async": "add \"async\": true to any POST to get a job_id back instantly; "
+                         "each judge runs independently, poll GET /api/jobs/<id> for partial results",
                 "roles": list(VALID_ROLES),
                 "merge_modes": list(MERGE_MODES),
             })
+            return
+        if route.startswith("/api/jobs/"):
+            #   polling an async job needs the same bearer token as submitting one.
+            if not _token_ok(self.headers.get("Authorization")):
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            job_id = route[len("/api/jobs/"):]
+            snap = self.server.jobs.snapshot(job_id)  # type: ignore[attr-defined]
+            if snap is None:
+                self._send_json(404, {"error": "no such job (unknown id or expired)"})
+                return
+            self._send_json(200, snap)
             return
         self._send_json(404, {"error": "not found"})
 
@@ -404,27 +379,29 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             return
         panel: Panel = self.server.panel  # type: ignore[attr-defined]
+        is_async = bool(payload.get("async"))
 
         try:
             if route == "/api/critique":
-                coro = self._build_critique(payload, panel)
+                params = self._params_critique(payload, panel)
             else:
-                coro = self._build_panel(payload, panel)
+                params = self._params_panel(payload, panel)
         except _BadRequest as e:
             self._send_json(400, {"error": str(e)})
             return
-        if coro is None:
-            return
 
         try:
-            result = asyncio.run(coro)
+            if is_async:
+                snap = submit_async(self.server.jobs, params)  # type: ignore[attr-defined]
+                self._send_json(202, snap)
+            else:
+                result = asyncio.run(run_sync(panel, params))
+                self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 - never leak a stack trace to the client
             log_event("request_error", route=route, error=repr(e)[:300])
             self._send_json(500, {"error": f"internal error: {type(e).__name__}"})
-            return
-        self._send_json(200, result)
 
-    def _build_critique(self, payload: dict, panel: Panel):
+    def _params_critique(self, payload: dict, panel: Panel) -> dict:
         plan = payload.get("plan")
         if not isinstance(plan, str) or not plan.strip():
             raise _BadRequest("'plan' (non-empty string) is required")
@@ -437,9 +414,10 @@ class Handler(BaseHTTPRequestHandler):
         inline_rubric = payload.get("rubric")
         if inline_rubric is not None and not isinstance(inline_rubric, str):
             raise _BadRequest("'rubric' must be a string")
-        return run_critique(panel, plan, fmt_req, panel_override or None, inline_rubric or None)
+        return build_critique_params(panel, plan, fmt_req, panel_override or None,
+                                     inline_rubric or None)
 
-    def _build_panel(self, payload: dict, panel: Panel):
+    def _params_panel(self, payload: dict, panel: Panel) -> dict:
         input_text = payload.get("input")
         if not isinstance(input_text, str) or not input_text.strip():
             raise _BadRequest("'input' (non-empty string) is required")
@@ -462,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
         panel_override = payload.get("panel")
         if not self._valid_panel(panel_override):
             raise _BadRequest("'panel' must be a list of 'provider/model' strings")
-        return run_panel_request(
+        return build_panel_params(
             panel, input_text=input_text, role=role, system=system or None,
             instructions=payload.get("instructions"), output_rules=payload.get("output_rules"),
             template=payload.get("template"), panel_override=panel_override or None,
@@ -480,6 +458,7 @@ def main() -> int:
 
     server = ThreadingHTTPServer((host, port), Handler)
     server.panel = panel  # type: ignore[attr-defined]
+    server.jobs = JobRunner(panel, judge_timeout_s=JUDGE_TIMEOUT_S)  # type: ignore[attr-defined]
 
     log_event("startup", host=host, port=port,
               providers=[p.name for p in panel.providers],
