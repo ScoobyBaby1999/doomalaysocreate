@@ -75,13 +75,15 @@ jobs:
           last = None
           for attempt in range(1, 7):
               try:
+                  # NOTE: no delete_patterns - that forces a recursive repo-tree
+                  # listing which HF hard-rate-limits (429). A plain upload skips
+                  # that call. Our filename set is stable, so stale files are a
+                  # non-issue; renamed files can be pruned manually if ever needed.
                   api.upload_folder(
                       folder_path="_space",
                       repo_id="ScoobyBaby1999/Loom",
                       repo_type="space",
                       commit_message=f"Sync critique-service from GitHub @ {os.environ.get('GITHUB_SHA','')[:7]}",
-                      # remove files that no longer exist in the source (keep LFS config)
-                      delete_patterns=["*", "!.gitattributes"],
                   )
                   print("Deployed to https://huggingface.co/spaces/ScoobyBaby1999/Loom")
                   break
