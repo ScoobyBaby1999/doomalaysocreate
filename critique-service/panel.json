@@ -1,0 +1,21 @@
+{
+  "//": "The judge panel. EDIT THIS FILE to change judges - no code changes needed.",
+  "//1": "Each 'slot' is 'provider/model'. Any provider/model named here is registered",
+  "//2": "on the fly against that provider's API key, so you can name newer models",
+  "//3": "than loom's built-in catalog (e.g. glm-5.1, the largest nemotron).",
+  "//4": "Panel chosen with the user: GLM 5.1 + largest Nemotron Super + DeepSeek-R1",
+  "//5": "+ Qwen-3-235B  ->  4 families across 3 providers (uncorrelated critiques).",
+  "//6": "VERIFY these two slugs against the provider catalogs - they are newer than",
+  "//7": "loom's registry. If a slug is wrong, that one judge returns ok:false and the",
+  "//8": "request still succeeds; just correct the string below.",
+
+  "judges": [
+    {"slot": "openrouter/z-ai/glm-5.1",                          "weight": 1, "note": "GLM 5.1 - user-confirmed good judge; verify OpenRouter slug"},
+    {"slot": "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1",   "weight": 1, "note": "largest Nemotron Super on NVIDIA NIM ('120b if not higher'); verify slug"},
+    {"slot": "nvidia/deepseek-ai/deepseek-r1",                   "weight": 1, "note": "reasoning model, very different error profile"},
+    {"slot": "cerebras/qwen-3-235b-a22b-instruct-2507",          "weight": 1, "note": "largest Qwen, very fast"}
+  ],
+
+  "max_parallel": 4,
+  "rubric": "critiquer"
+}
