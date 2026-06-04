@@ -65,7 +65,7 @@ OUTPUT_RULES = (
 )
 
 CRITIQUE_MAX_TOKENS = int(os.environ.get("CRITIQUE_MAX_TOKENS", "1500"))
-JUDGE_TIMEOUT_S = float(os.environ.get("JUDGE_TIMEOUT_S", "180"))
+JUDGE_TIMEOUT_S = float(os.environ.get("JUDGE_TIMEOUT_S", "300"))  # frontier reasoning models are slow
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", str(1_000_000)))
 
 # generalized /api/panel: any loom role (or a fully custom system prompt) fanned
