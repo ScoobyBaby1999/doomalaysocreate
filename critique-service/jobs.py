@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import os
 import secrets
 import threading
 import time
@@ -28,31 +29,50 @@ from scheduler import ProviderError, call_slot
 
 JOB_TTL_S = 6 * 3600.0   # keep finished jobs pollable for a while, then drop
 
+# per-judge retry: same model, not rotation. transient throttle/overload codes get
+# a few backed-off retries (free tiers 429 under load; NVIDIA's gateway 504s on long
+# reasoning; OpenRouter sometimes returns empty). hard 4xx (auth/not-found) never retry.
+JUDGE_RETRIES = int(os.environ.get("JUDGE_RETRIES", "2"))         # extra attempts after the first
+JUDGE_BACKOFF_S = float(os.environ.get("JUDGE_BACKOFF_S", "8"))   # linear backoff base
+RETRYABLE_CODES = {"429", "5xx", "524", "http", "empty"}
+
 
 async def call_judge(client: httpx.AsyncClient, picked, system_prompt: str, *,
                      user_msg: str, max_tokens: int, timeout_s: float) -> dict:
-    #   one model, one call. never raises - always returns a result dict so a
-    #   failure is just data, not an exception that could disturb a sibling.
+    #   one model, retried on transient failures, never raising. a failure is data.
     t0 = time.monotonic()
-    try:
-        content = await call_slot(
-            client, picked,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
-            ],
-            max_tokens=max_tokens, timeout_s=timeout_s,
-        )
-        text = content.strip()
-        if looks_like_refusal(text):
-            res = {"model": picked.who, "ok": False, "error": f"refusal: {text[:160]!r}"}
-        else:
-            res = {"model": picked.who, "ok": True, "output": text}
-    except ProviderError as e:
-        res = {"model": picked.who, "ok": False, "error": str(e)[:300]}
-    except Exception as e:  # noqa: BLE001 - isolate every failure mode per judge
-        res = {"model": picked.who, "ok": False, "error": f"{type(e).__name__}: {str(e)[:180]}"}
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_msg},
+    ]
+    last_err = ""
+    attempts = 0
+    for attempt in range(JUDGE_RETRIES + 1):
+        attempts = attempt + 1
+        try:
+            content = await call_slot(client, picked, messages=messages,
+                                      max_tokens=max_tokens, timeout_s=timeout_s)
+            text = content.strip()
+            if looks_like_refusal(text):
+                res = {"model": picked.who, "ok": False, "error": f"refusal: {text[:160]!r}"}
+            else:
+                res = {"model": picked.who, "ok": True, "output": text}
+            break
+        except ProviderError as e:
+            last_err = str(e)
+            code = last_err.split(":", 1)[0]
+            if code in RETRYABLE_CODES and attempt < JUDGE_RETRIES:
+                wait = JUDGE_BACKOFF_S * (attempt + 1)
+                log_event("judge_retry", slot=picked.who, code=code, attempt=attempt + 1, wait_s=wait)
+                await asyncio.sleep(wait)
+                continue
+            res = {"model": picked.who, "ok": False, "error": last_err[:300]}
+            break
+        except Exception as e:  # noqa: BLE001 - isolate every failure mode per judge
+            res = {"model": picked.who, "ok": False, "error": f"{type(e).__name__}: {str(e)[:180]}"}
+            break
     res["elapsed_s"] = round(time.monotonic() - t0, 1)
+    res["attempts"] = attempts
     return res
 
 
