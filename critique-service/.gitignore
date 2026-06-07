@@ -10,3 +10,6 @@ __pycache__/
 venv/
 *.egg-info/
 .pytest_cache/
+
+# local metrics cache (durable copy lives in the HF Dataset, not the repo)
+data/

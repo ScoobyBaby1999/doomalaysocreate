@@ -1,9 +1,11 @@
 from __future__ import annotations
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from content.roles import Roles
+from oplog import log_event
 
 # providers and slots: top-level registry of llm endpoints and the (provider, model)
 # pairs they expose. each slot carries which roles it's allowed to play.
@@ -15,6 +17,17 @@ from content.roles import Roles
 # provider's key, even if it isn't listed below (see critique_service.ensure_panel_slots).
 
 
+# every panel slot is allowed to play every role. the critique service calls
+# judges directly and does NOT use pick_slot's role-eligibility to gate them
+# (a frontier "generator" model is still a perfectly good "critiquer" here), so
+# slots are built with the full role set and rotation/failover never blocks on role.
+FULL_ROLES: tuple[Roles, ...] = (
+    Roles("planner"), Roles("parser"),
+    Roles("critiquer"), Roles("verifier"),
+    Roles("generator"), Roles("transformer"),
+)
+
+
 @dataclass(frozen=True)
 class provider:
     name: str
@@ -24,6 +37,13 @@ class provider:
     rpm: int = 30                                       # rate per minute
     extra_headers: dict = field(default_factory=dict)   # some providers want custom headers
     note: str = ""
+    pool: str = "core"                                  # "core" | "optin"
+    region: str = ""
+    rpd: int | None = None                              # requests/day (published free-tier ceiling)
+    tpm: int | None = None                              # tokens/minute
+    tpd: int | None = None                              # tokens/day
+    concurrency: int | None = None
+    monthly_credit: str = ""
 
 
 @dataclass(frozen=True)
@@ -31,11 +51,7 @@ class slot:
     provider: provider
     model: str
     model_family: str
-    roles: tuple[Roles, ...] = (
-        Roles("planner"), Roles("parser"),
-        Roles("critiquer"), Roles("verifier"),
-        Roles("generator"), Roles("transformer"),
-    )
+    roles: tuple[Roles, ...] = FULL_ROLES
 
     @property
     def who(self) -> str:
@@ -113,154 +129,103 @@ def make_model_role(models: str) -> tuple[Roles, ...]:
     )
 
 
-# every provider we know about. only ones with an api key in env are returned.
-# this is the *base catalog* of verified-good models; panel.json may name newer
-# ones (e.g. glm-5.1, the largest nemotron) that get registered on the fly.
+# --- catalog loaders --------------------------------------------------------
+# providers_catalog.json is the single source of truth for hosts + their free-tier
+# limits; models_catalog.json maps logical names to ordered (provider, model)
+# candidates. both are tolerant of // line comments so they can stay annotated.
+
+HERE = Path(__file__).resolve().parent
+PROVIDERS_CATALOG_PATH = Path(os.environ.get("PROVIDERS_CATALOG", HERE / "providers_catalog.json"))
+MODELS_CATALOG_PATH = Path(os.environ.get("MODELS_CATALOG", HERE / "models_catalog.json"))
+
+
+def _load_json_commented(path: Path) -> dict:
+    raw = path.read_text(encoding="utf-8")
+    no_comments = "\n".join(
+        line for line in raw.splitlines() if not line.lstrip().startswith("//")
+    )
+    return json.loads(no_comments)
+
+
+def load_provider_catalog() -> list[dict]:
+    return _load_json_commented(PROVIDERS_CATALOG_PATH).get("providers", [])
+
+
+def load_models_catalog() -> dict[str, dict]:
+    return _load_json_commented(MODELS_CATALOG_PATH).get("logical_models", {})
+
+
+def _first_env(env_var) -> str:
+    #   env_var may be a single name or a list (first present wins).
+    names = [env_var] if isinstance(env_var, str) else list(env_var or [])
+    for name in names:
+        val = os.environ.get(name, "").strip()
+        if val:
+            return val
+    return ""
+
+
+def _opted_in() -> set[str]:
+    raw = os.environ.get("OPTIN_PROVIDERS", "")
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
 
 def make_provider_registry() -> list[provider]:
+    #   build the live provider list from providers_catalog.json. a provider is
+    #   registered only when its key (and any 'requires' vars) are present, and it
+    #   is either pool=="core" or explicitly opted in via OPTIN_PROVIDERS.
     load_env()
+    opted_in = _opted_in()
     providers: list[provider] = []
-
-    # openrouter - shared free quota, easy to 429 across all users.
-    tempkey = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if tempkey:
+    for entry in load_provider_catalog():
+        name = entry["name"]
+        pool = entry.get("pool", "core")
+        if pool != "core" and name not in opted_in:
+            continue
+        api_key = _first_env(entry.get("env_var"))
+        if not api_key:
+            continue
+        #       extra required env vars (e.g. CF_ACCOUNT_ID) must all be present.
+        requires = entry.get("requires", [])
+        missing = [v for v in requires if not os.environ.get(v, "").strip()]
+        if missing:
+            log_event("provider_skipped", provider=name, reason=f"missing {missing}")
+            continue
+        #       fill {VAR} placeholders in the base_url from the environment.
+        url = entry["base_url"]
+        for var in requires:
+            url = url.replace("{" + var + "}", os.environ.get(var, "").strip())
+        limits = entry.get("limits", {}) or {}
         providers.append(provider(
-            name="openrouter",
-            url="https://openrouter.ai/api/v1/chat/completions",
-            api_key=tempkey,
-            models=(
-                "nousresearch/hermes-3-llama-3.1-405b:free",
-                "qwen/qwen3-coder:free",
-                "qwen/qwen3-next-80b-a3b-instruct:free",
-                "meta-llama/llama-3.3-70b-instruct:free",
-                "z-ai/glm-4.5-air:free",
-                "google/gemma-3-27b-it:free",
-            ),
-            rpm=20,
-            extra_headers={
-                "HTTP-Referer": "https://huggingface.co/spaces",
-                "X-Title": "loom critique panel",
-            },
-            note="mostly shared quota, once it 429's it stays capped for a long time.",
+            name=name,
+            url=url,
+            api_key=api_key,
+            models=tuple(entry.get("models", [])),
+            rpm=int(limits.get("rpm") or 30),
+            extra_headers=dict(entry.get("extra_headers", {})),
+            note=entry.get("note", ""),
+            pool=pool,
+            region=entry.get("region", ""),
+            rpd=limits.get("rpd"),
+            tpm=limits.get("tpm"),
+            tpd=limits.get("tpd"),
+            concurrency=limits.get("concurrency"),
+            monthly_credit=limits.get("monthly_credit", ""),
         ))
-
-    # cerebras - very fast, capped at ~1m tokens/day.
-    tempkey = os.environ.get("CEREBRAS_API_KEY", "").strip()
-    if tempkey:
-        providers.append(provider(
-            name="cerebras",
-            url="https://api.cerebras.ai/v1/chat/completions",
-            api_key=tempkey,
-            models=(
-                "qwen-3-235b-a22b-instruct-2507",
-                "llama3.1-8b",
-            ),
-            rpm=40,
-            note=">2000 tokens/sec, 1M tokens/day cap.",
-        ))
-
-    # groq - fastest provider, low daily budget.
-    tempkey = os.environ.get("GROQ_API_KEY", "").strip()
-    if tempkey:
-        providers.append(provider(
-            name="groq",
-            url="https://api.groq.com/openai/v1/chat/completions",
-            api_key=tempkey,
-            models=(
-                "llama-3.3-70b-versatile",
-                "llama-3.1-8b-instant",
-                "qwen/qwen3-32b",
-            ),
-            rpm=30,
-            note="30 rpm, ~14.4k req/day. fastest provider.",
-        ))
-
-    # nvidia nim - openai-compat, free credits, generous rpm.
-    tempkey = os.environ.get("NVIDIA_API_KEY", "").strip()
-    if tempkey:
-        providers.append(provider(
-            name="nvidia",
-            url="https://integrate.api.nvidia.com/v1/chat/completions",
-            api_key=tempkey,
-            models=(
-                "meta/llama-3.3-70b-instruct",
-                "nvidia/llama-3.1-nemotron-ultra-253b-v1",
-                "nvidia/llama-3.3-nemotron-super-49b-v1",
-                "deepseek-ai/deepseek-r1",
-                "meta/llama-4-maverick-17b-128e-instruct",
-                "qwen/qwen2.5-coder-32b-instruct",
-            ),
-            rpm=40,
-            note="free credits, generous rpm, broad model lineup.",
-        ))
-
-    # z.ai (zhipu) - native GLM family, OpenAI-compatible endpoint. lets us use the
-    # latest GLM (e.g. glm-5.1) on z.ai's own free allotment instead of paying for
-    # it on OpenRouter's passthrough.
-    tempkey = os.environ.get("ZAI_API_KEY", "").strip()
-    if tempkey:
-        providers.append(provider(
-            name="zai",
-            url="https://api.z.ai/api/paas/v4/chat/completions",
-            api_key=tempkey,
-            models=(
-                "glm-5.1",
-                "glm-4.7",
-                "glm-4.5-air",
-            ),
-            rpm=30,
-            note="native GLM access (z.ai). latest GLM without OpenRouter's paid passthrough.",
-        ))
-
-    # moonshot (kimi) - native Kimi access, OpenAI-compatible. signup grants free
-    # trial credits; kimi-k2.6 is the current frontier model (apr 2026).
-    tempkey = os.environ.get("MOONSHOT_API_KEY", "").strip()
-    if tempkey:
-        providers.append(provider(
-            name="moonshot",
-            url="https://api.moonshot.ai/v1/chat/completions",
-            api_key=tempkey,
-            models=(
-                "kimi-k2.6",
-                "kimi-k2.5",
-                "kimi-k2-0905-preview",
-            ),
-            rpm=30,
-            note="native Kimi (Moonshot). frontier model, OpenAI-compatible.",
-        ))
-
-    # google gemini - OpenAI-compatible endpoint, free tier via AI Studio. modest
-    # rpm but fine for an occasional judge panel. not in the default panel, but
-    # registered so it can be baked off via a panel override.
-    tempkey = os.environ.get("GOOGLE_API_KEY", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
-    if tempkey:
-        providers.append(provider(
-            name="google",
-            url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-            api_key=tempkey,
-            models=(
-                "gemini-2.5-flash",
-                "gemini-2.5-pro",
-                "gemini-2.0-flash",
-            ),
-            rpm=15,
-            note="gemini via openai-compat endpoint. free tier, modest rpm.",
-        ))
-
     return providers
 
 
+def make_slot(prov: provider, model: str) -> slot:
+    #   one slot, full role set (no role-gating in this service).
+    return slot(provider=prov, model=model, model_family=make_model_family(model))
+
+
 def make_slot_registry(providers: list[provider]) -> list[slot]:
-    #   one slot per (provider, model). family + role tuple are derived once here.
+    #   one slot per (provider, model), each with the full role set.
     slots: list[slot] = []
     for p in providers:
         for model in p.models:
-            slots.append(slot(
-                provider=p,
-                model=model,
-                model_family=make_model_family(model),
-                roles=make_model_role(model),
-            ))
+            slots.append(make_slot(p, model))
     return slots
 
 

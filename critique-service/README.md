@@ -8,27 +8,32 @@ transform, parse, plan — or a fully custom system prompt. Built to deploy free
 **Hugging Face Spaces (Docker)**, reachable from anywhere including the Claude Code
 mobile app on Android.
 
-> Ported from loom's `backend/` — it reuses loom's provider registry, the
-> `SlotScheduler`/`call_slot` rate-limit-aware rotation, and the role rubrics. The
-> dashboard, task queue, and file-writing state machinery are left behind. The full
-> planner→runner multi-stage pipeline is a planned Phase 2.
+> Ported from loom's `backend/` and evolved into a **cost-aware routing gateway**:
+> it reuses loom's `SlotScheduler`/`call_slot`, now *activated* for live rotation +
+> **cross-provider failover**, plus a **per-profile metrics substrate** that records
+> real-world cost/throttle/latency so model selection and fan-out staging can be
+> tuned over time without burning quota.
 
-## Why a panel
+## Why a gateway
 
 Top models as on-demand aids: Claude does the heavy lifting, a panel of frontier
-models gives critical, *uncorrelated* second opinions. Each judge runs on a
-**different provider** so no single quota is a bottleneck and a 429 on one never
-sinks the request. Default panel (editable in `panel.json`):
+models gives critical, *uncorrelated* second opinions. A request asks for a
+**logical model** (e.g. `llama-3.3-70b`); the gateway picks the best free host for
+it, paces to its rate limit, and **bounces to another provider hosting the same
+model** on any 429/5xx/empty — so no single quota is a bottleneck and a throttle on
+one host never sinks the request.
 
-| Judge | Channel | Model ID | Key |
-|---|---|---|---|
-| GLM 5.1 | Z.ai | `glm-5.1` | `ZAI_API_KEY` |
-| DeepSeek V4 Pro | NVIDIA NIM | `deepseek-ai/deepseek-v4-pro` | `NVIDIA_API_KEY` |
-| Kimi K2.6 | Moonshot | `kimi-k2.6` | `MOONSHOT_API_KEY` |
+**Providers** live in `providers_catalog.json` (core recurring-free pool + opt-in
+trial/paid). **Logical models → host candidates** live in `models_catalog.json`.
+Both are editable with zero code changes. xAI Grok is excluded entirely.
 
-Optional extra judges already wired in the registry: `google/gemini-2.5-pro`
-(`GOOGLE_API_KEY`), free OpenRouter fallbacks, and the (unused but retained)
-`cerebras/*` slots.
+| Pool | Providers | Key(s) |
+|---|---|---|
+| core (always rotated) | nvidia, google, cerebras, openrouter, groq, cloudflare, github-models | `NVIDIA_API_KEY`, `GOOGLE_API_KEY`, `CEREBRAS_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `CF_API_TOKEN`+`CF_ACCOUNT_ID`, `GITHUB_TOKEN` |
+| opt-in (`OPTIN_PROVIDERS=`) | zai, moonshot, fireworks, sambanova | `ZAI_API_KEY`, `MOONSHOT_API_KEY`, … |
+
+A request may still name a physical `provider/model` slot directly (anything with a
+`/`) to bypass logical routing — fully backward-compatible with the old `panel.json`.
 
 ## API
 
@@ -45,13 +50,21 @@ the default panel, available roles and merge modes. Used by HF's healthcheck.
   "instructions": "<task-specific directive spliced into the role rubric>",    // optional
   "output_rules": "<formatting/constraint rules>",                             // optional
   "system":       "<fully custom system prompt; overrides role if given>",     // optional
-  "panel":        ["provider/model", ...],   // optional; defaults to panel.json
+  "panel":        ["llama-3.3-70b", "glm-5.1", "provider/model", ...], // logical names OR physical slots; defaults to panel.json
   "merge":        "dedupe|vote|concat|none", // optional; sensible default per role
-  "max_tokens":   1500                        // optional
+  "max_tokens":   1500,                       // optional
+  "profile":      "default",                  // optional; metrics namespace (a user may have many)
+  "effort":       "low|med|high|max"          // optional; manual fan-out width + token/timeout budget
 }
 ```
 
-Response: `{ "role", "merge", "judges": [{model, ok, output|error}], "merged", "meta" }`.
+Response: `{ "role", "merge", "judges": [{model, ok, routed_to, output|error}], "merged", "meta" }`
+— `routed_to` is the physical `provider/model` a logical judge actually landed on after failover.
+
+**Profiles & effort.** Every call is tagged with a `profile` (a user can have many);
+all metrics are namespaced per profile so cost/throttle behaviour is tracked per
+identity, not globally. `effort` is a **manual** knob (no auto-prediction):
+`low`→1 judge/½ tokens, `med`→3, `high`→5/1.5×, `max`→all/2×.
 Merge defaults: critiquer→`dedupe` (consolidated bullets, consensus tagged),
 verifier→`vote` (PASS/FAIL tally + reasons), generator/transformer/parser/planner→`concat`
 (each model's full answer, labelled).
@@ -109,6 +122,42 @@ fire-and-forget task.
   the whole request.
 - **Consensus:** merged bullets raised by >1 judge are tagged `_(flagged by N judges)_`.
 
+## Metrics & telemetry — `GET /api/stats`, `GET /api/metrics`
+
+The point of the gateway is to **accumulate operational data** so routing decisions
+improve over time. Every judge call (real or mock) emits one per-profile event:
+provider, model, role, effort, latency, in/out tokens, ok/fail code, attempts,
+which host it routed to. Two read endpoints (same bearer token):
+
+```
+GET /api/stats                  -> live rotation/health: per-provider call counts,
+                                   cooling/blacklisted slots, plus the slot snapshot.
+GET /api/metrics?profile=<id>   -> per-profile aggregates: by provider (calls, success
+                                   rate, throttle_429 rate, avg latency, tokens) and by
+                                   model+role. Defaults to profile "default".
+```
+
+These answer: *how fast/why does a provider throttle, which model is best at which
+role, what does a fan-out actually cost* — the substrate for staging fan-outs
+without burning quota. **Persistence:** an HF Space filesystem is ephemeral, so set
+`METRICS_HF_REPO` + `HF_TOKEN` to mirror per-profile JSONL to a **private HF
+Dataset** (loaded on boot, batched/best-effort flush). Without them the store runs
+in-memory only (still queryable within a session). `set_budget_cooldown` also cools
+a provider for a profile once it crosses the catalog's published daily request/token
+ceiling.
+
+## Testing with zero quota — `MOCK_MODE`
+
+Set `MOCK_MODE=1` and `scheduler.call_slot` routes to a deterministic synthetic
+provider instead of any real endpoint, so the whole rotation/failover/metrics/effort
+stack runs with **zero real API calls**. `MOCK_FAULTS="groq=429,google=5xx"` forces
+specific failures; per-provider synthetic budgets exhaust into 429s so cooldowns are
+observable. The end-to-end scenario suite:
+
+```bash
+MOCK_MODE=1 python tools/sim_scenarios.py   # rotation, failover, budget, profile isolation, effort
+```
+
 ## The judge panel is editable — `panel.json`
 
 `panel.json` is the source of truth for the panel. **Any `provider/model` you name
@@ -156,8 +205,11 @@ curl -sS -X POST http://127.0.0.1:7860/api/critique \
 3. In **Space → Settings → Secrets**, add:
    - `CRITIQUE_TOKEN` — your bearer token
      (`python -c "import secrets; print(secrets.token_urlsafe(32))"`)
-   - the provider keys your panel uses: `ZAI_API_KEY`, `NVIDIA_API_KEY`,
-     `MOONSHOT_API_KEY` (and optionally `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`).
+   - the core provider keys you want rotated: `NVIDIA_API_KEY`, `GOOGLE_API_KEY`,
+     `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`,
+     `CF_API_TOKEN`+`CF_ACCOUNT_ID`, `GITHUB_TOKEN` (any subset).
+   - optionally `METRICS_HF_REPO` + `HF_TOKEN` for durable per-profile metrics,
+     and `OPTIN_PROVIDERS` (+ `ZAI_API_KEY`/`MOONSHOT_API_KEY`) for the opt-in pool.
 4. The Space builds and serves on port **7860**. Public URL:
    `https://<user>-<space>.hf.space`. Test:
 
@@ -191,9 +243,15 @@ reachable backbone.
 
 ```
 critique-service/
-├── critique_service.py   # the HTTP server + endpoint + parallel fan-out
-├── providers.py          # ported provider/model registry (gpt-oss excluded)
-├── scheduler.py          # ported SlotScheduler / call_slot (pacing, cooldowns)
+├── critique_service.py   # HTTP server: endpoints, profiles, effort, /api/stats + /api/metrics
+├── providers.py          # catalog-driven provider/slot registry (reads the *_catalog.json)
+├── providers_catalog.json# provider pool + published free-tier limits (core + opt-in)
+├── models_catalog.json   # logical model -> ordered (provider, model) host candidates
+├── scheduler.py          # SlotScheduler / call_slot: rotation, failover seam, pacing, cooldowns
+├── jobs.py               # route_judge (cross-provider failover) + sync/async execution
+├── metrics.py            # per-profile metrics capture + aggregation + HF-Dataset persistence
+├── mock_provider.py      # MOCK_MODE synthetic provider (zero real API calls)
+├── tools/sim_scenarios.py# quota-free end-to-end scenario suite
 ├── merge.py              # deterministic cross-judge bullet merge + consensus
 ├── oplog.py              # structured telemetry to stderr (HF Space logs)
 ├── content/

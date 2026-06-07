@@ -9,15 +9,17 @@ from pathlib import Path
 
 from content.roles import make_prompt
 from jobs import JobRunner, finalize_judges, run_panel_slots
+from metrics import MetricStore
 from oplog import log_event
 from providers import (
-    make_model_family,
-    make_model_role,
+    load_models_catalog,
     make_provider_registry,
+    make_slot,
     make_slot_registry,
     provider,
     slot,
 )
+from scheduler import SlotScheduler
 
 # ---------------------------------------------------------------------------
 # loom's multi-model critique panel, exposed as a slim standalone service.
@@ -83,24 +85,58 @@ ROLE_DEFAULT_MAX_TOKENS = {
 }
 MERGE_MODES = ("dedupe", "vote", "concat", "none")
 
+# manual effort modes (no auto-prediction). each scales how wide the fan-out is,
+# the per-judge token budget, and the per-judge timeout. applied in build_*_params.
+DEFAULT_EFFORT = os.environ.get("DEFAULT_EFFORT", "med").strip() or "med"
+EFFORT_MODES = {
+    "low":  {"num_models": 1, "max_tokens_mult": 0.5, "timeout_s": 120.0},
+    "med":  {"num_models": 3, "max_tokens_mult": 1.0, "timeout_s": 300.0},
+    "high": {"num_models": 5, "max_tokens_mult": 1.5, "timeout_s": 600.0},
+    "max":  {"num_models": 99, "max_tokens_mult": 2.0, "timeout_s": JUDGE_TIMEOUT_S},
+}
+
+
+def resolve_effort(effort: str | None) -> dict:
+    return EFFORT_MODES.get((effort or DEFAULT_EFFORT), EFFORT_MODES["med"])
+
+
+def apply_effort(params: dict, effort: str) -> dict:
+    #   trim the panel width, scale tokens, and set the per-judge timeout per the
+    #   manual effort mode. mutates + returns params.
+    cfg = resolve_effort(effort)
+    params["effort"] = effort if effort in EFFORT_MODES else DEFAULT_EFFORT
+    params["who_list"] = params["who_list"][: cfg["num_models"]]
+    params["max_tokens"] = max(64, int(params["max_tokens"] * cfg["max_tokens_mult"]))
+    params["timeout_s"] = min(JUDGE_TIMEOUT_S, cfg["timeout_s"])
+    return params
+
 
 class Panel:
-    """immutable-ish view of the configured judge panel + resolvable slots."""
+    """the configured judge panel + a shared scheduler/metrics substrate."""
 
     def __init__(self) -> None:
         self.providers: list[provider] = make_provider_registry()
         self.provider_by_name: dict[str, provider] = {p.name: p for p in self.providers}
         base_slots = make_slot_registry(self.providers)
         self.slot_by_who: dict[str, slot] = {s.who: s for s in base_slots}
+        self.logical_models: dict[str, dict] = load_models_catalog()
 
         cfg = _load_panel_cfg()
         self.default_panel: list[str] = cfg["judges"]
         self.max_parallel: int = cfg["max_parallel"]
         self.default_rubric: str = cfg["rubric"]
 
-        #   register any panel-named model that isn't in the base catalog, against
-        #   its provider's key. this is what lets panel.json name newer models
-        #   (glm-5.1, the largest nemotron) with zero code changes.
+        #   one shared scheduler over EVERY known slot (base catalog + logical
+        #   candidates + panel-named) drives rotation + cross-provider failover;
+        #   one shared metrics store captures per-profile cost/throttle/latency.
+        self.scheduler = SlotScheduler(base_slots)
+        self.metrics = MetricStore()
+
+        #   pre-register logical-model candidate slots + default-panel slots so they
+        #   join rotation from boot.
+        for spec in self.logical_models.values():
+            for cand in spec.get("candidates", []):
+                self._ensure_slot(f"{cand['provider']}/{cand['model']}")
         for who in self.default_panel:
             self._ensure_slot(who)
 
@@ -114,18 +150,31 @@ class Panel:
         if prov is None:
             #       provider not configured (no api key) - judge will report missing.
             return None
-        synth = slot(
-            provider=prov,
-            model=model,
-            model_family=make_model_family(model),
-            roles=make_model_role(model),
-        )
+        synth = make_slot(prov, model)
         self.slot_by_who[who] = synth
+        self.scheduler.add_slots([synth])
         log_event("panel_slot_registered", slot=who, provider=prov_name, model=model)
         return synth
 
     def resolve(self, who: str) -> slot | None:
         return self._ensure_slot(who)
+
+    def resolve_candidates(self, who: str) -> tuple[str, list[slot]]:
+        #   resolve a panel entry to (logical_name, ordered candidate slots).
+        #     - "provider/model" (contains '/') -> a single physical slot (back-compat).
+        #     - a logical key in models_catalog  -> every configured host for it.
+        if "/" in who:
+            s = self._ensure_slot(who)
+            return (who, [s] if s is not None else [])
+        spec = self.logical_models.get(who)
+        if spec is None:
+            return (who, [])
+        cands: list[slot] = []
+        for cand in spec.get("candidates", []):
+            s = self._ensure_slot(f"{cand['provider']}/{cand['model']}")
+            if s is not None:
+                cands.append(s)
+        return (who, cands)
 
 
 def _load_panel_cfg() -> dict:
@@ -241,14 +290,17 @@ async def run_sync(panel: Panel, params: dict) -> dict:
     t0 = time.monotonic()
     judges = await run_panel_slots(
         panel, params["who_list"], params["system_prompt"],
+        role_label=params["role"], effort=params.get("effort", DEFAULT_EFFORT),
+        profile=params.get("profile", "default"), metrics=panel.metrics,
         user_msg=params["user_msg"], max_tokens=params["max_tokens"],
-        timeout_s=JUDGE_TIMEOUT_S,
+        timeout_s=params.get("timeout_s", JUDGE_TIMEOUT_S),
     )
     finished, merged = finalize_judges(judges, params["kind"], params["merge"])
     ok_count = sum(1 for j in finished if j.get("ok"))
     elapsed = round(time.monotonic() - t0, 2)
     log_event("panel_sync_done", req_kind=params["kind"], role=params["role"],
-              merge=params["merge"], judges_total=len(finished),
+              merge=params["merge"], profile=params.get("profile", "default"),
+              effort=params.get("effort"), judges_total=len(finished),
               judges_ok=ok_count, elapsed_s=elapsed)
     resp: dict = {
         "role": params["role"],
@@ -269,6 +321,8 @@ def submit_async(server_jobs: JobRunner, params: dict) -> dict:
         who_list=params["who_list"], system_prompt=params["system_prompt"],
         user_msg=params["user_msg"], max_tokens=params["max_tokens"],
         role=params["role"], merge_mode=params["merge"], kind=params["kind"],
+        profile=params.get("profile", "default"), effort=params.get("effort", DEFAULT_EFFORT),
+        timeout_s=params.get("timeout_s"),
     )
 
 
@@ -304,7 +358,8 @@ class Handler(BaseHTTPRequestHandler):
         return  # telemetry goes through oplog; suppress the stderr access log spam
 
     def do_GET(self) -> None:
-        route = self.path.rstrip("/")
+        from urllib.parse import urlsplit
+        route = urlsplit(self.path).path.rstrip("/")
         if route in ("", "/health"):
             panel: Panel = self.server.panel  # type: ignore[attr-defined]
             self._send_json(200, {
@@ -319,12 +374,37 @@ class Handler(BaseHTTPRequestHandler):
                     "POST /api/critique": "critique a plan/schematic (preset)",
                     "POST /api/panel": "general: any role or custom system prompt",
                     "GET /api/jobs/<id>": "poll an async job (when called with async:true)",
+                    "GET /api/stats": "live rotation/health per provider + slot",
+                    "GET /api/metrics?profile=<id>": "per-profile cost/throttle/latency aggregates",
                 },
                 "async": "add \"async\": true to any POST to get a job_id back instantly; "
                          "each judge runs independently, poll GET /api/jobs/<id> for partial results",
                 "roles": list(VALID_ROLES),
                 "merge_modes": list(MERGE_MODES),
+                "effort_modes": list(EFFORT_MODES),
+                "logical_models": sorted(panel.logical_models.keys()),
             })
+            return
+        if route in ("/api/stats", "/api/metrics"):
+            #   telemetry endpoints share the bearer token with the POST routes.
+            if not _token_ok(self.headers.get("Authorization")):
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            panel: Panel = self.server.panel  # type: ignore[attr-defined]
+            if route == "/api/stats":
+                self._send_json(200, {
+                    "providers": panel.scheduler.provider_rollup(),
+                    "slots": panel.scheduler.snapshot(),
+                    "profiles": panel.metrics.profiles(),
+                })
+            else:
+                #       /api/metrics?profile=<id> (defaults to "default").
+                profile = "default"
+                if "?" in self.path:
+                    from urllib.parse import parse_qs, urlsplit
+                    q = parse_qs(urlsplit(self.path).query)
+                    profile = (q.get("profile", ["default"])[0] or "default")
+                self._send_json(200, panel.metrics.aggregates(profile))
             return
         if route.startswith("/api/jobs/"):
             #   polling an async job needs the same bearer token as submitting one.
@@ -370,6 +450,16 @@ class Handler(BaseHTTPRequestHandler):
     def _valid_panel(p) -> bool:
         return p is None or (isinstance(p, list) and all(isinstance(x, str) for x in p))
 
+    @staticmethod
+    def _profile_and_effort(payload: dict) -> tuple[str, str]:
+        profile = payload.get("profile", "default")
+        if not isinstance(profile, str) or not profile.strip() or len(profile) > 64:
+            raise _BadRequest("'profile' must be a non-empty string (<=64 chars)")
+        effort = payload.get("effort", DEFAULT_EFFORT)
+        if effort not in EFFORT_MODES:
+            raise _BadRequest(f"'effort' must be one of {list(EFFORT_MODES)}")
+        return profile.strip(), effort
+
     def do_POST(self) -> None:
         route = self.path.rstrip("/")
         if route not in ("/api/critique", "/api/panel"):
@@ -414,8 +504,11 @@ class Handler(BaseHTTPRequestHandler):
         inline_rubric = payload.get("rubric")
         if inline_rubric is not None and not isinstance(inline_rubric, str):
             raise _BadRequest("'rubric' must be a string")
-        return build_critique_params(panel, plan, fmt_req, panel_override or None,
-                                     inline_rubric or None)
+        profile, effort = self._profile_and_effort(payload)
+        params = build_critique_params(panel, plan, fmt_req, panel_override or None,
+                                       inline_rubric or None)
+        params["profile"] = profile
+        return apply_effort(params, effort)
 
     def _params_panel(self, payload: dict, panel: Panel) -> dict:
         input_text = payload.get("input")
@@ -440,12 +533,15 @@ class Handler(BaseHTTPRequestHandler):
         panel_override = payload.get("panel")
         if not self._valid_panel(panel_override):
             raise _BadRequest("'panel' must be a list of 'provider/model' strings")
-        return build_panel_params(
+        profile, effort = self._profile_and_effort(payload)
+        params = build_panel_params(
             panel, input_text=input_text, role=role, system=system or None,
             instructions=payload.get("instructions"), output_rules=payload.get("output_rules"),
             template=payload.get("template"), panel_override=panel_override or None,
             merge_mode=merge_mode, max_tokens=max_tokens,
         )
+        params["profile"] = profile
+        return apply_effort(params, effort)
 
 
 def main() -> int:

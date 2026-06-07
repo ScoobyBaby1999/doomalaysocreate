@@ -1,0 +1,76 @@
+{
+  "//": "Logical-model catalog: maps a stable logical name (what a request/panel asks",
+  "//1": "for) to an ORDERED list of physical (provider, model) candidates that host it.",
+  "//2": "route_judge tries candidates best-first (the scheduler re-ranks live by",
+  "//3": "rotation + health + cooldown) and BOUNCES to the next provider on any failure.",
+  "//4": "Only candidates whose provider has a configured key participate; the rest are",
+  "//5": "skipped silently. Add/remove candidates here with zero code changes.",
+  "//6": "A request may still name a physical 'provider/model' slot directly (contains a",
+  "//7": "'/') to bypass logical routing - that path stays backward-compatible.",
+
+  "logical_models": {
+    "glm-5.1": {
+      "family": "glm",
+      "candidates": [
+        {"provider": "nvidia", "model": "z-ai/glm-5.1"},
+        {"provider": "zai", "model": "glm-5.1"},
+        {"provider": "openrouter", "model": "z-ai/glm-4.5-air:free"}
+      ]
+    },
+    "deepseek-v4-pro": {
+      "family": "deepseek",
+      "candidates": [
+        {"provider": "nvidia", "model": "deepseek-ai/deepseek-v4-pro"},
+        {"provider": "github-models", "model": "deepseek/deepseek-v3-0324"},
+        {"provider": "nvidia", "model": "deepseek-ai/deepseek-r1"}
+      ]
+    },
+    "kimi-k2.6": {
+      "family": "kimi-k2",
+      "candidates": [
+        {"provider": "nvidia", "model": "moonshotai/kimi-k2.6"},
+        {"provider": "moonshot", "model": "kimi-k2.6"}
+      ]
+    },
+    "gemini-2.5-pro": {
+      "family": "gemini-2.5-pro",
+      "candidates": [
+        {"provider": "google", "model": "gemini-2.5-pro"}
+      ]
+    },
+    "gemini-2.5-flash": {
+      "family": "gemini-2.5-flash",
+      "candidates": [
+        {"provider": "google", "model": "gemini-2.5-flash"},
+        {"provider": "google", "model": "gemini-2.0-flash"}
+      ]
+    },
+    "qwen3-235b": {
+      "family": "qwen3-235b-a22b",
+      "candidates": [
+        {"provider": "cerebras", "model": "qwen-3-235b-a22b-instruct-2507"},
+        {"provider": "fireworks", "model": "accounts/fireworks/models/qwen3-235b-a22b"},
+        {"provider": "groq", "model": "qwen/qwen3-32b"}
+      ]
+    },
+    "llama-3.3-70b": {
+      "family": "llama-3.3-70b",
+      "candidates": [
+        {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        {"provider": "cerebras", "model": "llama-3.3-70b"},
+        {"provider": "nvidia", "model": "meta/llama-3.3-70b-instruct"},
+        {"provider": "cloudflare", "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"},
+        {"provider": "github-models", "model": "meta/llama-3.3-70b-instruct"},
+        {"provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct:free"},
+        {"provider": "sambanova", "model": "Meta-Llama-3.3-70B-Instruct"}
+      ]
+    },
+    "qwen-coder-32b": {
+      "family": "qwen2.5-coder-32b",
+      "candidates": [
+        {"provider": "nvidia", "model": "qwen/qwen2.5-coder-32b-instruct"},
+        {"provider": "cloudflare", "model": "@cf/qwen/qwen2.5-coder-32b-instruct"}
+      ]
+    }
+  }
+}

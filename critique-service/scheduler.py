@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -72,16 +73,31 @@ class SlotScheduler:
         self.slot_state: dict[str, SlotState] = {s.who: SlotState() for s in slots}
         families = {s.model_family for s in slots}
         self.family_state: dict[str, FamilyState] = {f: FamilyState() for f in families}
-        #       per-provider locks let us serialize calls to the same provider so
-        #       rpm pacing actually works under concurrency.
+        #       this scheduler is now shared across the request-handler threads
+        #       (each runs its own asyncio loop via asyncio.run) AND the JobRunner's
+        #       background loop, so all mutable state is guarded by a threading.Lock.
+        #       pacing reserves the next call slot under the lock and sleeps OUTSIDE
+        #       it (you can't hold a threading.Lock across await).
+        self._lock = threading.Lock()
         self.provider_last_call: dict[str, float] = {}
-        self.provider_locks: dict[str, asyncio.Lock] = {}
         #       per-provider call counts drive the rotation - the slot whose
         #       provider has the fewest successful calls wins. seeded to 0
         #       per process; pure runtime state, no disk.
         self.provider_calls: dict[str, int] = {}
         for s in slots:
             self.provider_calls.setdefault(s.provider.name, 0)
+
+    def add_slots(self, slots: list[slot]) -> None:
+        #   register slots discovered after construction (logical-model candidates
+        #   / panel-named physical slots) so they join rotation. idempotent.
+        with self._lock:
+            for s in slots:
+                if s.who in self.slot_state:
+                    continue
+                self.slots.append(s)
+                self.slot_state[s.who] = SlotState()
+                self.family_state.setdefault(s.model_family, FamilyState())
+                self.provider_calls.setdefault(s.provider.name, 0)
 
     def recency_mult(self, family: str) -> float:
         #   recent win -> 1x. nothing recent -> default 0.9. old win decays to 0.7.
@@ -125,54 +141,86 @@ class SlotScheduler:
         last_call = self.provider_last_call.get(candidate.provider.name, 0.0)
         return (provider_calls, -family_score, last_call)
 
-    def pick_slot(self, role: Roles, exclude_providers: set[str] | str | None = None) -> slot:
-        #   resolve exclude param into a set.
+    @staticmethod
+    def _as_exclude(exclude_providers: set[str] | str | None) -> set[str]:
         if exclude_providers is None:
-            exclude: set[str] = set()
-        elif isinstance(exclude_providers, str):
-            exclude = {exclude_providers}
-        else:
-            exclude = set(exclude_providers)
+            return set()
+        if isinstance(exclude_providers, str):
+            return {exclude_providers}
+        return set(exclude_providers)
 
-        now = time.time()
-        eligible = [s for s in self.slots if self.is_eligible(s, role, exclude, now)]
+    def pick_slot(self, role: Roles, exclude_providers: set[str] | str | None = None) -> slot:
+        exclude = self._as_exclude(exclude_providers)
+        with self._lock:
+            now = time.time()
+            eligible = [s for s in self.slots if self.is_eligible(s, role, exclude, now)]
 
-        #       fallback: relax the exclude (rotation rule) - better to repeat a provider
-        #       than to fail the call entirely.
-        if not eligible and exclude:
-            relaxed = [s for s in self.slots if self.is_eligible(s, role, set(), now)]
-            if relaxed:
-                log_event("rotation_relaxed",
-                          role=role.value, excluded=sorted(exclude),
-                          relaxed_count=len(relaxed))
-                eligible = relaxed
+            #       fallback: relax the exclude (rotation rule) - better to repeat a
+            #       provider than to fail the call entirely.
+            if not eligible and exclude:
+                relaxed = [s for s in self.slots if self.is_eligible(s, role, set(), now)]
+                if relaxed:
+                    log_event("rotation_relaxed",
+                              role=role.value, excluded=sorted(exclude),
+                              relaxed_count=len(relaxed))
+                    eligible = relaxed
 
-        if not eligible:
-            cooling = sum(1 for s in self.slot_state.values() if s.cooldown_until > now)
-            blacklisted = sum(1 for s in self.slot_state.values() if s.blacklisted)
-            raise SchedulerError(
-                f"role={role.value}: no eligible carriers ("
-                f"{cooling} cooling, {blacklisted} blacklisted, "
-                f"{len(self.slots)} total)"
-            )
+            if not eligible:
+                cooling = sum(1 for s in self.slot_state.values() if s.cooldown_until > now)
+                blacklisted = sum(1 for s in self.slot_state.values() if s.blacklisted)
+                raise SchedulerError(
+                    f"role={role.value}: no eligible carriers ("
+                    f"{cooling} cooling, {blacklisted} blacklisted, "
+                    f"{len(self.slots)} total)"
+                )
+            eligible.sort(key=self.rank_key)
+            return eligible[0]
 
-        eligible.sort(key=self.rank_key)
-        return eligible[0]
+    def pick_slot_from(self, candidates: list[slot], role: Roles,
+                       exclude_providers: set[str] | str | None = None) -> slot | None:
+        #   like pick_slot but restricted to a candidate subset (one logical model's
+        #   hosts). returns the best eligible candidate, or None if all are excluded /
+        #   cooling / blacklisted. used by route_judge to bounce across providers.
+        exclude = self._as_exclude(exclude_providers)
+        with self._lock:
+            now = time.time()
+            eligible = [s for s in candidates if self.is_eligible(s, role, exclude, now)]
+            if not eligible:
+                return None
+            eligible.sort(key=self.rank_key)
+            return eligible[0]
 
     def record_success(self, picked: slot) -> None:
-        family = self.family_state[picked.model_family]
-        family.successes += 1
-        family.last_success_ts = time.time()
-        state = self.slot_state[picked.who]
-        state.cooldown_until = 0.0
-        state.last_error = ""
-        #       provider rotation - count successful calls per provider so the
-        #       next pick rotates to whichever has been used least.
-        self.provider_calls[picked.provider.name] = (
-            self.provider_calls.get(picked.provider.name, 0) + 1
-        )
+        with self._lock:
+            family = self.family_state[picked.model_family]
+            family.successes += 1
+            family.last_success_ts = time.time()
+            state = self.slot_state[picked.who]
+            state.cooldown_until = 0.0
+            state.last_error = ""
+            #       provider rotation - count successful calls per provider so the
+            #       next pick rotates to whichever has been used least.
+            self.provider_calls[picked.provider.name] = (
+                self.provider_calls.get(picked.provider.name, 0) + 1
+            )
 
-    def record_failure(self, picked: slot, code: str, reason: str = "") -> None:
+    def set_budget_cooldown(self, provider_name: str, until_ts: float, reason: str = "") -> None:
+        #   cool every slot of a provider until until_ts - used when per-profile
+        #   metrics show the provider is at/over its published daily budget, so we
+        #   stop routing to it without a real 429. reuses the is_eligible cooldown path.
+        with self._lock:
+            n = 0
+            for s in self.slots:
+                if s.provider.name == provider_name:
+                    st = self.slot_state[s.who]
+                    if until_ts > st.cooldown_until:
+                        st.cooldown_until = until_ts
+                        n += 1
+        if n:
+            log_event("budget_cooldown", provider=provider_name,
+                      slots=n, until_s=round(until_ts - time.time(), 1), reason=reason[:160])
+
+    def _record_failure_locked(self, picked: slot, code: str, reason: str = "") -> None:
         #   different fail codes route to different penalties:
         #     json/shape/empty/refusal -> family-wide demerit
         #     429                      -> long slot cooldown
@@ -214,32 +262,43 @@ class SlotScheduler:
                       slot=picked.who, code=code,
                       cooldown_s=cooldown_minute, reason=reason[:160])
 
+    def record_failure(self, picked: slot, code: str, reason: str = "") -> None:
+        with self._lock:
+            self._record_failure_locked(picked, code, reason)
+
     async def wait_for_provider_pacing(self, picked: slot) -> None:
-        #   serialize calls per provider, sleep just enough to stay under rpm.
+        #   pace calls per provider to stay under rpm. RESERVE the next allowed
+        #   call time under the threading lock (so concurrent callers across loops
+        #   stack their waits), then sleep outside the lock. min_gap=0 disables.
         name = picked.provider.name
-        lock = self.provider_locks.setdefault(name, asyncio.Lock())
         min_gap = 60.0 / max(1, picked.provider.rpm)
-        async with lock:
+        with self._lock:
+            now = time.time()
             last = self.provider_last_call.get(name, 0.0)
-            gap = time.time() - last
-            if gap < min_gap:
-                sleep_s = min_gap - gap
-                log_event("pacing_wait",
-                          provider=name, slot=picked.who,
-                          sleep_s=round(sleep_s, 2), rpm=picked.provider.rpm)
-                await asyncio.sleep(sleep_s)
-            self.provider_last_call[name] = time.time()
+            earliest = max(now, last + min_gap)
+            self.provider_last_call[name] = earliest
+            sleep_s = earliest - now
+        if sleep_s > 0:
+            log_event("pacing_wait",
+                      provider=name, slot=picked.who,
+                      sleep_s=round(sleep_s, 2), rpm=picked.provider.rpm)
+            await asyncio.sleep(sleep_s)
 
     def earliest_wake_ts(self) -> float:
         #   for the runner: when is the soonest non-blacklisted slot off cooldown?
-        cooling = [
-            state.cooldown_until for state in self.slot_state.values()
-            if not state.blacklisted and state.cooldown_until > 0.0
-        ]
+        with self._lock:
+            cooling = [
+                state.cooldown_until for state in self.slot_state.values()
+                if not state.blacklisted and state.cooldown_until > 0.0
+            ]
         return min(cooling) if cooling else 0.0
 
     def snapshot(self) -> list[dict]:
         #   debug/telemetry view - one row per slot, sorted best-family-first.
+        with self._lock:
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> list[dict]:
         now = time.time()
         rows = []
         for s in self.slots:
@@ -259,13 +318,41 @@ class SlotScheduler:
         rows.sort(key=lambda r: r["family_score"], reverse=True)
         return rows
 
+    def provider_rollup(self) -> dict[str, dict]:
+        #   per-provider rotation + health summary for /api/stats.
+        with self._lock:
+            now = time.time()
+            out: dict[str, dict] = {}
+            for s in self.slots:
+                st = self.slot_state[s.who]
+                row = out.setdefault(s.provider.name, {
+                    "calls": self.provider_calls.get(s.provider.name, 0),
+                    "slots": 0, "cooling_slots": 0, "blacklisted_slots": 0,
+                    "pool": s.provider.pool, "rpm": s.provider.rpm,
+                    "rpd": s.provider.rpd, "tpd": s.provider.tpd,
+                })
+                row["slots"] += 1
+                if st.cooldown_until > now:
+                    row["cooling_slots"] += 1
+                if st.blacklisted:
+                    row["blacklisted_slots"] += 1
+            return out
+
 
 # the http call. all retries / rotation / cooldowns happen one level up; here we
-# just translate one http exchange into either a string body or a ProviderError.
+# just translate one http exchange into either a (content, usage) pair or a
+# ProviderError. when MOCK_MODE is on it routes to the synthetic mock provider so
+# the whole stack can run with zero real API calls.
 
 async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict[str, str]],
                     *, max_tokens: int, timeout_s: float = 600.0,
-                    response_format: dict | None = None) -> str:
+                    response_format: dict | None = None) -> tuple[str, dict]:
+    import mock_provider
+    if mock_provider.ENABLED:
+        return await mock_provider.mock_call_slot(
+            client, picked, messages, max_tokens=max_tokens,
+            timeout_s=timeout_s, response_format=response_format)
+
     p = picked.provider
     headers = {
         "Authorization": f"Bearer {p.api_key}",
@@ -350,7 +437,7 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
                   in_tokens=usage.get("prompt_tokens"),
                   out_tokens=usage.get("completion_tokens"),
                   out_chars=len(content))
-        return content
+        return content, (usage if isinstance(usage, dict) else {})
 
     except httpx.HTTPError as e:
         duration = round(time.monotonic() - t_call, 2)

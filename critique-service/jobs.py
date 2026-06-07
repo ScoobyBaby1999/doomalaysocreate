@@ -7,20 +7,20 @@ import time
 
 import httpx
 
-from content.roles import looks_like_refusal
+from content.roles import Roles, looks_like_refusal
 from merge import merge_critiques, merge_panel
 from oplog import log_event
 from scheduler import ProviderError, call_slot
 
-# Decoupled panel execution.
+# Panel execution with cross-provider failover.
 #
-# The user's requirement: judges must be COMPLETELY independent - if one stalls
-# or fails, the others proceed as if nothing happened, and a slow frontier model
-# (DeepSeek V4 Pro can think for minutes) must never gate the HTTP response.
-#
-# So there is no shared scheduler, no rotation, no cross-judge semaphore: each
-# judge is its own coroutine calling exactly its assigned model. Two execution
-# modes share the same per-judge primitive (`call_judge`):
+# Each judge is still COMPLETELY independent - if one stalls or fails, the others
+# proceed as if nothing happened, and a slow frontier model never gates the HTTP
+# response. What changed from the original decoupled design: a judge now names a
+# LOGICAL model and routes through the shared SlotScheduler, so on a 429/5xx/empty
+# it BOUNCES to the next provider hosting the same model instead of just failing.
+# Every attempt emits a per-profile metric. The two execution modes share the same
+# per-judge primitive (`route_judge`, built on `call_once`):
 #   - synchronous  : run_panel_slots() - asyncio.gather, returns when all settle.
 #   - asynchronous : JobRunner        - fire-and-forget tasks on a background loop;
 #                                        the client polls GET /api/jobs/<id> and
@@ -29,75 +29,155 @@ from scheduler import ProviderError, call_slot
 
 JOB_TTL_S = 6 * 3600.0   # keep finished jobs pollable for a while, then drop
 
-# per-judge retry: same model, not rotation. transient throttle/overload codes get
-# a few backed-off retries (free tiers 429 under load; NVIDIA's gateway 504s on long
-# reasoning; OpenRouter sometimes returns empty). hard 4xx (auth/not-found) never retry.
-JUDGE_RETRIES = int(os.environ.get("JUDGE_RETRIES", "2"))         # extra attempts after the first
-JUDGE_BACKOFF_S = float(os.environ.get("JUDGE_BACKOFF_S", "8"))   # linear backoff base
+# Cross-provider failover owns retries now: instead of retrying the SAME slot,
+# route_judge BOUNCES a logical model to the next provider that hosts it. So the
+# legacy same-slot retry is off by default (set JUDGE_RETRIES>0 to re-enable a
+# small same-slot retry on top of failover). every failure - throttle, 5xx, empty,
+# hard 4xx - is a reason to try a different provider hosting the same model.
+JUDGE_RETRIES = int(os.environ.get("JUDGE_RETRIES", "0"))
+JUDGE_BACKOFF_S = float(os.environ.get("JUDGE_BACKOFF_S", "4"))
 RETRYABLE_CODES = {"429", "5xx", "524", "http", "empty"}
 
+# eligibility role for slot picking. judges here can play any role (slots carry the
+# full role set), so we use a fixed role for the scheduler's eligibility check and
+# record the REAL task role separately in metrics.
+_PICK_ROLE = Roles("critiquer")
 
-async def call_judge(client: httpx.AsyncClient, picked, system_prompt: str, *,
-                     user_msg: str, max_tokens: int, timeout_s: float) -> dict:
-    #   one model, retried on transient failures, never raising. a failure is data.
+
+async def call_once(client: httpx.AsyncClient, picked, system_prompt: str, *,
+                    user_msg: str, max_tokens: int, timeout_s: float) -> dict:
+    #   exactly one http exchange against one slot. never raises; returns a
+    #   structured result carrying ok / code / usage / latency.
     t0 = time.monotonic()
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
     ]
-    last_err = ""
-    attempts = 0
-    for attempt in range(JUDGE_RETRIES + 1):
-        attempts = attempt + 1
-        try:
-            content = await call_slot(client, picked, messages=messages,
-                                      max_tokens=max_tokens, timeout_s=timeout_s)
-            text = content.strip()
-            if looks_like_refusal(text):
-                res = {"model": picked.who, "ok": False, "error": f"refusal: {text[:160]!r}"}
-            else:
-                res = {"model": picked.who, "ok": True, "output": text}
-            break
-        except ProviderError as e:
-            last_err = str(e)
-            code = last_err.split(":", 1)[0]
-            if code in RETRYABLE_CODES and attempt < JUDGE_RETRIES:
-                wait = JUDGE_BACKOFF_S * (attempt + 1)
-                log_event("judge_retry", slot=picked.who, code=code, attempt=attempt + 1, wait_s=wait)
-                await asyncio.sleep(wait)
-                continue
-            res = {"model": picked.who, "ok": False, "error": last_err[:300]}
-            break
-        except Exception as e:  # noqa: BLE001 - isolate every failure mode per judge
-            res = {"model": picked.who, "ok": False, "error": f"{type(e).__name__}: {str(e)[:180]}"}
-            break
+    try:
+        content, usage = await call_slot(client, picked, messages=messages,
+                                         max_tokens=max_tokens, timeout_s=timeout_s)
+        text = content.strip()
+        if looks_like_refusal(text):
+            res = {"ok": False, "code": "refusal", "error": f"refusal: {text[:160]!r}", "usage": usage}
+        else:
+            res = {"ok": True, "code": "ok", "output": text, "usage": usage}
+    except ProviderError as e:
+        msg = str(e)
+        res = {"ok": False, "code": msg.split(":", 1)[0], "error": msg[:300], "usage": {}}
+    except Exception as e:  # noqa: BLE001 - isolate every failure mode per judge
+        res = {"ok": False, "code": "exc", "error": f"{type(e).__name__}: {str(e)[:180]}", "usage": {}}
     res["elapsed_s"] = round(time.monotonic() - t0, 1)
-    res["attempts"] = attempts
     return res
 
 
+async def route_judge(scheduler, client, logical: str, candidates: list, system_prompt: str, *,
+                      role_label: str, effort: str, profile: str, metrics,
+                      user_msg: str, max_tokens: int, timeout_s: float) -> dict:
+    #   run one logical judge with cross-provider failover. asks the scheduler for
+    #   the best eligible host, calls it, and on ANY failure records the penalty
+    #   (cooldown/blacklist) + a metric event and bounces to the next provider that
+    #   hosts the same model. every attempt is captured per-profile. never raises.
+    tried: set[str] = set()
+    candidates_tried: list[str] = []
+    attempts = 0
+    last = None
+    if not candidates:
+        return {"model": logical, "ok": False, "routed_to": None, "attempts": 0,
+                "candidates_tried": [], "elapsed_s": 0.0,
+                "error": "not registered (no configured provider hosts this model)"}
+
+    max_hops = len(candidates) + JUDGE_RETRIES
+    for _ in range(max_hops):
+        picked = scheduler.pick_slot_from(candidates, _PICK_ROLE, exclude_providers=tried)
+        if picked is None:
+            break
+        attempts += 1
+        candidates_tried.append(picked.who)
+        await scheduler.wait_for_provider_pacing(picked)
+        res = await call_once(client, picked, system_prompt, user_msg=user_msg,
+                              max_tokens=max_tokens, timeout_s=timeout_s)
+        usage = res.get("usage") or {}
+        in_tok, out_tok = usage.get("prompt_tokens"), usage.get("completion_tokens")
+        if res["ok"]:
+            scheduler.record_success(picked)
+            _emit(metrics, profile, logical, picked, role_label, effort, res,
+                  in_tok, out_tok, attempts, candidates_tried, res.get("output"))
+            return {"model": logical, "routed_to": picked.who, "ok": True,
+                    "output": res["output"], "elapsed_s": res["elapsed_s"],
+                    "attempts": attempts, "candidates_tried": list(candidates_tried)}
+        #       failure: penalise the slot, record the metric, bounce providers.
+        code = res["code"]
+        scheduler.record_failure(picked, code, res.get("error", ""))
+        _emit(metrics, profile, logical, picked, role_label, effort, res,
+              in_tok, out_tok, attempts, candidates_tried, None)
+        _budget_guard(scheduler, metrics, profile, picked)
+        tried.add(picked.provider.name)
+        last = res
+        log_event("judge_failover", logical=logical, slot=picked.who, code=code,
+                  attempt=attempts, remaining=len(candidates) - len(tried))
+
+    err = (last or {}).get("error", "all candidate providers cooling/blacklisted/unconfigured")
+    return {"model": logical, "ok": False, "routed_to": None,
+            "error": err[:300], "attempts": attempts,
+            "candidates_tried": list(candidates_tried),
+            "elapsed_s": (last or {}).get("elapsed_s", 0.0)}
+
+
+def _emit(metrics, profile, logical, picked, role_label, effort, res,
+          in_tok, out_tok, attempts, candidates_tried, output) -> None:
+    if metrics is None:
+        return
+    try:
+        metrics.record(
+            profile=profile, logical=logical, provider=picked.provider.name,
+            model=picked.model, family=picked.model_family, role=role_label,
+            effort=effort, latency_s=res.get("elapsed_s", 0.0),
+            in_tokens=in_tok, out_tokens=out_tok, ok=res["ok"], code=res["code"],
+            attempts=attempts, routed_to=picked.who,
+            candidates_tried=list(candidates_tried), mock=_is_mock(), output=output,
+        )
+    except Exception as e:  # noqa: BLE001 - metrics must never break a judge
+        log_event("metrics_record_error", error=repr(e)[:200])
+
+
+def _is_mock() -> bool:
+    import mock_provider
+    return mock_provider.ENABLED
+
+
+def _budget_guard(scheduler, metrics, profile: str, picked) -> None:
+    #   if this profile has spent the provider's published daily request/token
+    #   budget, cool the whole provider until ~midnight so we stop routing to it.
+    if metrics is None:
+        return
+    prov = picked.provider
+    if not (prov.rpd or prov.tpd):
+        return
+    try:
+        calls, tokens = metrics.provider_day_usage(profile, prov.name)
+    except Exception:  # noqa: BLE001
+        return
+    over = (prov.rpd and calls >= prov.rpd) or (prov.tpd and tokens >= prov.tpd)
+    if over:
+        scheduler.set_budget_cooldown(prov.name, time.time() + 3600.0,
+                                      reason=f"daily budget: calls={calls}/{prov.rpd} tok={tokens}/{prov.tpd}")
+
+
 async def run_panel_slots(panel, who_list: list[str], system_prompt: str, *,
+                          role_label: str, effort: str, profile: str, metrics,
                           user_msg: str, max_tokens: int, timeout_s: float) -> list[dict]:
-    #   synchronous fan-out: every judge in parallel, fully independent. returns
-    #   once all have settled (or hit timeout). unresolved models report ok:false.
-    picked = []
-    missing = []
-    for who in who_list:
-        s = panel.resolve(who)
-        if s is None:
-            missing.append({"model": who, "ok": False,
-                            "error": "not registered (provider has no API key configured)"})
-        else:
-            picked.append(s)
-    results: list[dict] = []
-    if picked:
-        async with httpx.AsyncClient() as client:
-            results = await asyncio.gather(*[
-                call_judge(client, s, system_prompt, user_msg=user_msg,
-                           max_tokens=max_tokens, timeout_s=timeout_s)
-                for s in picked
-            ])
-    return results + missing
+    #   synchronous fan-out: every logical judge in parallel, each with its own
+    #   cross-provider failover. returns once all have settled.
+    resolved = [(who, *panel.resolve_candidates(who)) for who in who_list]
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*[
+            route_judge(panel.scheduler, client, logical, candidates, system_prompt,
+                        role_label=role_label, effort=effort, profile=profile,
+                        metrics=metrics, user_msg=user_msg, max_tokens=max_tokens,
+                        timeout_s=timeout_s)
+            for (_who, logical, candidates) in resolved
+        ])
+    return results
 
 
 def finalize_judges(judges: list[dict], kind: str, merge_mode: str) -> tuple[list[dict], str]:
@@ -141,48 +221,61 @@ class JobRunner:
             self.jobs.pop(jid, None)
 
     def submit(self, *, who_list: list[str], system_prompt: str, user_msg: str,
-               max_tokens: int, role: str, merge_mode: str, kind: str) -> dict:
+               max_tokens: int, role: str, merge_mode: str, kind: str,
+               profile: str = "default", effort: str = "med",
+               timeout_s: float | None = None) -> dict:
         job_id = secrets.token_hex(8)
         judges: dict[str, dict] = {}
-        picked = []
+        scheduled = []
         for who in who_list:
-            s = self.panel.resolve(who)
-            if s is None:
+            logical, candidates = self.panel.resolve_candidates(who)
+            if not candidates:
                 judges[who] = {"model": who, "ok": False, "status": "error",
-                               "error": "not registered (provider has no API key configured)"}
+                               "error": "not registered (no configured provider hosts this model)"}
             else:
                 judges[who] = {"model": who, "status": "pending"}
-                picked.append((who, s))
+                scheduled.append((who, logical, candidates))
         job = {"id": job_id, "kind": kind, "role": role, "merge": merge_mode,
+               "profile": profile, "effort": effort,
                "created": time.time(), "judges": judges, "total": len(who_list)}
         with self.lock:
             self._prune_locked()
             self.jobs[job_id] = job
-        #   schedule each judge as its own task - independent, no shared scheduler.
-        for who, s in picked:
+        jt = timeout_s or self.judge_timeout_s
+        #   schedule each logical judge as its own task; each does cross-provider
+        #   failover through the shared scheduler + emits per-profile metrics.
+        for who, logical, candidates in scheduled:
             asyncio.run_coroutine_threadsafe(
-                self._run_judge(job_id, who, s, system_prompt, user_msg, max_tokens),
+                self._run_judge(job_id, who, logical, candidates, system_prompt,
+                                user_msg, max_tokens, role, profile, effort, jt),
                 self.loop,
             )
-        log_event("job_submitted", job_id=job_id, req_kind=kind, role=role, judges=len(who_list))
+        log_event("job_submitted", job_id=job_id, req_kind=kind, role=role,
+                  profile=profile, effort=effort, judges=len(who_list))
         return self.snapshot(job_id)
 
-    async def _run_judge(self, job_id: str, who: str, picked, system_prompt: str,
-                         user_msg: str, max_tokens: int) -> None:
+    async def _run_judge(self, job_id: str, who: str, logical: str, candidates: list,
+                         system_prompt: str, user_msg: str, max_tokens: int,
+                         role_label: str, profile: str, effort: str,
+                         timeout_s: float) -> None:
         with self.lock:
             j = self.jobs.get(job_id)
             if j is not None:
                 j["judges"][who] = {"model": who, "status": "running"}
-        res = await call_judge(self._client, picked, system_prompt,
-                               user_msg=user_msg, max_tokens=max_tokens,
-                               timeout_s=self.judge_timeout_s)
+        res = await route_judge(
+            self.panel.scheduler, self._client, logical, candidates, system_prompt,
+            role_label=role_label, effort=effort, profile=profile,
+            metrics=self.panel.metrics, user_msg=user_msg, max_tokens=max_tokens,
+            timeout_s=timeout_s)
+        res["model"] = who
         res["status"] = "done" if res.get("ok") else "error"
         with self.lock:
             j = self.jobs.get(job_id)
             if j is not None:
                 j["judges"][who] = res
         log_event("job_judge_settled", job_id=job_id, model=who,
-                  ok=res.get("ok"), elapsed_s=res.get("elapsed_s"))
+                  routed_to=res.get("routed_to"), ok=res.get("ok"),
+                  elapsed_s=res.get("elapsed_s"))
 
     def snapshot(self, job_id: str) -> dict | None:
         with self.lock:
