@@ -1,0 +1,23 @@
+{
+  "task_type": "freeform",
+  "task": "<FILL ME IN: short label>",
+  "stages": [
+    {
+      "name": "write",
+      "role": "generator",
+      "instructions": "Write the content the user asked for, exactly as requested. No preamble, no meta-commentary, no 'here is the content:' header. Begin with the content directly.",
+      "inputs": ["prompt"],
+      "max_tokens": 2000
+    }
+  ],
+  "output_rules": {
+    "format": "markdown"
+  },
+  "judge_config": {
+    "rules": [],
+    "plugins": [],
+    "llm_judges": []
+  },
+  "max_rounds": 1,
+  "committee_size": 1
+}
