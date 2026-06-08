@@ -13,3 +13,7 @@ venv/
 
 # local metrics cache (durable copy lives in the HF Dataset, not the repo)
 data/
+
+# materialized client output (run artifacts / panel files)
+runs/
+panel_out/

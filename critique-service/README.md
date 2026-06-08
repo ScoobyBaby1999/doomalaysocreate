@@ -158,6 +158,82 @@ observable. The end-to-end scenario suite:
 MOCK_MODE=1 python tools/sim_scenarios.py   # rotation, failover, budget, profile isolation, effort
 ```
 
+## Orchestrator — templated multi-stage runs with judge + file artifacts
+
+Beyond one-shot panels, the service runs **multi-stage templates** with an
+automatic **judge** loop, and can return **multi-file artifacts** (a whole tree of
+`.py`/`.md`/`.env`/… files), not just text. This is the "master orchestrator": you
+stage a prompt through a template (or a custom schematic), frontier models do the
+work across stages with cross-provider rotation, a judge hardens the output, and you
+receive each model's **full output as files**.
+
+### `POST /api/run`  *(Bearer token required)*
+
+```jsonc
+{
+  "prompt":    "<the task>",
+  "template":  "research_paper",        // a built-in template id (see GET /api/templates)
+  "schematic": { ...TaskSchematic... }, // OR a full custom schematic (overrides template)
+  "profile":   "default",               // metrics namespace
+  "effort":    "low|med|high|max",
+  "async":     true                     // recommended; multi-stage runs are slow
+}
+```
+
+Resolution order: inline `schematic` → built-in `template` → `freeform` fallback.
+Returns a job; poll `GET /api/jobs/<id>`. The final `result`:
+
+```jsonc
+{
+  "ok": true,
+  "task": "…",
+  "body": "<final stitched markdown>",
+  "artifacts": [ {"path": "src/app.py", "content": "...", "truncated": false}, ... ],
+  "rounds": 1,                          // judge-driven revise rounds that fired
+  "judge": { "ok": true, "hard_fails": [], "soft_flags": [...] },
+  "stages": [ {"name","role","provider","ok","duration_s"}, ... ]
+}
+```
+
+A **template** (`orchestrator/templates/*.json`) declares `stages[]` (each a `role` +
+`instructions`, optional `fanout`, `inputs`, `max_tokens`), cross-cutting
+`output_rules`, and a `judge_config` (deterministic `rules`, code `plugins`, and
+natural-language `llm_judges`) with a `max_rounds` revise loop. Set
+`output_rules.format: "files"` and body-producing stages emit multi-file artifacts.
+
+### `GET /api/templates`
+Lists the built-in templates (`research_paper`, `lesson_plan`, `freeform`) with their
+stages, output format, and judge config.
+
+### Multi-file artifact protocol (marker blocks + nonce)
+
+In file mode each file is wrapped in sentinel lines carrying a per-request nonce:
+
+```
+===== BEGIN FILE [a7f3c1] path=src/app.py =====
+<verbatim file content — may contain ``` or markdown>
+===== END FILE [a7f3c1] path=src/app.py =====
+```
+
+Parsed by sentinel (nested fences survive); a missing END is recovered + flagged
+`truncated`; zero markers falls back losslessly to one `output.md`; paths are
+sanitized (no abs / no `..`). **Panel mode** can do this too — add `"artifacts": true`
+to `POST /api/panel` and **each model's reply is parsed into its OWN file tree**
+(nothing merged), so you keep every model's full output.
+
+### Client — materialize the result as files
+
+`tools/orchestrate_client.py` submits a run, polls, and writes the result into a
+workspace (`runs/<ts>-<task>/<path…>` + `_body.md` + `_judge.md` + `_manifest.json`):
+
+```bash
+python tools/orchestrate_client.py --template research_paper \
+  --input-file prompt.md --profile research --out runs/
+# custom schematic that emits a code tree:
+python tools/orchestrate_client.py --schematic-file build.json \
+  --input "Build a CLI todo app in Python." --out runs/
+```
+
 ## The judge panel is editable — `panel.json`
 
 `panel.json` is the source of truth for the panel. **Any `provider/model` you name
@@ -248,10 +324,19 @@ critique-service/
 ├── providers_catalog.json# provider pool + published free-tier limits (core + opt-in)
 ├── models_catalog.json   # logical model -> ordered (provider, model) host candidates
 ├── scheduler.py          # SlotScheduler / call_slot: rotation, failover seam, pacing, cooldowns
-├── jobs.py               # route_judge (cross-provider failover) + sync/async execution
+├── jobs.py               # route_judge (failover) + sync/async + submit_run (orchestrator)
 ├── metrics.py            # per-profile metrics capture + aggregation + HF-Dataset persistence
-├── mock_provider.py      # MOCK_MODE synthetic provider (zero real API calls)
-├── tools/sim_scenarios.py# quota-free end-to-end scenario suite
+├── artifacts.py          # multi-file artifact protocol (marker blocks + nonce) parse/build
+├── orchestrate.py        # template loader + schematic resolution + RunResult serialization
+├── orchestrator/         # ported multi-stage engine: schematic, roles, planner, orchestrator
+│   ├── templates/*.json  #   built-in templates (research_paper, lesson_plan, freeform)
+│   └── prompts/role_*.md #   role skeletons (generator, reviewer, transformer, …)
+├── judge/                # plugin judge engine: rules (engine) + plugins + llm_judge
+├── mock_provider.py      # MOCK_MODE synthetic provider (role/format-aware; zero real calls)
+├── tools/sim_scenarios.py   # quota-free routing scenarios
+├── tools/sim_orchestrator.py# quota-free orchestrator + judge + artifact scenarios
+├── tools/sim_service.py     # quota-free /api/run wiring + materialization scenarios
+├── tools/orchestrate_client.py # run a template, materialize artifacts as files
 ├── merge.py              # deterministic cross-judge bullet merge + consensus
 ├── oplog.py              # structured telemetry to stderr (HF Space logs)
 ├── content/

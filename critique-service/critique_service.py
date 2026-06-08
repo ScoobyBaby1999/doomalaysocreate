@@ -7,10 +7,13 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import orchestrate
 from content.roles import make_prompt
 from jobs import JobRunner, finalize_judges, run_panel_slots
 from metrics import MetricStore
 from oplog import log_event
+from orchestrate import OrchestrateError
+from orchestrator.orchestrator import execute as orchestrator_execute
 from providers import (
     load_models_catalog,
     make_provider_registry,
@@ -254,7 +257,7 @@ def build_panel_params(panel: Panel, *, input_text: str, role: str,
                        system: str | None, instructions: str | None,
                        output_rules: str | None, template: str | None,
                        panel_override: list[str] | None, merge_mode: str | None,
-                       max_tokens: int | None) -> dict:
+                       max_tokens: int | None, want_artifacts: bool = False) -> dict:
     #   generalized: any loom role, or a fully custom system prompt. this is what
     #   turns the critique panel into a general "ask my frontier panel to do X".
     if system:
@@ -273,6 +276,13 @@ def build_panel_params(panel: Panel, *, input_text: str, role: str,
         role_label = role
         mode = merge_mode or ROLE_DEFAULT_MERGE.get(role, "none")
         mt = max_tokens or ROLE_DEFAULT_MAX_TOKENS.get(role, 2000)
+    #   artifacts mode: ask each model to emit a multi-file tree (marker blocks +
+    #   nonce); each judge's reply is parsed into its OWN tree, kept fully separate.
+    nonce = ""
+    if want_artifacts:
+        import artifacts as _artifacts
+        nonce = _artifacts.make_nonce()
+        system_prompt = system_prompt + _artifacts.artifact_instructions(nonce)
     return {
         "kind": "panel",
         "role": role_label,
@@ -281,6 +291,7 @@ def build_panel_params(panel: Panel, *, input_text: str, role: str,
         "user_msg": "Produce the requested output now.",
         "max_tokens": mt,
         "who_list": list(panel_override or panel.default_panel),
+        "nonce": nonce,
     }
 
 
@@ -294,6 +305,7 @@ async def run_sync(panel: Panel, params: dict) -> dict:
         profile=params.get("profile", "default"), metrics=panel.metrics,
         user_msg=params["user_msg"], max_tokens=params["max_tokens"],
         timeout_s=params.get("timeout_s", JUDGE_TIMEOUT_S),
+        nonce=params.get("nonce", ""),
     )
     finished, merged = finalize_judges(judges, params["kind"], params["merge"])
     ok_count = sum(1 for j in finished if j.get("ok"))
@@ -322,8 +334,21 @@ def submit_async(server_jobs: JobRunner, params: dict) -> dict:
         user_msg=params["user_msg"], max_tokens=params["max_tokens"],
         role=params["role"], merge_mode=params["merge"], kind=params["kind"],
         profile=params.get("profile", "default"), effort=params.get("effort", DEFAULT_EFFORT),
-        timeout_s=params.get("timeout_s"),
+        timeout_s=params.get("timeout_s"), nonce=params.get("nonce", ""),
     )
+
+
+async def run_orchestration_sync(panel: Panel, schematic, prompt: str, *,
+                                 profile: str, effort: str, nonce: str) -> dict:
+    #   synchronous multi-stage run (blocks until the pipeline settles). long
+    #   templates should prefer async ({"async": true} -> poll GET /api/jobs/<id>).
+    import httpx
+    async with httpx.AsyncClient() as client:
+        res = await orchestrator_execute(
+            schematic, panel.scheduler, client, initial_context={"prompt": prompt},
+            log=lambda *_: None, metrics=panel.metrics, profile=profile,
+            effort=effort, nonce=nonce)
+    return orchestrate.serialize_run_result(res, task=schematic.task)
 
 
 # --- HTTP layer -------------------------------------------------------------
@@ -373,7 +398,9 @@ class Handler(BaseHTTPRequestHandler):
                 "endpoints": {
                     "POST /api/critique": "critique a plan/schematic (preset)",
                     "POST /api/panel": "general: any role or custom system prompt",
-                    "GET /api/jobs/<id>": "poll an async job (when called with async:true)",
+                    "POST /api/run": "multi-stage orchestrator template/schematic with judge loop + file artifacts",
+                    "GET /api/templates": "list built-in orchestrator templates",
+                    "GET /api/jobs/<id>": "poll an async job/run (when called with async:true)",
                     "GET /api/stats": "live rotation/health per provider + slot",
                     "GET /api/metrics?profile=<id>": "per-profile cost/throttle/latency aggregates",
                 },
@@ -384,6 +411,12 @@ class Handler(BaseHTTPRequestHandler):
                 "effort_modes": list(EFFORT_MODES),
                 "logical_models": sorted(panel.logical_models.keys()),
             })
+            return
+        if route == "/api/templates":
+            if not _token_ok(self.headers.get("Authorization")):
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            self._send_json(200, {"templates": orchestrate.list_templates()})
             return
         if route in ("/api/stats", "/api/metrics"):
             #   telemetry endpoints share the bearer token with the POST routes.
@@ -462,7 +495,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = self.path.rstrip("/")
-        if route not in ("/api/critique", "/api/panel"):
+        if route not in ("/api/critique", "/api/panel", "/api/run"):
             self._send_json(404, {"error": "not found"})
             return
         payload = self._auth_and_body()
@@ -470,6 +503,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         panel: Panel = self.server.panel  # type: ignore[attr-defined]
         is_async = bool(payload.get("async"))
+
+        if route == "/api/run":
+            self._handle_run(payload, panel, is_async)
+            return
 
         try:
             if route == "/api/critique":
@@ -489,6 +526,40 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 - never leak a stack trace to the client
             log_event("request_error", route=route, error=repr(e)[:300])
+            self._send_json(500, {"error": f"internal error: {type(e).__name__}"})
+
+    def _handle_run(self, payload: dict, panel: Panel, is_async: bool) -> None:
+        #   /api/run: drive a multi-stage orchestrator template/schematic with the
+        #   built-in judge loop. returns the final body + multi-file artifacts.
+        try:
+            prompt = payload.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise _BadRequest("'prompt' (non-empty string) is required")
+            template_id = payload.get("template")
+            if template_id is not None and not isinstance(template_id, str):
+                raise _BadRequest("'template' must be a string id")
+            schematic_obj = payload.get("schematic")
+            if schematic_obj is not None and not isinstance(schematic_obj, dict):
+                raise _BadRequest("'schematic' must be a JSON object")
+            profile, effort = self._profile_and_effort(payload)
+            schematic, nonce = orchestrate.resolve_schematic(
+                prompt, template_id=template_id, schematic_obj=schematic_obj,
+                label=payload.get("label", ""))
+        except (_BadRequest, OrchestrateError) as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        try:
+            if is_async:
+                snap = self.server.jobs.submit_run(  # type: ignore[attr-defined]
+                    schematic=schematic, prompt=prompt, nonce=nonce,
+                    profile=profile, effort=effort)
+                self._send_json(202, snap)
+            else:
+                result = asyncio.run(run_orchestration_sync(
+                    panel, schematic, prompt, profile=profile, effort=effort, nonce=nonce))
+                self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001 - never leak a stack trace
+            log_event("request_error", route="/api/run", error=repr(e)[:300])
             self._send_json(500, {"error": f"internal error: {type(e).__name__}"})
 
     def _params_critique(self, payload: dict, panel: Panel) -> dict:
@@ -539,6 +610,7 @@ class Handler(BaseHTTPRequestHandler):
             instructions=payload.get("instructions"), output_rules=payload.get("output_rules"),
             template=payload.get("template"), panel_override=panel_override or None,
             merge_mode=merge_mode, max_tokens=max_tokens,
+            want_artifacts=bool(payload.get("artifacts")),
         )
         params["profile"] = profile
         return apply_effort(params, effort)

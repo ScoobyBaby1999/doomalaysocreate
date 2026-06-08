@@ -1,0 +1,58 @@
+{
+  "task_type": "lesson_plan",
+  "task": "<FILL ME IN: short lesson description>",
+  "stages": [
+    {
+      "name": "lesson_meta",
+      "role": "extractor",
+      "instructions": "From the user prompt, extract JSON with keys: topic (string), audience (string, e.g. 'beginner programmers'), duration_min (int, total lesson length), prerequisites (list of skills the learner needs already). If duration_min isn't stated explicitly, infer a reasonable default (15-20 minutes for short, 45-60 for standard).",
+      "max_tokens": 600
+    },
+    {
+      "name": "draft_lesson",
+      "role": "generator",
+      "instructions": "Write a complete lesson plan with these sections in order: Learning Objectives (3-5 measurable items, each starting with an action verb like identify/demonstrate/build/explain), Prerequisites, Materials (specific, named items), Procedure (numbered steps with per-step time allocations summing to duration_min), Assessment (3 specific items for checking understanding), Differentiation Strategies (2-3 ways to adapt for different learners). Use second-person imperative voice ('Begin by...', 'Have learners...'). Be concrete: avoid 'introduce the topic' in favor of '2 min: ask students what they already know about X; write 3 responses on the board.'",
+      "inputs": ["prompt", "lesson_meta"],
+      "max_tokens": 4000
+    },
+    {
+      "name": "pedagogy_review",
+      "role": "reviewer",
+      "instructions": "Check: are objectives measurable (action verbs, observable outcomes)? Are materials specific (named items, not 'computer and notebook')? Do the per-step times in Procedure sum to the lesson's stated total duration? Is jargon explained on first use? Is the voice consistent (second-person imperative)? Are the assessment items concrete enough to grade? List each issue as a bullet with a specific fix.",
+      "inputs": ["body"],
+      "max_tokens": 1500
+    },
+    {
+      "name": "polish",
+      "role": "transformer",
+      "instructions": "Apply each review bullet to the lesson plan. Tighten step times if they don't sum to the stated duration. Replace vague materials with specific ones. Strengthen weak objectives. Return the full polished lesson plan.",
+      "inputs": ["body", "pedagogy_review"],
+      "max_tokens": 4000
+    }
+  ],
+  "output_rules": {
+    "format": "markdown",
+    "min_words": 600,
+    "max_words": 1500,
+    "required_sections": ["Learning Objectives", "Prerequisites", "Materials", "Procedure", "Assessment"],
+    "tone": "instructive, supportive, second-person imperative"
+  },
+  "judge_config": {
+    "rules": [
+      {"type": "min_words", "value": 500},
+      {"type": "max_words", "value": 2000},
+      {"type": "section_present", "value": "Learning Objectives"},
+      {"type": "section_present", "value": "Prerequisites"},
+      {"type": "section_present", "value": "Materials"},
+      {"type": "section_present", "value": "Procedure"},
+      {"type": "section_present", "value": "Assessment"}
+    ],
+    "plugins": [],
+    "llm_judges": [
+      "Do the per-step times in the Procedure section sum to (or closely approximate) the lesson's stated total duration?",
+      "Is each learning objective phrased with a measurable action verb (identify, demonstrate, explain, build, compare, evaluate, create)?"
+    ]
+  },
+  "max_rounds": 2,
+  "committee_size": 1
+}

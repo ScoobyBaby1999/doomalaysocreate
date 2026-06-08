@@ -1,0 +1,73 @@
+{
+  "task_type": "research_paper",
+  "task": "<FILL ME IN: short topic label>",
+  "stages": [
+    {
+      "name": "outline",
+      "role": "extractor",
+      "instructions": "From the user prompt, extract the numbered topic list as JSON with shape {\"topics\": [{\"name\": str, \"scope\": str, \"target_words\": int}, ...]}. If the prompt has no numbered list, infer 4-6 topics from the prompt's headings or central themes. Set target_words around 700 each.",
+      "max_tokens": 1000
+    },
+    {
+      "name": "research_plan",
+      "role": "planner",
+      "instructions": "For this single topic, list 3-5 specific sub-questions worth researching to write 600-800 words. Output JSON: [{\"question\": str, \"why\": str}, ...]. Do not invent sources; just list questions.",
+      "fanout": {"over": "outline.topics", "max_parallel": 3},
+      "inputs": ["outline.{i}"],
+      "max_tokens": 800
+    },
+    {
+      "name": "section_draft",
+      "role": "generator",
+      "instructions": "Draft 600-800 words on the given topic, addressing each sub-question from the research plan. Use ONLY canonical sources you are confident exist (arxiv.org, Wikipedia, well-known vendor docs). Prefer 'I am uncertain whether X' over invention. Cite URLs inline as [Title](URL). End with a 1-2 sentence 'open questions' note for the topic.",
+      "fanout": {"over": "outline.topics", "max_parallel": 3},
+      "inputs": ["outline.{i}", "research_plan.{i}"],
+      "max_tokens": 2500
+    },
+    {
+      "name": "stitch",
+      "role": "transformer",
+      "instructions": "Combine all section drafts into one coherent research paper. Add a 200-word introduction framing the overall topic, transitions between sections, and a 150-word conclusion synthesizing (not repeating) the sections. Preserve every citation [Title](URL) verbatim. Add a final '## Sources & Confidence' section listing every cited URL with a tier label (T1=peer-reviewed, T2=primary vendor docs, T3=established blogs, T4=community forums, T5=unknown). Add a final '## What I'm not sure about' section listing 3-5 open questions and known uncertainties.",
+      "inputs": ["section_draft.*"],
+      "max_tokens": 16000
+    },
+    {
+      "name": "critique",
+      "role": "reviewer",
+      "instructions": "Identify thin sections, missing transitions, unsourced claims (numbers/dates/named-thing-X-does-Y without a citation within 2 sentences), confident phrasing without evidence, and citations that look fabricated (suspicious arxiv IDs, generic URLs, weird title-URL pairings). Verify the 'Sources & Confidence' and 'What I'm not sure about' sections are present and substantive.",
+      "inputs": ["body"],
+      "max_tokens": 4000
+    },
+    {
+      "name": "revise",
+      "role": "transformer",
+      "instructions": "Apply each critique bullet. Drop or soften unsourced confident claims. Remove citations that look fabricated rather than trying to fix them. Strengthen weak sections. Return the FULL revised paper.",
+      "inputs": ["body", "critique"],
+      "max_tokens": 16000
+    }
+  ],
+  "output_rules": {
+    "format": "markdown",
+    "min_words": 4000,
+    "max_words": 9000,
+    "required_sections": ["Sources & Confidence", "What I'm not sure about"],
+    "banned_phrases": ["clearly", "obviously", "state-of-the-art", "industry standard", "everyone knows", "undoubtedly", "definitively"],
+    "tone": "rigorous, hedged, attribution-heavy"
+  },
+  "judge_config": {
+    "rules": [
+      {"type": "min_words", "value": 4000},
+      {"type": "max_words", "value": 12000},
+      {"type": "section_present", "value": "Sources & Confidence"},
+      {"type": "section_present", "value": "What I'm not sure about"},
+      {"type": "no_banned_phrases", "value": ["clearly", "obviously", "state-of-the-art", "everyone knows"]}
+    ],
+    "plugins": ["citation_integrity", "url_health"],
+    "llm_judges": [
+      "Are there any numerical claims, dates, or named-entity-does-X assertions that lack a citation within 2 sentences?",
+      "Does the 'What I'm not sure about' section contain at least 3 substantive open questions (not generic filler)?"
+    ]
+  },
+  "max_rounds": 3,
+  "committee_size": 1
+}

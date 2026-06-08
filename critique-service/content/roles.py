@@ -18,6 +18,11 @@ class Roles(StrEnum):
     generator = "generator"
     transformer = "transformer"
     assembler = "assembler"
+    #   orchestrator roles (orchestrator/roles.py::Role). listed here so panel
+    #   slots are eligible for every orchestrator stage role too (StrEnum members
+    #   compare equal by string value across the two enums).
+    reviewer = "reviewer"
+    extractor = "extractor"
 
 
 prompts_dir = Path(__file__).resolve().parent / "prompts"

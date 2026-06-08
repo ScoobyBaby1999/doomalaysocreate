@@ -25,6 +25,7 @@ FULL_ROLES: tuple[Roles, ...] = (
     Roles("planner"), Roles("parser"),
     Roles("critiquer"), Roles("verifier"),
     Roles("generator"), Roles("transformer"),
+    Roles("reviewer"), Roles("extractor"),
 )
 
 

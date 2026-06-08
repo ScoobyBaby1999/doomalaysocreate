@@ -7,9 +7,11 @@ import time
 
 import httpx
 
+import orchestrate
 from content.roles import Roles, looks_like_refusal
 from merge import merge_critiques, merge_panel
 from oplog import log_event
+from orchestrator.orchestrator import execute as orchestrator_execute
 from scheduler import ProviderError, call_slot
 
 # Panel execution with cross-provider failover.
@@ -72,7 +74,8 @@ async def call_once(client: httpx.AsyncClient, picked, system_prompt: str, *,
 
 async def route_judge(scheduler, client, logical: str, candidates: list, system_prompt: str, *,
                       role_label: str, effort: str, profile: str, metrics,
-                      user_msg: str, max_tokens: int, timeout_s: float) -> dict:
+                      user_msg: str, max_tokens: int, timeout_s: float,
+                      nonce: str = "") -> dict:
     #   run one logical judge with cross-provider failover. asks the scheduler for
     #   the best eligible host, calls it, and on ANY failure records the penalty
     #   (cooldown/blacklist) + a metric event and bounces to the next provider that
@@ -102,9 +105,15 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
             scheduler.record_success(picked)
             _emit(metrics, profile, logical, picked, role_label, effort, res,
                   in_tok, out_tok, attempts, candidates_tried, res.get("output"))
-            return {"model": logical, "routed_to": picked.who, "ok": True,
-                    "output": res["output"], "elapsed_s": res["elapsed_s"],
-                    "attempts": attempts, "candidates_tried": list(candidates_tried)}
+            out = {"model": logical, "routed_to": picked.who, "ok": True,
+                   "output": res["output"], "elapsed_s": res["elapsed_s"],
+                   "attempts": attempts, "candidates_tried": list(candidates_tried)}
+            if nonce:
+                #   panel-mode artifacts: each model's reply becomes its own file
+                #   tree (kept fully separate; nothing merged).
+                import artifacts as _artifacts
+                out["artifacts"] = _artifacts.parse_artifacts(res["output"], nonce)
+            return out
         #       failure: penalise the slot, record the metric, bounce providers.
         code = res["code"]
         scheduler.record_failure(picked, code, res.get("error", ""))
@@ -165,7 +174,8 @@ def _budget_guard(scheduler, metrics, profile: str, picked) -> None:
 
 async def run_panel_slots(panel, who_list: list[str], system_prompt: str, *,
                           role_label: str, effort: str, profile: str, metrics,
-                          user_msg: str, max_tokens: int, timeout_s: float) -> list[dict]:
+                          user_msg: str, max_tokens: int, timeout_s: float,
+                          nonce: str = "") -> list[dict]:
     #   synchronous fan-out: every logical judge in parallel, each with its own
     #   cross-provider failover. returns once all have settled.
     resolved = [(who, *panel.resolve_candidates(who)) for who in who_list]
@@ -174,7 +184,7 @@ async def run_panel_slots(panel, who_list: list[str], system_prompt: str, *,
             route_judge(panel.scheduler, client, logical, candidates, system_prompt,
                         role_label=role_label, effort=effort, profile=profile,
                         metrics=metrics, user_msg=user_msg, max_tokens=max_tokens,
-                        timeout_s=timeout_s)
+                        timeout_s=timeout_s, nonce=nonce)
             for (_who, logical, candidates) in resolved
         ])
     return results
@@ -223,7 +233,7 @@ class JobRunner:
     def submit(self, *, who_list: list[str], system_prompt: str, user_msg: str,
                max_tokens: int, role: str, merge_mode: str, kind: str,
                profile: str = "default", effort: str = "med",
-               timeout_s: float | None = None) -> dict:
+               timeout_s: float | None = None, nonce: str = "") -> dict:
         job_id = secrets.token_hex(8)
         judges: dict[str, dict] = {}
         scheduled = []
@@ -235,7 +245,7 @@ class JobRunner:
             else:
                 judges[who] = {"model": who, "status": "pending"}
                 scheduled.append((who, logical, candidates))
-        job = {"id": job_id, "kind": kind, "role": role, "merge": merge_mode,
+        job = {"id": job_id, "type": "panel", "kind": kind, "role": role, "merge": merge_mode,
                "profile": profile, "effort": effort,
                "created": time.time(), "judges": judges, "total": len(who_list)}
         with self.lock:
@@ -247,7 +257,7 @@ class JobRunner:
         for who, logical, candidates in scheduled:
             asyncio.run_coroutine_threadsafe(
                 self._run_judge(job_id, who, logical, candidates, system_prompt,
-                                user_msg, max_tokens, role, profile, effort, jt),
+                                user_msg, max_tokens, role, profile, effort, jt, nonce),
                 self.loop,
             )
         log_event("job_submitted", job_id=job_id, req_kind=kind, role=role,
@@ -257,7 +267,7 @@ class JobRunner:
     async def _run_judge(self, job_id: str, who: str, logical: str, candidates: list,
                          system_prompt: str, user_msg: str, max_tokens: int,
                          role_label: str, profile: str, effort: str,
-                         timeout_s: float) -> None:
+                         timeout_s: float, nonce: str = "") -> None:
         with self.lock:
             j = self.jobs.get(job_id)
             if j is not None:
@@ -266,7 +276,7 @@ class JobRunner:
             self.panel.scheduler, self._client, logical, candidates, system_prompt,
             role_label=role_label, effort=effort, profile=profile,
             metrics=self.panel.metrics, user_msg=user_msg, max_tokens=max_tokens,
-            timeout_s=timeout_s)
+            timeout_s=timeout_s, nonce=nonce)
         res["model"] = who
         res["status"] = "done" if res.get("ok") else "error"
         with self.lock:
@@ -277,11 +287,68 @@ class JobRunner:
                   routed_to=res.get("routed_to"), ok=res.get("ok"),
                   elapsed_s=res.get("elapsed_s"))
 
+    def submit_run(self, *, schematic, prompt: str, nonce: str,
+                   profile: str = "default", effort: str = "med") -> dict:
+        #   schedule a multi-stage orchestrator run on the background loop.
+        job_id = secrets.token_hex(8)
+        job = {"id": job_id, "type": "run", "task": schematic.task,
+               "task_type": schematic.task_type, "profile": profile, "effort": effort,
+               "created": time.time(), "status": "running", "result": None,
+               "stage_log": []}
+        with self.lock:
+            self._prune_locked()
+            self.jobs[job_id] = job
+        asyncio.run_coroutine_threadsafe(
+            self._run_orchestration(job_id, schematic, prompt, profile, effort, nonce),
+            self.loop,
+        )
+        log_event("run_submitted", job_id=job_id, task=schematic.task,
+                  task_type=schematic.task_type, profile=profile, effort=effort)
+        return self.snapshot(job_id)
+
+    async def _run_orchestration(self, job_id, schematic, prompt, profile, effort, nonce) -> None:
+        def _log(msg: str) -> None:
+            with self.lock:
+                j = self.jobs.get(job_id)
+                if j is not None:
+                    j["stage_log"].append(str(msg)[:200])
+                    j["stage_log"] = j["stage_log"][-50:]
+        try:
+            res = await orchestrator_execute(
+                schematic, self.panel.scheduler, self._client,
+                initial_context={"prompt": prompt}, log=_log,
+                metrics=self.panel.metrics, profile=profile, effort=effort, nonce=nonce)
+            serialized = orchestrate.serialize_run_result(res, task=schematic.task)
+        except Exception as e:  # noqa: BLE001 - a run must never crash the loop
+            serialized = {"ok": False, "task": schematic.task, "body": None,
+                          "artifacts": [], "error": f"{type(e).__name__}: {str(e)[:200]}",
+                          "judge": {"hard_fails": [], "soft_flags": []}, "stages": []}
+        with self.lock:
+            j = self.jobs.get(job_id)
+            if j is not None:
+                j["status"] = "complete"
+                j["result"] = serialized
+        log_event("run_settled", job_id=job_id, ok=serialized.get("ok"),
+                  rounds=serialized.get("rounds"), error=serialized.get("error"))
+
+    def _run_snapshot_locked(self, job: dict) -> dict:
+        return {
+            "job_id": job["id"], "type": "run", "status": job["status"],
+            "task": job["task"], "task_type": job["task_type"],
+            "profile": job["profile"], "effort": job["effort"],
+            "result": job.get("result"),
+            "stage_log": list(job.get("stage_log", []))[-12:],
+            "meta": {"complete": job["status"] == "complete",
+                     "age_s": round(time.time() - job["created"], 1)},
+        }
+
     def snapshot(self, job_id: str) -> dict | None:
         with self.lock:
             job = self.jobs.get(job_id)
             if job is None:
                 return None
+            if job.get("type") == "run":
+                return self._run_snapshot_locked(job)
             raw = [dict(v) for v in job["judges"].values()]
             kind, role, merge_mode = job["kind"], job["role"], job["merge"]
             created = job["created"]
