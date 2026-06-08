@@ -372,7 +372,7 @@ def _token_ok(header_value: str | None) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "loom-critique/1.0"
+    server_version = "loom-panel/2.0"
     panel: Panel  # injected on the server instance
 
     def _send_json(self, status: int, payload: dict) -> None:
