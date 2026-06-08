@@ -139,6 +139,14 @@ def _mock_content(picked, system: str, digest: str) -> str:
             f"===== END FILE [{nonce}] path=src/app.py =====\n"
         )
     low = system.lower()
+    if "json" in low and ("task_type" in low or "schematic" in low or "stages" in low):
+        return ('{"task_type": "freeform", "task": "mock planned task", '
+                '"stages": [{"name": "write", "role": "generator", '
+                '"instructions": "Produce what the prompt asks for.", '
+                '"inputs": ["prompt"], "max_tokens": 1000}], '
+                '"output_rules": {"format": "markdown"}, '
+                '"judge_config": {"rules": [], "plugins": [], "llm_judges": []}, '
+                '"max_rounds": 1}')
     if "json" in low and ('"pass"' in low or "verifier" in low or "pass:" in low):
         return '{"pass": true, "reason": "mock verifier approves"}'
     if "json" in low and ("extract" in low or "topics" in low):

@@ -29,8 +29,9 @@ _TMP = Path(tempfile.mkdtemp(prefix="sim-svc-"))
 metrics_mod.DATA_DIR = _TMP
 metrics_mod.FLUSH_EVERY = 1
 
-import critique_service as cs  # noqa: E402
 import orchestrate  # noqa: E402
+orchestrate.USER_TEMPLATES_DIR = _TMP / "user_templates"
+import critique_service as cs  # noqa: E402
 from jobs import JobRunner  # noqa: E402
 
 FAILS: list[str] = []
@@ -54,12 +55,13 @@ ARTIFACT_SCHEM = {
 
 async def scenario_templates_and_sync():
     print("scenario: templates listing + schematic resolution + sync run")
-    ids = [t["id"] for t in orchestrate.list_templates()]
+    store = orchestrate.TemplateStore()
+    ids = [t["id"] for t in store.list()]
     check("built-in templates listed", set(ids) >= {"freeform", "lesson_plan", "research_paper"}, f"ids={ids}")
 
-    schem, nonce = orchestrate.resolve_schematic("Write notes.", template_id="freeform", schematic_obj=None)
+    schem, nonce, _ = orchestrate.resolve_schematic(store, "Write notes.", template_id="freeform", schematic_obj=None)
     check("freeform resolves, no nonce (markdown)", schem.task_type == "freeform" and nonce == "")
-    schem2, nonce2 = orchestrate.resolve_schematic("x", template_id=None, schematic_obj=ARTIFACT_SCHEM)
+    schem2, nonce2, _ = orchestrate.resolve_schematic(store, "x", template_id=None, schematic_obj=ARTIFACT_SCHEM)
     check("files schematic gets a nonce", bool(nonce2), f"nonce={nonce2!r}")
 
     panel = cs.Panel()
@@ -80,7 +82,7 @@ def scenario_async_jobrunner():
     print("scenario: async JobRunner.submit_run + snapshot polling")
     panel = cs.Panel()
     runner = JobRunner(panel, judge_timeout_s=60.0)
-    schem, nonce = orchestrate.resolve_schematic("x", template_id=None, schematic_obj=ARTIFACT_SCHEM)
+    schem, nonce, _ = orchestrate.resolve_schematic(panel.templates, "x", template_id=None, schematic_obj=ARTIFACT_SCHEM)
     snap = runner.submit_run(schematic=schem, prompt="Build a CLI.", nonce=nonce,
                              profile="svc_async", effort="high")
     check("submit returns run snapshot", snap.get("type") == "run" and snap.get("status") == "running")
@@ -139,11 +141,52 @@ def scenario_materialize():
     check("traversal artifact not written outside dir", not (_TMP / "escape.txt").exists())
 
 
+async def scenario_template_registry():
+    print("scenario: user template registry (save/list/get/run/delete) + planner auto")
+    import orchestrate
+    os.environ["USER_TEMPLATES_DIR"] = str(_TMP / "user_templates")
+    orchestrate.USER_TEMPLATES_DIR = _TMP / "user_templates"
+    store = orchestrate.TemplateStore()
+    # save a user template
+    summary = store.save("my_builder", ARTIFACT_SCHEM)
+    check("save returns summary", summary["id"] == "my_builder" and summary["source"] == "user")
+    ids = [t["id"] for t in store.list()]
+    check("user template listed alongside built-ins", set(ids) >= {"freeform", "my_builder"}, f"ids={ids}")
+    check("get_dict returns the schematic", store.get_dict("my_builder")["task_type"] == "code_spec")
+    # reject built-in overwrite + bad schematic
+    try:
+        store.save("freeform", ARTIFACT_SCHEM); check("reject builtin overwrite", False)
+    except orchestrate.OrchestrateError:
+        check("reject builtin overwrite", True)
+    try:
+        store.save("bad", {"task_type": "x"}); check("reject invalid schematic", False)
+    except orchestrate.OrchestrateError:
+        check("reject invalid schematic", True)
+    # persistence: a fresh store reloads it
+    store2 = orchestrate.TemplateStore()
+    check("user template persisted across reload", "my_builder" in store2.ids())
+    # run by user-template id
+    panel = cs.Panel()
+    schem, nonce, plan_mode = orchestrate.resolve_schematic(
+        panel.templates, "build it", template_id="my_builder", schematic_obj=None)
+    check("resolve user template", schem.task_type == "code_spec" and bool(nonce) and not plan_mode)
+    # planner "auto" mode
+    schem_n, nonce_n, plan_mode_n = orchestrate.resolve_schematic(
+        panel.templates, "write a poem", template_id="auto", schematic_obj=None)
+    check("auto -> plan_mode (deferred)", schem_n is None and plan_mode_n)
+    res = await cs.run_orchestration_sync(panel, None, "Write a short poem.",
+                                          profile="plan", effort="med", nonce="", plan_mode=True)
+    check("planner auto run ok", res.get("ok"), f"err={res.get('error')}")
+    # delete
+    check("delete user template", store2.delete("my_builder") and "my_builder" not in orchestrate.TemplateStore().ids())
+
+
 async def main():
     await scenario_templates_and_sync()
     scenario_async_jobrunner()
     await scenario_panel_artifacts()
     scenario_materialize()
+    await scenario_template_registry()
     print()
     if FAILS:
         print(f"FAILED ({len(FAILS)}): {FAILS}")

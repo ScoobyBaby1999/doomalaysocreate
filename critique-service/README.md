@@ -201,9 +201,17 @@ A **template** (`orchestrator/templates/*.json`) declares `stages[]` (each a `ro
 natural-language `llm_judges`) with a `max_rounds` revise loop. Set
 `output_rules.format: "files"` and body-producing stages emit multi-file artifacts.
 
-### `GET /api/templates`
-Lists the built-in templates (`research_paper`, `lesson_plan`, `freeform`) with their
-stages, output format, and judge config.
+### Templates — built-in *and* your own
+
+- `GET /api/templates` — list built-in (`research_paper`, `lesson_plan`, `freeform`)
+  **and** user-authored templates, each tagged `source: builtin|user`.
+- `GET /api/templates/<id>` — fetch one template's schematic.
+- `POST /api/templates` — `{ "id": "...", "schematic": { ...TaskSchematic... } }` —
+  validate and **persist** your own template (mirrored to the HF Dataset so it
+  survives restarts; built-in ids are read-only).
+- `DELETE /api/templates/<id>` — remove a user template.
+- `POST /api/run` with `"template": "auto"` runs the **planner**: it classifies the
+  prompt and builds a schematic on the fly (no template needed).
 
 ### Multi-file artifact protocol (marker blocks + nonce)
 

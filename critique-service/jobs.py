@@ -288,25 +288,30 @@ class JobRunner:
                   elapsed_s=res.get("elapsed_s"))
 
     def submit_run(self, *, schematic, prompt: str, nonce: str,
-                   profile: str = "default", effort: str = "med") -> dict:
-        #   schedule a multi-stage orchestrator run on the background loop.
+                   profile: str = "default", effort: str = "med",
+                   plan_mode: bool = False) -> dict:
+        #   schedule a multi-stage orchestrator run on the background loop. when
+        #   plan_mode, `schematic` is None and the planner builds it inside the task.
         job_id = secrets.token_hex(8)
-        job = {"id": job_id, "type": "run", "task": schematic.task,
-               "task_type": schematic.task_type, "profile": profile, "effort": effort,
+        job = {"id": job_id, "type": "run",
+               "task": (schematic.task if schematic is not None else "(planning)"),
+               "task_type": (schematic.task_type if schematic is not None else "auto"),
+               "profile": profile, "effort": effort,
                "created": time.time(), "status": "running", "result": None,
                "stage_log": []}
         with self.lock:
             self._prune_locked()
             self.jobs[job_id] = job
         asyncio.run_coroutine_threadsafe(
-            self._run_orchestration(job_id, schematic, prompt, profile, effort, nonce),
+            self._run_orchestration(job_id, schematic, prompt, profile, effort, nonce, plan_mode),
             self.loop,
         )
-        log_event("run_submitted", job_id=job_id, task=schematic.task,
-                  task_type=schematic.task_type, profile=profile, effort=effort)
+        log_event("run_submitted", job_id=job_id, task=job["task"],
+                  task_type=job["task_type"], profile=profile, effort=effort, plan_mode=plan_mode)
         return self.snapshot(job_id)
 
-    async def _run_orchestration(self, job_id, schematic, prompt, profile, effort, nonce) -> None:
+    async def _run_orchestration(self, job_id, schematic, prompt, profile, effort,
+                                 nonce, plan_mode=False) -> None:
         def _log(msg: str) -> None:
             with self.lock:
                 j = self.jobs.get(job_id)
@@ -314,13 +319,22 @@ class JobRunner:
                     j["stage_log"].append(str(msg)[:200])
                     j["stage_log"] = j["stage_log"][-50:]
         try:
+            if plan_mode:
+                _log("[planner] building schematic from prompt")
+                schematic, nonce = await orchestrate.plan_now(
+                    prompt, self.panel.scheduler, self._client, log=_log)
+                with self.lock:
+                    j = self.jobs.get(job_id)
+                    if j is not None:
+                        j["task"], j["task_type"] = schematic.task, schematic.task_type
             res = await orchestrator_execute(
                 schematic, self.panel.scheduler, self._client,
                 initial_context={"prompt": prompt}, log=_log,
                 metrics=self.panel.metrics, profile=profile, effort=effort, nonce=nonce)
             serialized = orchestrate.serialize_run_result(res, task=schematic.task)
         except Exception as e:  # noqa: BLE001 - a run must never crash the loop
-            serialized = {"ok": False, "task": schematic.task, "body": None,
+            task = schematic.task if schematic is not None else "(planning failed)"
+            serialized = {"ok": False, "task": task, "body": None,
                           "artifacts": [], "error": f"{type(e).__name__}: {str(e)[:200]}",
                           "judge": {"hard_fails": [], "soft_flags": []}, "stages": []}
         with self.lock:

@@ -134,6 +134,7 @@ class Panel:
         #   one shared metrics store captures per-profile cost/throttle/latency.
         self.scheduler = SlotScheduler(base_slots)
         self.metrics = MetricStore()
+        self.templates = orchestrate.TemplateStore()
 
         #   pre-register logical-model candidate slots + default-panel slots so they
         #   join rotation from boot.
@@ -339,11 +340,14 @@ def submit_async(server_jobs: JobRunner, params: dict) -> dict:
 
 
 async def run_orchestration_sync(panel: Panel, schematic, prompt: str, *,
-                                 profile: str, effort: str, nonce: str) -> dict:
+                                 profile: str, effort: str, nonce: str,
+                                 plan_mode: bool = False) -> dict:
     #   synchronous multi-stage run (blocks until the pipeline settles). long
     #   templates should prefer async ({"async": true} -> poll GET /api/jobs/<id>).
     import httpx
     async with httpx.AsyncClient() as client:
+        if plan_mode:
+            schematic, nonce = await orchestrate.plan_now(prompt, panel.scheduler, client)
         res = await orchestrator_execute(
             schematic, panel.scheduler, client, initial_context={"prompt": prompt},
             log=lambda *_: None, metrics=panel.metrics, profile=profile,
@@ -398,8 +402,11 @@ class Handler(BaseHTTPRequestHandler):
                 "endpoints": {
                     "POST /api/critique": "critique a plan/schematic (preset)",
                     "POST /api/panel": "general: any role or custom system prompt",
-                    "POST /api/run": "multi-stage orchestrator template/schematic with judge loop + file artifacts",
-                    "GET /api/templates": "list built-in orchestrator templates",
+                    "POST /api/run": "orchestrator: template id | inline schematic | template:'auto' (planner); judge loop + file artifacts",
+                    "GET /api/templates": "list built-in + user templates",
+                    "GET /api/templates/<id>": "fetch one template's schematic",
+                    "POST /api/templates": "save a user template {id, schematic} (persisted)",
+                    "DELETE /api/templates/<id>": "delete a user template",
                     "GET /api/jobs/<id>": "poll an async job/run (when called with async:true)",
                     "GET /api/stats": "live rotation/health per provider + slot",
                     "GET /api/metrics?profile=<id>": "per-profile cost/throttle/latency aggregates",
@@ -412,11 +419,20 @@ class Handler(BaseHTTPRequestHandler):
                 "logical_models": sorted(panel.logical_models.keys()),
             })
             return
-        if route == "/api/templates":
+        if route == "/api/templates" or route.startswith("/api/templates/"):
             if not _token_ok(self.headers.get("Authorization")):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
-            self._send_json(200, {"templates": orchestrate.list_templates()})
+            panel: Panel = self.server.panel  # type: ignore[attr-defined]
+            if route == "/api/templates":
+                self._send_json(200, {"templates": panel.templates.list()})
+            else:
+                tid = route[len("/api/templates/"):]
+                data = panel.templates.get_dict(tid)
+                if data is None:
+                    self._send_json(404, {"error": f"no such template {tid!r}"})
+                else:
+                    self._send_json(200, {"id": tid, "schematic": data})
             return
         if route in ("/api/stats", "/api/metrics"):
             #   telemetry endpoints share the bearer token with the POST routes.
@@ -495,7 +511,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = self.path.rstrip("/")
-        if route not in ("/api/critique", "/api/panel", "/api/run"):
+        if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates"):
             self._send_json(404, {"error": "not found"})
             return
         payload = self._auth_and_body()
@@ -504,6 +520,9 @@ class Handler(BaseHTTPRequestHandler):
         panel: Panel = self.server.panel  # type: ignore[attr-defined]
         is_async = bool(payload.get("async"))
 
+        if route == "/api/templates":
+            self._handle_template_save(payload, panel)
+            return
         if route == "/api/run":
             self._handle_run(payload, panel, is_async)
             return
@@ -528,6 +547,44 @@ class Handler(BaseHTTPRequestHandler):
             log_event("request_error", route=route, error=repr(e)[:300])
             self._send_json(500, {"error": f"internal error: {type(e).__name__}"})
 
+    def _handle_template_save(self, payload: dict, panel: Panel) -> None:
+        #   POST /api/templates {id, schematic} -> validate + persist a user template.
+        tid = payload.get("id")
+        schematic_obj = payload.get("schematic")
+        if not isinstance(tid, str) or not tid.strip():
+            self._send_json(400, {"error": "'id' (string) is required"})
+            return
+        if not isinstance(schematic_obj, dict):
+            self._send_json(400, {"error": "'schematic' (object) is required"})
+            return
+        try:
+            summary = panel.templates.save(tid.strip(), schematic_obj)
+        except OrchestrateError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        self._send_json(201, {"saved": summary})
+
+    def do_DELETE(self) -> None:
+        from urllib.parse import urlsplit
+        route = urlsplit(self.path).path.rstrip("/")
+        if not route.startswith("/api/templates/"):
+            self._send_json(404, {"error": "not found"})
+            return
+        if not _token_ok(self.headers.get("Authorization")):
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        panel: Panel = self.server.panel  # type: ignore[attr-defined]
+        tid = route[len("/api/templates/"):]
+        try:
+            removed = panel.templates.delete(tid)
+        except OrchestrateError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        if not removed:
+            self._send_json(404, {"error": f"no such user template {tid!r}"})
+        else:
+            self._send_json(200, {"deleted": tid})
+
     def _handle_run(self, payload: dict, panel: Panel, is_async: bool) -> None:
         #   /api/run: drive a multi-stage orchestrator template/schematic with the
         #   built-in judge loop. returns the final body + multi-file artifacts.
@@ -542,9 +599,9 @@ class Handler(BaseHTTPRequestHandler):
             if schematic_obj is not None and not isinstance(schematic_obj, dict):
                 raise _BadRequest("'schematic' must be a JSON object")
             profile, effort = self._profile_and_effort(payload)
-            schematic, nonce = orchestrate.resolve_schematic(
-                prompt, template_id=template_id, schematic_obj=schematic_obj,
-                label=payload.get("label", ""))
+            schematic, nonce, plan_mode = orchestrate.resolve_schematic(
+                panel.templates, prompt, template_id=template_id,
+                schematic_obj=schematic_obj, label=payload.get("label", ""))
         except (_BadRequest, OrchestrateError) as e:
             self._send_json(400, {"error": str(e)})
             return
@@ -552,11 +609,12 @@ class Handler(BaseHTTPRequestHandler):
             if is_async:
                 snap = self.server.jobs.submit_run(  # type: ignore[attr-defined]
                     schematic=schematic, prompt=prompt, nonce=nonce,
-                    profile=profile, effort=effort)
+                    profile=profile, effort=effort, plan_mode=plan_mode)
                 self._send_json(202, snap)
             else:
                 result = asyncio.run(run_orchestration_sync(
-                    panel, schematic, prompt, profile=profile, effort=effort, nonce=nonce))
+                    panel, schematic, prompt, profile=profile, effort=effort,
+                    nonce=nonce, plan_mode=plan_mode))
                 self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 - never leak a stack trace
             log_event("request_error", route="/api/run", error=repr(e)[:300])
