@@ -52,6 +52,13 @@ from .roles import (
 from .schematic import StageDef, TaskSchematic
 
 
+import os
+
+# Per-stage call attempts: each retry picks a different slot (the failed provider
+# is excluded), so with a pool where several providers are throttled/broken we need
+# enough hops to reach a working carrier. Configurable via STAGE_CALL_ATTEMPTS.
+STAGE_CALL_ATTEMPTS = int(os.environ.get("STAGE_CALL_ATTEMPTS", "6"))
+
 # How many times a single stage can fail (call-level OR judge-level)
 # before we attempt mid-run decomposition. Keep small — repeated failure
 # means we're banging on a fundamentally wrong-sized task.
@@ -467,7 +474,7 @@ async def _execute_one_call(
 
     shard_label = f"{stage.name}[{shard_index}]" if shard_index is not None else stage.name
 
-    for attempt in range(3):
+    for attempt in range(STAGE_CALL_ATTEMPTS):
         try:
             slot = scheduler.pick_slot(
                 role=stage.role, exclude_providers=excluded_so_far,
@@ -562,7 +569,7 @@ async def _execute_one_call(
         )
 
     raise StageFailure(
-        f"all 3 attempts failed for stage {stage.name!r}; last: {last_error}"
+        f"all {STAGE_CALL_ATTEMPTS} attempts failed for stage {stage.name!r}; last: {last_error}"
     )
 
 

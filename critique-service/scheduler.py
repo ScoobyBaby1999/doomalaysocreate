@@ -80,12 +80,16 @@ class SlotScheduler:
         #       it (you can't hold a threading.Lock across await).
         self._lock = threading.Lock()
         self.provider_last_call: dict[str, float] = {}
-        #       per-provider call counts drive the rotation - the slot whose
-        #       provider has the fewest successful calls wins. seeded to 0
-        #       per process; pure runtime state, no disk.
+        #       per-provider success counts (telemetry) and ATTEMPT counts. rotation
+        #       ranks by attempts (every pick), not successes, so a chronically
+        #       failing provider accrues attempts and rotates to the back instead of
+        #       staying at 0 successes and hogging first pick. seeded to 0 per
+        #       process; pure runtime state, no disk.
         self.provider_calls: dict[str, int] = {}
+        self.provider_attempts: dict[str, int] = {}
         for s in slots:
             self.provider_calls.setdefault(s.provider.name, 0)
+            self.provider_attempts.setdefault(s.provider.name, 0)
 
     def add_slots(self, slots: list[slot]) -> None:
         #   register slots discovered after construction (logical-model candidates
@@ -98,6 +102,7 @@ class SlotScheduler:
                 self.slot_state[s.who] = SlotState()
                 self.family_state.setdefault(s.model_family, FamilyState())
                 self.provider_calls.setdefault(s.provider.name, 0)
+                self.provider_attempts.setdefault(s.provider.name, 0)
 
     def recency_mult(self, family: str) -> float:
         #   recent win -> 1x. nothing recent -> default 0.9. old win decays to 0.7.
@@ -133,13 +138,20 @@ class SlotScheduler:
 
     def rank_key(self, candidate: slot) -> tuple:
         #   sort key for slot picking. lowest tuple wins.
-        #     1. provider_calls asc - rotate; fewest-used provider wins
-        #     2. family_score desc  - prefer healthier model families
-        #     3. last_call asc      - freshest within a tie
-        provider_calls = self.provider_calls.get(candidate.provider.name, 0)
+        #     1. provider_attempts asc - rotate; fewest-ATTEMPTED provider wins so a
+        #        repeatedly-failing provider rotates to the back (not stuck at first).
+        #     2. family_score desc     - prefer healthier model families
+        #     3. last_call asc         - freshest within a tie
+        provider_attempts = self.provider_attempts.get(candidate.provider.name, 0)
         family_score = self.family_score(candidate.model_family)
         last_call = self.provider_last_call.get(candidate.provider.name, 0.0)
-        return (provider_calls, -family_score, last_call)
+        return (provider_attempts, -family_score, last_call)
+
+    def _mark_attempt(self, picked: slot) -> None:
+        #   called under the lock when a slot is selected. drives attempt-based rotation.
+        self.provider_attempts[picked.provider.name] = (
+            self.provider_attempts.get(picked.provider.name, 0) + 1
+        )
 
     @staticmethod
     def _as_exclude(exclude_providers: set[str] | str | None) -> set[str]:
@@ -174,7 +186,9 @@ class SlotScheduler:
                     f"{len(self.slots)} total)"
                 )
             eligible.sort(key=self.rank_key)
-            return eligible[0]
+            chosen = eligible[0]
+            self._mark_attempt(chosen)
+            return chosen
 
     def pick_slot_from(self, candidates: list[slot], role: Roles,
                        exclude_providers: set[str] | str | None = None) -> slot | None:
@@ -188,7 +202,9 @@ class SlotScheduler:
             if not eligible:
                 return None
             eligible.sort(key=self.rank_key)
-            return eligible[0]
+            chosen = eligible[0]
+            self._mark_attempt(chosen)
+            return chosen
 
     def record_success(self, picked: slot) -> None:
         with self._lock:
