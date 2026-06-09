@@ -47,9 +47,11 @@ _PICK_ROLE = Roles("critiquer")
 
 
 async def call_once(client: httpx.AsyncClient, picked, system_prompt: str, *,
-                    user_msg: str, max_tokens: int, timeout_s: float) -> dict:
+                    user_msg: str, max_tokens: int, timeout_s: float,
+                    extra_body: dict | None = None) -> dict:
     #   exactly one http exchange against one slot. never raises; returns a
-    #   structured result carrying ok / code / usage / latency.
+    #   structured result carrying ok / code / usage / latency. extra_body carries
+    #   per-model reasoning/thinking fields.
     t0 = time.monotonic()
     messages = [
         {"role": "system", "content": system_prompt},
@@ -57,7 +59,8 @@ async def call_once(client: httpx.AsyncClient, picked, system_prompt: str, *,
     ]
     try:
         content, usage = await call_slot(client, picked, messages=messages,
-                                         max_tokens=max_tokens, timeout_s=timeout_s)
+                                         max_tokens=max_tokens, timeout_s=timeout_s,
+                                         extra_body=extra_body)
         text = content.strip()
         if looks_like_refusal(text):
             res = {"ok": False, "code": "refusal", "error": f"refusal: {text[:160]!r}", "usage": usage}
@@ -75,11 +78,13 @@ async def call_once(client: httpx.AsyncClient, picked, system_prompt: str, *,
 async def route_judge(scheduler, client, logical: str, candidates: list, system_prompt: str, *,
                       role_label: str, effort: str, profile: str, metrics,
                       user_msg: str, max_tokens: int, timeout_s: float,
-                      nonce: str = "") -> dict:
+                      nonce: str = "", reasoning: bool = False, research: bool = False,
+                      reasoning_catalog: dict | None = None) -> dict:
     #   run one logical judge with cross-provider failover. asks the scheduler for
     #   the best eligible host, calls it, and on ANY failure records the penalty
     #   (cooldown/blacklist) + a metric event and bounces to the next provider that
     #   hosts the same model. every attempt is captured per-profile. never raises.
+    #   reasoning -> merge the model's thinking params; research -> web ReAct loop.
     tried: set[str] = set()
     candidates_tried: list[str] = []
     attempts = 0
@@ -97,8 +102,21 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
         attempts += 1
         candidates_tried.append(picked.who)
         await scheduler.wait_for_provider_pacing(picked)
-        res = await call_once(client, picked, system_prompt, user_msg=user_msg,
-                              max_tokens=max_tokens, timeout_s=timeout_s)
+        #   resolve this model's thinking params when deep reasoning is requested.
+        extra_body = None
+        if (reasoning or research) and reasoning_catalog is not None:
+            from providers import resolve_reasoning_body
+            extra_body = resolve_reasoning_body(
+                reasoning_catalog, logical=logical, who=picked.who,
+                family=picked.model_family) or None
+        if research:
+            import agent
+            res = await agent.research_call(
+                client, picked, system_prompt, user_msg=user_msg,
+                max_tokens=max_tokens, timeout_s=timeout_s, extra_body=extra_body)
+        else:
+            res = await call_once(client, picked, system_prompt, user_msg=user_msg,
+                                  max_tokens=max_tokens, timeout_s=timeout_s, extra_body=extra_body)
         usage = res.get("usage") or {}
         in_tok, out_tok = usage.get("prompt_tokens"), usage.get("completion_tokens")
         if res["ok"]:
@@ -108,6 +126,11 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
             out = {"model": logical, "routed_to": picked.who, "ok": True,
                    "output": res["output"], "elapsed_s": res["elapsed_s"],
                    "attempts": attempts, "candidates_tried": list(candidates_tried)}
+            if usage.get("reasoning_content"):
+                out["reasoning"] = usage["reasoning_content"]
+            for k in ("steps", "searches", "tool_calls"):
+                if res.get(k) is not None:
+                    out[k] = res[k]
             if nonce:
                 #   panel-mode artifacts: each model's reply becomes its own file
                 #   tree (kept fully separate; nothing merged).
@@ -137,6 +160,7 @@ def _emit(metrics, profile, logical, picked, role_label, effort, res,
     if metrics is None:
         return
     try:
+        _reason = (res.get("usage") or {}).get("reasoning_content")
         metrics.record(
             profile=profile, logical=logical, provider=picked.provider.name,
             model=picked.model, family=picked.model_family, role=role_label,
@@ -144,6 +168,9 @@ def _emit(metrics, profile, logical, picked, role_label, effort, res,
             in_tokens=in_tok, out_tokens=out_tok, ok=res["ok"], code=res["code"],
             attempts=attempts, routed_to=picked.who,
             candidates_tried=list(candidates_tried), mock=_is_mock(), output=output,
+            steps=res.get("steps"), searches=res.get("searches"),
+            tool_calls=res.get("tool_calls"),
+            reasoning_chars=(len(_reason) if _reason else None),
         )
     except Exception as e:  # noqa: BLE001 - metrics must never break a judge
         log_event("metrics_record_error", error=repr(e)[:200])
@@ -175,16 +202,19 @@ def _budget_guard(scheduler, metrics, profile: str, picked) -> None:
 async def run_panel_slots(panel, who_list: list[str], system_prompt: str, *,
                           role_label: str, effort: str, profile: str, metrics,
                           user_msg: str, max_tokens: int, timeout_s: float,
-                          nonce: str = "") -> list[dict]:
+                          nonce: str = "", reasoning: bool = False,
+                          research: bool = False) -> list[dict]:
     #   synchronous fan-out: every logical judge in parallel, each with its own
     #   cross-provider failover. returns once all have settled.
     resolved = [(who, *panel.resolve_candidates(who)) for who in who_list]
+    rcat = getattr(panel, "reasoning_catalog", None)
     async with httpx.AsyncClient() as client:
         results = await asyncio.gather(*[
             route_judge(panel.scheduler, client, logical, candidates, system_prompt,
                         role_label=role_label, effort=effort, profile=profile,
                         metrics=metrics, user_msg=user_msg, max_tokens=max_tokens,
-                        timeout_s=timeout_s, nonce=nonce)
+                        timeout_s=timeout_s, nonce=nonce, reasoning=reasoning,
+                        research=research, reasoning_catalog=rcat)
             for (_who, logical, candidates) in resolved
         ])
     return results
@@ -233,7 +263,8 @@ class JobRunner:
     def submit(self, *, who_list: list[str], system_prompt: str, user_msg: str,
                max_tokens: int, role: str, merge_mode: str, kind: str,
                profile: str = "default", effort: str = "med",
-               timeout_s: float | None = None, nonce: str = "") -> dict:
+               timeout_s: float | None = None, nonce: str = "",
+               reasoning: bool = False, research: bool = False) -> dict:
         job_id = secrets.token_hex(8)
         judges: dict[str, dict] = {}
         scheduled = []
@@ -257,17 +288,19 @@ class JobRunner:
         for who, logical, candidates in scheduled:
             asyncio.run_coroutine_threadsafe(
                 self._run_judge(job_id, who, logical, candidates, system_prompt,
-                                user_msg, max_tokens, role, profile, effort, jt, nonce),
+                                user_msg, max_tokens, role, profile, effort, jt, nonce,
+                                reasoning, research),
                 self.loop,
             )
         log_event("job_submitted", job_id=job_id, req_kind=kind, role=role,
-                  profile=profile, effort=effort, judges=len(who_list))
+                  profile=profile, effort=effort, research=research, judges=len(who_list))
         return self.snapshot(job_id)
 
     async def _run_judge(self, job_id: str, who: str, logical: str, candidates: list,
                          system_prompt: str, user_msg: str, max_tokens: int,
                          role_label: str, profile: str, effort: str,
-                         timeout_s: float, nonce: str = "") -> None:
+                         timeout_s: float, nonce: str = "",
+                         reasoning: bool = False, research: bool = False) -> None:
         with self.lock:
             j = self.jobs.get(job_id)
             if j is not None:
@@ -276,7 +309,8 @@ class JobRunner:
             self.panel.scheduler, self._client, logical, candidates, system_prompt,
             role_label=role_label, effort=effort, profile=profile,
             metrics=self.panel.metrics, user_msg=user_msg, max_tokens=max_tokens,
-            timeout_s=timeout_s, nonce=nonce)
+            timeout_s=timeout_s, nonce=nonce, reasoning=reasoning, research=research,
+            reasoning_catalog=getattr(self.panel, "reasoning_catalog", None))
         res["model"] = who
         res["status"] = "done" if res.get("ok") else "error"
         with self.lock:

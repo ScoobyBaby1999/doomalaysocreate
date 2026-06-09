@@ -1,0 +1,20 @@
+{
+  "//": "Per-model reasoning/thinking adapter. Maps a model to the request-body fields",
+  "//1": "that enable its deep-thinking mode on its host. Resolution order at call time:",
+  "//2": "exact 'provider/model' -> logical name -> model family -> '*' default.",
+  "//3": "'body' is shallow-merged into the chat-completions request when reasoning is on.",
+  "//4": "Every host exposes thinking differently, so these are filled in per model as we",
+  "//5": "confirm the exact param from each provider's docs (editable, zero code changes).",
+  "//6": "Leave 'body' empty {} to rely on big token budget + the model's default behaviour.",
+
+  "reasoning": {
+    "*": { "body": {}, "note": "default: no special param; rely on token budget + native behaviour" },
+    "glm-5.1": { "body": {}, "note": "TODO: set NVIDIA-NIM thinking param (z.ai uses thinking.type=enabled)" },
+    "deepseek-v4-pro": { "body": {}, "note": "reasons natively; no param" },
+    "deepseek-v3": { "body": {}, "note": "non-reasoning by default" },
+    "deepseek-r1": { "body": {}, "note": "reasons natively; emits reasoning_content" },
+    "kimi-k2.6": { "body": {}, "note": "TODO: confirm Moonshot/NIM thinking param" },
+    "nemotron-ultra": { "body": {}, "note": "TODO: confirm" },
+    "phi-4-reasoning": { "body": {}, "note": "reasoning model by design" }
+  }
+}

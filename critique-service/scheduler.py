@@ -369,7 +369,11 @@ class SlotScheduler:
 
 async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict[str, str]],
                     *, max_tokens: int, timeout_s: float = 600.0,
-                    response_format: dict | None = None) -> tuple[str, dict]:
+                    response_format: dict | None = None,
+                    extra_body: dict | None = None) -> tuple[str, dict]:
+    #   extra_body carries per-model reasoning/thinking fields (from reasoning_catalog)
+    #   that are shallow-merged into the request. On success, usage may include a
+    #   "reasoning_content" key when a thinking model streamed its trace.
     import mock_provider
     if mock_provider.ENABLED:
         return await mock_provider.mock_call_slot(
@@ -390,6 +394,8 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
     }
     if response_format is not None:
         body["response_format"] = response_format
+    if extra_body:
+        body.update(extra_body)
 
     log_base = dict(provider=p.name, model=picked.model, family=picked.model_family,
                     slot=picked.who)
@@ -529,16 +535,19 @@ async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: di
                     usage = chunk["usage"]
 
         content = "".join(content_parts)
+        reasoning = "".join(reasoning_parts)
         if not content.strip():
-            content = "".join(reasoning_parts)
+            content = reasoning
         duration = round(time.monotonic() - t_call, 2)
         if not content or not content.strip():
             log_event("call_fail", **log_base, http_status=status, fail_code="empty",
                       reason="empty content (stream)", duration_s=duration)
             raise ProviderError(f"empty:empty content from {picked.who}")
+        if reasoning.strip():
+            usage = dict(usage or {}, reasoning_content=reasoning)
         log_event("call_ok", **log_base, http_status=status, duration_s=duration,
                   in_tokens=usage.get("prompt_tokens"), out_tokens=usage.get("completion_tokens"),
-                  out_chars=len(content), streamed=True)
+                  out_chars=len(content), reasoning_chars=len(reasoning), streamed=True)
         return content, usage
     except httpx.HTTPError as e:
         duration = round(time.monotonic() - t_call, 2)

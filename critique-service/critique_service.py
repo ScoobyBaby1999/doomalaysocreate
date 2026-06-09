@@ -16,6 +16,7 @@ from orchestrate import OrchestrateError
 from orchestrator.orchestrator import execute as orchestrator_execute
 from providers import (
     load_models_catalog,
+    load_reasoning_catalog,
     make_provider_registry,
     make_slot,
     make_slot_registry,
@@ -103,6 +104,12 @@ def resolve_effort(effort: str | None) -> dict:
     return EFFORT_MODES.get((effort or DEFAULT_EFFORT), EFFORT_MODES["med"])
 
 
+# deep-reasoning / research "burn tokens" budget. when reasoning or research is on,
+# the per-judge budget jumps to this floor and the timeout maxes out (long by design;
+# prefer async). research adds the web ReAct loop on top.
+RESEARCH_MAX_TOKENS = int(os.environ.get("RESEARCH_MAX_TOKENS", "16000"))
+
+
 def apply_effort(params: dict, effort: str) -> dict:
     #   trim the panel width, scale tokens, and set the per-judge timeout per the
     #   manual effort mode. mutates + returns params.
@@ -111,6 +118,9 @@ def apply_effort(params: dict, effort: str) -> dict:
     params["who_list"] = params["who_list"][: cfg["num_models"]]
     params["max_tokens"] = max(64, int(params["max_tokens"] * cfg["max_tokens_mult"]))
     params["timeout_s"] = min(JUDGE_TIMEOUT_S, cfg["timeout_s"])
+    if params.get("reasoning") or params.get("research"):
+        params["max_tokens"] = max(params["max_tokens"], RESEARCH_MAX_TOKENS)
+        params["timeout_s"] = JUDGE_TIMEOUT_S
     return params
 
 
@@ -135,6 +145,7 @@ class Panel:
         self.scheduler = SlotScheduler(base_slots)
         self.metrics = MetricStore()
         self.templates = orchestrate.TemplateStore()
+        self.reasoning_catalog = load_reasoning_catalog()
 
         #   pre-register logical-model candidate slots + default-panel slots so they
         #   join rotation from boot.
@@ -258,7 +269,8 @@ def build_panel_params(panel: Panel, *, input_text: str, role: str,
                        system: str | None, instructions: str | None,
                        output_rules: str | None, template: str | None,
                        panel_override: list[str] | None, merge_mode: str | None,
-                       max_tokens: int | None, want_artifacts: bool = False) -> dict:
+                       max_tokens: int | None, want_artifacts: bool = False,
+                       reasoning: bool = False, research: bool = False) -> dict:
     #   generalized: any loom role, or a fully custom system prompt. this is what
     #   turns the critique panel into a general "ask my frontier panel to do X".
     if system:
@@ -293,6 +305,8 @@ def build_panel_params(panel: Panel, *, input_text: str, role: str,
         "max_tokens": mt,
         "who_list": list(panel_override or panel.default_panel),
         "nonce": nonce,
+        "reasoning": bool(reasoning or research),
+        "research": bool(research),
     }
 
 
@@ -306,7 +320,8 @@ async def run_sync(panel: Panel, params: dict) -> dict:
         profile=params.get("profile", "default"), metrics=panel.metrics,
         user_msg=params["user_msg"], max_tokens=params["max_tokens"],
         timeout_s=params.get("timeout_s", JUDGE_TIMEOUT_S),
-        nonce=params.get("nonce", ""),
+        nonce=params.get("nonce", ""), reasoning=params.get("reasoning", False),
+        research=params.get("research", False),
     )
     finished, merged = finalize_judges(judges, params["kind"], params["merge"])
     ok_count = sum(1 for j in finished if j.get("ok"))
@@ -336,6 +351,7 @@ def submit_async(server_jobs: JobRunner, params: dict) -> dict:
         role=params["role"], merge_mode=params["merge"], kind=params["kind"],
         profile=params.get("profile", "default"), effort=params.get("effort", DEFAULT_EFFORT),
         timeout_s=params.get("timeout_s"), nonce=params.get("nonce", ""),
+        reasoning=params.get("reasoning", False), research=params.get("research", False),
     )
 
 
@@ -669,6 +685,7 @@ class Handler(BaseHTTPRequestHandler):
             template=payload.get("template"), panel_override=panel_override or None,
             merge_mode=merge_mode, max_tokens=max_tokens,
             want_artifacts=bool(payload.get("artifacts")),
+            reasoning=bool(payload.get("reasoning")), research=bool(payload.get("research")),
         )
         params["profile"] = profile
         return apply_effort(params, effort)

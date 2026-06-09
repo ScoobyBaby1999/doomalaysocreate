@@ -160,6 +160,30 @@ def load_models_catalog() -> dict[str, dict]:
             if not k.startswith("//") and isinstance(v, dict) and v.get("candidates")}
 
 
+REASONING_CATALOG_PATH = Path(os.environ.get("REASONING_CATALOG", HERE / "reasoning_catalog.json"))
+
+
+def load_reasoning_catalog() -> dict[str, dict]:
+    #   per-model thinking-mode adapter: model key -> {"body": {...}}. tolerant of
+    #   comment keys. absent file -> empty (everything uses token budget only).
+    try:
+        raw = _load_json_commented(REASONING_CATALOG_PATH).get("reasoning", {})
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in raw.items() if not k.startswith("//") and isinstance(v, dict)}
+
+
+def resolve_reasoning_body(catalog: dict[str, dict], *, logical: str | None,
+                           who: str | None, family: str | None) -> dict:
+    #   pick the most specific reasoning body: provider/model -> logical -> family -> '*'.
+    for key in (who, logical, family, "*"):
+        if key and key in catalog:
+            body = catalog[key].get("body")
+            if isinstance(body, dict):
+                return dict(body)
+    return {}
+
+
 def _first_env(env_var) -> str:
     #   env_var may be a single name or a list (first present wins).
     names = [env_var] if isinstance(env_var, str) else list(env_var or [])

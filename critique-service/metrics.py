@@ -34,6 +34,7 @@ EVENT_FIELDS = (
     "ts", "profile", "logical", "provider", "model", "family", "role", "effort",
     "latency_s", "in_tokens", "out_tokens", "ok", "code", "attempts",
     "routed_to", "candidates_tried", "mock",
+    "steps", "searches", "tool_calls", "reasoning_chars",
 )
 
 # keep at most this many recent events per profile in memory for live aggregation.
@@ -133,7 +134,9 @@ class MetricStore:
                in_tokens: int | None, out_tokens: int | None, ok: bool, code: str,
                attempts: int, routed_to: str | None,
                candidates_tried: list[str] | None = None, mock: bool = False,
-               output: str | None = None) -> None:
+               output: str | None = None, steps: int | None = None,
+               searches: int | None = None, tool_calls: int | None = None,
+               reasoning_chars: int | None = None) -> None:
         now = time.time()
         ev: dict[str, Any] = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
@@ -144,6 +147,8 @@ class MetricStore:
             "ok": bool(ok), "code": code, "attempts": attempts,
             "routed_to": routed_to, "candidates_tried": candidates_tried or [],
             "mock": bool(mock),
+            "steps": steps, "searches": searches, "tool_calls": tool_calls,
+            "reasoning_chars": reasoning_chars,
         }
         if SAMPLE_OUTPUTS and output:
             ev["output_sample"] = output[:500]

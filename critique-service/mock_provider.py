@@ -110,6 +110,20 @@ async def mock_call_slot(client, picked, messages, *, max_tokens: int,
     system = messages[0]["content"] if messages else ""
     prompt = messages[-1]["content"] if messages else ""
     digest = hashlib.sha1(f"{picked.who}:{prompt}".encode()).hexdigest()[:8]
+    #   research ReAct protocol: if tools are offered and we haven't observed yet,
+    #   emit one search action; after an OBSERVATION, write the final answer.
+    if "## Research tools" in system:
+        #   only look at non-system turns (the protocol text in `system` mentions
+        #   "OBSERVATION:", which must not be mistaken for a real tool observation).
+        joined = " ".join(m.get("content", "") for m in messages if m.get("role") != "system")
+        if "OBSERVATION:" not in joined and "FINAL answer now" not in joined:
+            content = f'ACTION: web_search {{"query": "mock query {digest}"}}'
+        else:
+            content = (f"Final answer ({digest}): based on the search, here is the synthesized "
+                       f"result. Source: [Mock](https://example.com/a).\n\n- key finding one")
+        out_tokens = min(max_tokens, max(8, len(content) // 4))
+        return (content, {"prompt_tokens": max(1, len(system) // 4), "completion_tokens": out_tokens,
+                          "reasoning_content": f"(mock thinking {digest})"})
     content = _mock_content(picked, system, digest)
     in_tokens = max(1, len(system) // 4)
     out_tokens = min(max_tokens, max(8, len(content) // 4))
