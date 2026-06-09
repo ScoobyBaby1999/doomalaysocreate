@@ -9,7 +9,7 @@
 
   "reasoning": {
     "*": { "body": {}, "note": "default: no special param; rely on token budget + native behaviour" },
-    "glm-5.1": { "body": {}, "note": "TODO: set NVIDIA-NIM thinking param (z.ai uses thinking.type=enabled)" },
+    "glm-5.1": { "body": {"chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false}}, "note": "NVIDIA NIM GLM thinking mode (confirmed)" },
     "deepseek-v4-pro": { "body": {}, "note": "reasons natively; no param" },
     "deepseek-v3": { "body": {}, "note": "non-reasoning by default" },
     "deepseek-r1": { "body": {}, "note": "reasons natively; emits reasoning_content" },
