@@ -153,7 +153,11 @@ def load_provider_catalog() -> list[dict]:
 
 
 def load_models_catalog() -> dict[str, dict]:
-    return _load_json_commented(MODELS_CATALOG_PATH).get("logical_models", {})
+    raw = _load_json_commented(MODELS_CATALOG_PATH).get("logical_models", {})
+    #   keep only real logical-model entries: a dict with candidates. tolerates any
+    #   "//..." section-marker keys or stray string values in the JSON.
+    return {k: v for k, v in raw.items()
+            if not k.startswith("//") and isinstance(v, dict) and v.get("candidates")}
 
 
 def _first_env(env_var) -> str:

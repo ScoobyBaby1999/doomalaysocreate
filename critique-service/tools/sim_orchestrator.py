@@ -15,10 +15,10 @@ os.environ.setdefault("MOCK_MODE", "1")
 os.environ.setdefault("LOOM_LOG", "0")
 os.environ["CRITIQUE_TOKEN"] = "test"
 os.environ.pop("METRICS_HF_REPO", None)
-for key in ("NVIDIA_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY",
+for key in ("NVIDIA_API_KEY", "CF_API_TOKEN", "CF_ACCOUNT_ID",
             "OPENROUTER_API_KEY", "GITHUB_TOKEN"):
     os.environ[key] = "mock"
-for p in ("NVIDIA", "GROQ", "CEREBRAS", "OPENROUTER", "GITHUB_MODELS"):
+for p in ("NVIDIA", "CLOUDFLARE", "OPENROUTER", "GITHUB_MODELS"):
     os.environ[f"MOCK_RPD_{p}"] = "1000"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

@@ -20,11 +20,10 @@ os.environ.setdefault("LOOM_LOG", "0")            # quiet the per-call telemetry
 os.environ["CRITIQUE_TOKEN"] = "test-token"
 os.environ.pop("METRICS_HF_REPO", None)           # in-memory persistence only
 os.environ.pop("OPTIN_PROVIDERS", None)
-for key in ("NVIDIA_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY",
-            "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN"):
+for key in ("NVIDIA_API_KEY", "CF_API_TOKEN", "CF_ACCOUNT_ID", "OPENROUTER_API_KEY", "GITHUB_TOKEN"):
     os.environ[key] = "mock"
 # generous default synthetic budgets; individual scenarios tighten as needed.
-for p in ("NVIDIA", "GROQ", "CEREBRAS", "GOOGLE", "OPENROUTER", "GITHUB_MODELS"):
+for p in ("NVIDIA", "CLOUDFLARE", "OPENROUTER", "GITHUB_MODELS"):
     os.environ[f"MOCK_RPD_{p}"] = "1000"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -52,7 +51,7 @@ def fresh_panel(budgets: dict[str, int] | None = None, faults: dict[str, str] | 
     #   clean metrics dir + reset the mock limiter so each scenario starts fresh.
     for f in _TMP.glob("*.jsonl"):
         f.unlink()
-    for p in ("NVIDIA", "GROQ", "CEREBRAS", "GOOGLE", "OPENROUTER", "GITHUB_MODELS"):
+    for p in ("NVIDIA", "CLOUDFLARE", "OPENROUTER", "GITHUB_MODELS"):
         os.environ[f"MOCK_RPD_{p}"] = str((budgets or {}).get(p, 1000))
     mock_provider.reset(faults)
     return cs.Panel()
@@ -85,28 +84,28 @@ async def scenario_rotation():
 
 async def scenario_failover():
     print("scenario: a 429 bounces to another provider hosting the same model")
-    panel = fresh_panel(faults={"groq": "429"})
+    panel = fresh_panel(faults={"cloudflare": "429"})
     res = await run(panel, ["llama-3.3-70b"], "p_fail", effort="low")
     judge = res["judges"][0]
     check("failover judge succeeded", judge.get("ok") is True, f"err={judge.get('error')}")
     routed = judge.get("routed_to") or ""
-    check("failover routed away from groq", not routed.startswith("groq"), f"routed_to={routed}")
+    check("failover routed away from cloudflare", not routed.startswith("cloudflare"), f"routed_to={routed}")
     check("failover tried >1 candidate", judge.get("attempts", 0) >= 2, f"attempts={judge.get('attempts')}")
     agg = panel.metrics.aggregates("p_fail")
-    groq = agg["by_provider"].get("groq", {})
-    check("failover recorded groq 429", groq.get("throttle_429", 0) >= 1, f"groq={groq}")
+    cf = agg["by_provider"].get("cloudflare", {})
+    check("failover recorded cloudflare 429", cf.get("throttle_429", 0) >= 1, f"cloudflare={cf}")
 
 
 async def scenario_budget():
     print("scenario: per-profile budget exhaustion cools the provider")
-    panel = fresh_panel(budgets={"GOOGLE": 2})
-    results = [await run(panel, ["gemini-2.5-pro"], "p_bud", effort="low") for _ in range(4)]
+    panel = fresh_panel(budgets={"GITHUB_MODELS": 2})
+    results = [await run(panel, ["gpt-4o-mini"], "p_bud", effort="low") for _ in range(4)]
     oks = [r["judges"][0].get("ok") for r in results]
     check("first calls ok then exhausted", oks[0] and not oks[-1], f"oks={oks}")
-    roll = panel.scheduler.provider_rollup().get("google", {})
-    agg = panel.metrics.aggregates("p_bud").get("by_provider", {}).get("google", {})
-    check("google shows throttle in metrics", agg.get("throttle_429", 0) >= 1, f"google={agg}")
-    check("google has a cooling slot", roll.get("cooling_slots", 0) >= 1, f"rollup={roll}")
+    roll = panel.scheduler.provider_rollup().get("github-models", {})
+    agg = panel.metrics.aggregates("p_bud").get("by_provider", {}).get("github-models", {})
+    check("github-models shows throttle in metrics", agg.get("throttle_429", 0) >= 1, f"gh={agg}")
+    check("github-models has a cooling slot", roll.get("cooling_slots", 0) >= 1, f"rollup={roll}")
 
 
 async def scenario_profile_isolation():
@@ -125,7 +124,7 @@ async def scenario_profile_isolation():
 async def scenario_effort():
     print("scenario: manual effort scales fan-out width + tokens")
     panel = fresh_panel()
-    wide = ["llama-3.3-70b", "qwen3-235b", "glm-5.1", "deepseek-v4-pro", "kimi-k2.6"]
+    wide = ["llama-3.3-70b", "deepseek-v3", "glm-5.1", "deepseek-v4-pro", "kimi-k2.6"]
     low = cs.apply_effort({"who_list": list(wide), "max_tokens": 1000}, "low")
     high = cs.apply_effort({"who_list": list(wide), "max_tokens": 1000}, "high")
     check("low effort -> 1 judge", len(low["who_list"]) == 1, f"n={len(low['who_list'])}")

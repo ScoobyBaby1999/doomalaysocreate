@@ -1,16 +1,12 @@
 {
   "//": "Provider pool catalog. Single source of truth for WHERE models are hosted +",
   "//1": "each host's published free-tier limits. providers.py reads this at boot.",
-  "//2": "",
-  "//3": "pool: 'core'  = recurring-free hosts, always in rotation if their key is set.",
-  "//4": "      'optin' = trial/native/paid hosts, only registered when their name is",
-  "//5": "                listed in the OPTIN_PROVIDERS env var (comma-separated).",
-  "//6": "env_var: which env key holds the API key. a list means first-present wins.",
-  "//7": "requires: extra env vars that must ALSO be set (e.g. account id) or we skip it.",
-  "//8": "base_url: may contain {VAR} placeholders filled from the environment.",
-  "//9": "limits: published free-tier ceilings (null = unknown). these are GLOBAL facts,",
-  "//10": "       not per-profile; metrics.py tracks the per-profile real-world usage.",
-  "//11": "xAI Grok is intentionally excluded entirely (user preference).",
+  "//2": "Curated from live testing (2026-06): only the 4 providers with working keys",
+  "//3": "are kept. Removed: cerebras (key had no model access / 404), google+groq",
+  "//4": "(no key), zai+moonshot (native free tier 429s), fireworks+sambanova (no key).",
+  "//5": "Re-add any of them by restoring a block below + setting OPTIN_PROVIDERS.",
+  "//6": "Status tags in notes: (ok) live-verified, (empty/gated) correct slug but not",
+  "//7": "serving on this account yet, (429) throttled. xAI Grok excluded entirely.",
 
   "providers": [
     {
@@ -22,34 +18,48 @@
       "limits": {"rpm": 40, "rpd": null, "tpm": null, "tpd": null, "concurrency": 4, "monthly_credit": "free credits"},
       "models": [
         "meta/llama-3.3-70b-instruct",
-        "nvidia/llama-3.1-nemotron-ultra-253b-v1",
-        "deepseek-ai/deepseek-r1",
-        "qwen/qwen2.5-coder-32b-instruct",
         "z-ai/glm-5.1",
         "deepseek-ai/deepseek-v4-pro",
-        "moonshotai/kimi-k2.6"
+        "moonshotai/kimi-k2.6",
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        "stepfun-ai/step-3.7-flash"
       ],
-      "note": "free credits, generous rpm, broad frontier lineup. re-hosts GLM/DeepSeek/Kimi."
+      "note": "free credits, generous rpm. glm-5.1/dsv4pro/kimi/nemotron-550b ok; step-3.7-flash empty so far."
     },
     {
-      "name": "google",
+      "name": "cloudflare",
       "pool": "core",
-      "env_var": ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
-      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      "region": "us",
-      "limits": {"rpm": 15, "rpd": 1500, "tpm": 1000000, "tpd": null, "concurrency": 2, "monthly_credit": "free tier (AI Studio)"},
-      "models": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
-      "note": "gemini via openai-compat endpoint. low rpm, daily request cap."
+      "env_var": "CF_API_TOKEN",
+      "requires": ["CF_ACCOUNT_ID"],
+      "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1/chat/completions",
+      "region": "global",
+      "limits": {"rpm": 30, "rpd": 10000, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "Workers AI free allocation (neurons/day)"},
+      "models": [
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "@cf/meta/llama-3.1-8b-instruct-fast",
+        "@cf/openai/gpt-oss-120b",
+        "@cf/moonshotai/kimi-k2.6",
+        "@cf/google/gemma-4-26b-a4b-it",
+        "@cf/qwen/qwen2.5-coder-32b-instruct"
+      ],
+      "note": "fast. llama-3.3-70b/3.1-8b + gpt-oss-120b (needs >=800 tokens) ok; kimi/gemma-4 empty so far."
     },
     {
-      "name": "cerebras",
+      "name": "github-models",
       "pool": "core",
-      "env_var": "CEREBRAS_API_KEY",
-      "base_url": "https://api.cerebras.ai/v1/chat/completions",
+      "env_var": ["GITHUB_TOKEN", "GH_TOKEN"],
+      "base_url": "https://models.github.ai/inference/chat/completions",
       "region": "us",
-      "limits": {"rpm": 30, "rpd": null, "tpm": null, "tpd": 1000000, "concurrency": 2, "monthly_credit": "free tier"},
-      "models": ["qwen-3-235b-a22b-instruct-2507", "llama-3.3-70b", "llama3.1-8b"],
-      "note": ">2000 tokens/sec, ~1M tokens/day cap. fastest large-model host."
+      "limits": {"rpm": 15, "rpd": 150, "tpm": null, "tpd": null, "concurrency": 1, "monthly_credit": "free (low-tier rate limits)"},
+      "models": [
+        "openai/gpt-4o-mini",
+        "meta/llama-3.3-70b-instruct",
+        "deepseek/deepseek-v3-0324",
+        "microsoft/Phi-4-reasoning",
+        "openai/gpt-5",
+        "deepseek/DeepSeek-R1-0528"
+      ],
+      "note": "gpt-4o-mini/deepseek-v3/Phi-4-reasoning ok; gpt-5 (400) + DeepSeek-R1-0528 (403) need a higher GitHub Models tier."
     },
     {
       "name": "openrouter",
@@ -63,88 +73,14 @@
         "X-Title": "loom model panel"
       },
       "models": [
-        "z-ai/glm-4.5-air:free",
-        "qwen/qwen3-next-80b-a3b-instruct:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "moonshotai/kimi-k2.6:free",
         "meta-llama/llama-3.3-70b-instruct:free",
-        "google/gemma-3-27b-it:free"
+        "qwen/qwen3-next-80b-a3b-instruct:free",
+        "microsoft/mai-ds-r1",
+        "poolside/laguna-m.1:free"
       ],
-      "note": "shared free quota across all users; once it 429s it stays capped a while."
-    },
-    {
-      "name": "groq",
-      "pool": "core",
-      "env_var": "GROQ_API_KEY",
-      "base_url": "https://api.groq.com/openai/v1/chat/completions",
-      "region": "us",
-      "limits": {"rpm": 30, "rpd": 14400, "tpm": 6000, "tpd": 500000, "concurrency": 2, "monthly_credit": "free tier"},
-      "models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"],
-      "note": "fastest provider. 30 rpm, ~14.4k req/day, low tpm."
-    },
-    {
-      "name": "cloudflare",
-      "pool": "core",
-      "env_var": "CF_API_TOKEN",
-      "requires": ["CF_ACCOUNT_ID"],
-      "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1/chat/completions",
-      "region": "global",
-      "limits": {"rpm": 30, "rpd": 10000, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "Workers AI free allocation (neurons/day)"},
-      "models": [
-        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-        "@cf/qwen/qwen2.5-coder-32b-instruct",
-        "@cf/meta/llama-3.1-8b-instruct-fast"
-      ],
-      "note": "Workers AI openai-compat. needs CF_ACCOUNT_ID. daily 'neuron' budget."
-    },
-    {
-      "name": "github-models",
-      "pool": "core",
-      "env_var": ["GITHUB_TOKEN", "GH_TOKEN"],
-      "base_url": "https://models.github.ai/inference/chat/completions",
-      "region": "us",
-      "limits": {"rpm": 15, "rpd": 150, "tpm": null, "tpd": null, "concurrency": 1, "monthly_credit": "free (low-tier rate limits)"},
-      "models": ["openai/gpt-4o-mini", "meta/llama-3.3-70b-instruct", "deepseek/deepseek-v3-0324"],
-      "note": "GitHub Models marketplace. low daily cap; good as a failover tier."
-    },
-
-    {
-      "name": "zai",
-      "pool": "optin",
-      "env_var": "ZAI_API_KEY",
-      "base_url": "https://api.z.ai/api/paas/v4/chat/completions",
-      "region": "cn",
-      "limits": {"rpm": 30, "rpd": null, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "trial credits then paid"},
-      "models": ["glm-5.1", "glm-4.7", "glm-4.5-air"],
-      "note": "native GLM (paid side). opt-in: set OPTIN_PROVIDERS=zai."
-    },
-    {
-      "name": "moonshot",
-      "pool": "optin",
-      "env_var": "MOONSHOT_API_KEY",
-      "base_url": "https://api.moonshot.ai/v1/chat/completions",
-      "region": "cn",
-      "limits": {"rpm": 30, "rpd": null, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "trial credits then paid"},
-      "models": ["kimi-k2.6", "kimi-k2.5", "kimi-k2-0905-preview"],
-      "note": "native Kimi (paid side). opt-in: set OPTIN_PROVIDERS=moonshot."
-    },
-    {
-      "name": "fireworks",
-      "pool": "optin",
-      "env_var": "FIREWORKS_API_KEY",
-      "base_url": "https://api.fireworks.ai/inference/v1/chat/completions",
-      "region": "us",
-      "limits": {"rpm": 60, "rpd": null, "tpm": null, "tpd": null, "concurrency": 4, "monthly_credit": "trial credits then paid"},
-      "models": ["accounts/fireworks/models/llama-v3p3-70b-instruct", "accounts/fireworks/models/qwen3-235b-a22b"],
-      "note": "non-recurring-free (trial). opt-in: set OPTIN_PROVIDERS=fireworks."
-    },
-    {
-      "name": "sambanova",
-      "pool": "optin",
-      "env_var": "SAMBANOVA_API_KEY",
-      "base_url": "https://api.sambanova.ai/v1/chat/completions",
-      "region": "us",
-      "limits": {"rpm": 30, "rpd": null, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "trial credits then paid"},
-      "models": ["Meta-Llama-3.3-70B-Instruct", "Qwen3-32B"],
-      "note": "non-recurring-free (trial). opt-in: set OPTIN_PROVIDERS=sambanova."
+      "note": "shared free quota (429s often). nemotron-super-120b ok; kimi/llama free 429; mai-ds-r1 no endpoint; laguna empty."
     }
   ]
 }

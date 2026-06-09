@@ -1,28 +1,23 @@
 {
-  "//": "The judge/model panel. EDIT THIS FILE to change models - no code changes.",
-  "//1": "Each 'slot' is 'provider/model'. Any provider/model named here is registered",
-  "//2": "on the fly against that provider's API key.",
+  "//": "The default judge/model panel. EDIT THIS FILE to change models - no code changes.",
+  "//1": "Each entry is a LOGICAL model (see models_catalog.json) or a physical",
+  "//2": "'provider/model' slot. Logical names get cross-provider failover for free.",
   "//3": "",
-  "//4": "KEY INSIGHT: the native APIs (z.ai, moonshot) are the PAID side of those",
-  "//5": "products - their free tier is the website chat, not the API, so they 429.",
-  "//6": "NVIDIA NIM (build.nvidia.com) re-hosts the SAME frontier models on free",
-  "//7": "credits. So we route all three top-tier judges through NVIDIA = free + working:",
-  "//8": "  - nvidia/z-ai/glm-5.1                 -> GLM 5.1        (free via NVIDIA NIM)",
-  "//9": "  - nvidia/deepseek-ai/deepseek-v4-pro  -> DeepSeek V4 Pro (free via NVIDIA NIM)",
-  "//10": "  - nvidia/moonshotai/kimi-k2.6        -> Kimi K2.6      (free via NVIDIA NIM)",
-  "//11": "",
-  "//12": "All need only NVIDIA_API_KEY. DeepSeek V4 Pro queues/stalls on NVIDIA's free",
-  "//13": "tier - use async mode ({\"async\":true} + poll GET /api/jobs/<id>); the job just",
-  "//14": "stays 'running' until it lands and never blocks the other judges.",
-  "//15": "Native routes (zai/glm-5.1, moonshot/kimi-k2.6) stay in providers.py as PAID",
-  "//16": "alternates; google/gemini-* is also wired if you add GOOGLE_API_KEY.",
+  "//4": "FRONTIER panel (chosen 2026-06, all live-verified): the heavy hitters used as",
+  "//5": "the default judges for /api/critique and the default /api/panel + /api/run.",
+  "//6": "  - kimi-k2.6        Kimi K2.6        (nvidia; ~2s)",
+  "//7": "  - deepseek-v4-pro  DeepSeek V4 Pro  (nvidia; ~5s)",
+  "//8": "  - deepseek-v3      DeepSeek V3      (github-models; ~1s)",
+  "//9": "  - glm-5.1          GLM 5.1          (nvidia; ~37s, deep but slow - prefer async)",
+  "//10": "Swap in nemotron-ultra / deepseek-r1 (frontier) or any basic logical anytime.",
 
   "judges": [
-    {"slot": "nvidia/z-ai/glm-5.1",                "weight": 1, "note": "GLM 5.1 via NVIDIA NIM (free)"},
-    {"slot": "nvidia/deepseek-ai/deepseek-v4-pro", "weight": 1, "note": "DeepSeek V4 Pro via NVIDIA NIM (free; slow/queued - use async)"},
-    {"slot": "nvidia/moonshotai/kimi-k2.6",        "weight": 1, "note": "Kimi K2.6 via NVIDIA NIM (free)"}
+    {"slot": "kimi-k2.6",       "weight": 1, "note": "Kimi K2.6 via NVIDIA NIM"},
+    {"slot": "deepseek-v4-pro", "weight": 1, "note": "DeepSeek V4 Pro via NVIDIA NIM"},
+    {"slot": "deepseek-v3",     "weight": 1, "note": "DeepSeek V3 via GitHub Models"},
+    {"slot": "glm-5.1",         "weight": 1, "note": "GLM 5.1 via NVIDIA NIM (slow; use async)"}
   ],
 
-  "max_parallel": 3,
+  "max_parallel": 4,
   "rubric": "critiquer"
 }
