@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -11,6 +12,12 @@ import httpx
 from content.roles import Roles
 from providers import slot
 from oplog import log_event
+
+# Stream responses by default. Long-reasoning models (DeepSeek V4 Pro / R1, etc.)
+# emit large outputs that, non-streamed, make the provider hold the connection
+# until done - tripping gateway 504s / read timeouts even though the model streams
+# instantly in the vendor playground. STREAM=0 to disable.
+STREAM_DEFAULT = os.environ.get("STREAM", "1").strip() not in ("0", "false", "no", "")
 
 
 # scheduler: picks slots by score + rotation + cooldown, paces calls per provider,
@@ -387,6 +394,9 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
     log_base = dict(provider=p.name, model=picked.model, family=picked.model_family,
                     slot=picked.who)
 
+    if STREAM_DEFAULT:
+        return await _call_slot_stream(client, picked, headers, body, timeout_s, log_base)
+
     t_call = time.monotonic()
     status: int | None = None
     try:
@@ -455,6 +465,81 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
                   out_chars=len(content))
         return content, (usage if isinstance(usage, dict) else {})
 
+    except httpx.HTTPError as e:
+        duration = round(time.monotonic() - t_call, 2)
+        log_event("call_fail", **log_base, http_status=status,
+                  fail_code="http", reason=repr(e)[:300], duration_s=duration)
+        raise ProviderError(f"http:{e!r}")
+
+
+
+async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: dict,
+                            body: dict, timeout_s: float, log_base: dict) -> tuple[str, dict]:
+    #   streaming variant: keeps the connection alive across long generations and
+    #   surfaces reasoning_content for thinking models. accumulates SSE deltas into
+    #   one (content, usage) result, mapping the same error codes as the sync path.
+    p = picked.provider
+    sbody = dict(body, stream=True, stream_options={"include_usage": True})
+    t_call = time.monotonic()
+    status: int | None = None
+    try:
+        async with client.stream("POST", p.url, headers=headers, json=sbody, timeout=timeout_s) as response:
+            status = response.status_code
+            if status != 200:
+                text = (await response.aread()).decode("utf-8", "replace")[:200]
+                duration = round(time.monotonic() - t_call, 2)
+                if status == 429:
+                    log_event("call_fail", **log_base, http_status=429, fail_code="429",
+                              reason="HTTP 429", duration_s=duration)
+                    raise ProviderError(f"429:HTTP 429 from {picked.who}")
+                if status in (400, 401, 403, 404, 413, 422):
+                    log_event("call_fail", **log_base, http_status=status, fail_code=str(status),
+                              reason=f"HTTP {status}: {text}", duration_s=duration)
+                    raise ProviderError(f"{status}:HTTP {status}: {text}")
+                code = "524" if status == 524 else ("5xx" if status >= 500 else "http")
+                log_event("call_fail", **log_base, http_status=status, fail_code=code,
+                          reason=f"HTTP {status}: {text}", duration_s=duration)
+                raise ProviderError(f"{code}:HTTP {status}: {text}")
+
+            content_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            usage: dict = {}
+            async for line in response.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except ValueError:
+                    continue
+                if isinstance(chunk, dict) and chunk.get("error"):
+                    err = chunk["error"]
+                    ecode = str(err.get("code", "unknown"))
+                    raise ProviderError(f"{ecode}:upstream {ecode}: {str(err.get('message',''))[:200]}")
+                for ch in (chunk.get("choices") or []):
+                    delta = ch.get("delta") or {}
+                    if delta.get("content"):
+                        content_parts.append(delta["content"])
+                    if delta.get("reasoning_content"):
+                        reasoning_parts.append(delta["reasoning_content"])
+                if isinstance(chunk.get("usage"), dict):
+                    usage = chunk["usage"]
+
+        content = "".join(content_parts)
+        if not content.strip():
+            content = "".join(reasoning_parts)
+        duration = round(time.monotonic() - t_call, 2)
+        if not content or not content.strip():
+            log_event("call_fail", **log_base, http_status=status, fail_code="empty",
+                      reason="empty content (stream)", duration_s=duration)
+            raise ProviderError(f"empty:empty content from {picked.who}")
+        log_event("call_ok", **log_base, http_status=status, duration_s=duration,
+                  in_tokens=usage.get("prompt_tokens"), out_tokens=usage.get("completion_tokens"),
+                  out_chars=len(content), streamed=True)
+        return content, usage
     except httpx.HTTPError as e:
         duration = round(time.monotonic() - t_call, 2)
         log_event("call_fail", **log_base, http_status=status,
