@@ -16,7 +16,7 @@ from scheduler import ProviderError, call_slot
 # thinking trace is surfaced via usage["reasoning_content"]. Never raises - mirrors
 # jobs.call_once's result shape (+ steps/searches/tool_calls).
 
-RESEARCH_MAX_STEPS = int(os.environ.get("RESEARCH_MAX_STEPS", "5"))
+RESEARCH_MAX_STEPS = int(os.environ.get("RESEARCH_MAX_STEPS", "8"))
 
 
 async def research_call(client: httpx.AsyncClient, picked, system_prompt: str, *,

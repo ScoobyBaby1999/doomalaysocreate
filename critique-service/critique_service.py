@@ -67,8 +67,12 @@ OUTPUT_RULES = (
     "- If the plan is genuinely strong, still surface its 1-3 weakest points."
 )
 
-CRITIQUE_MAX_TOKENS = int(os.environ.get("CRITIQUE_MAX_TOKENS", "1500"))
-JUDGE_TIMEOUT_S = float(os.environ.get("JUDGE_TIMEOUT_S", "900"))  # frontier reasoning models are slow; async mode makes long waits free
+# budgets are UPPER BOUNDS, not targets: models stop when done and free tiers bill
+# nothing extra for headroom, so we set them at the playground-grade 16k the frontier
+# hosts use. the only true per-request output ceiling lives in providers_catalog
+# limits.max_out (e.g. GitHub Models ~4k) and is clamped per-provider in call_slot.
+CRITIQUE_MAX_TOKENS = int(os.environ.get("CRITIQUE_MAX_TOKENS", "16384"))
+JUDGE_TIMEOUT_S = float(os.environ.get("JUDGE_TIMEOUT_S", "1800"))  # frontier reasoning models are slow; async mode makes long waits free
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", str(1_000_000)))
 
 # generalized /api/panel: any loom role (or a fully custom system prompt) fanned
@@ -84,8 +88,8 @@ ROLE_DEFAULT_MERGE = {
     "planner": "concat",
 }
 ROLE_DEFAULT_MAX_TOKENS = {
-    "critiquer": 1500, "schematic_critiquer": 1500, "verifier": 1000,
-    "parser": 1500, "planner": 3000, "generator": 4000, "transformer": 4000,
+    "critiquer": 16384, "schematic_critiquer": 16384, "verifier": 8192,
+    "parser": 8192, "planner": 16384, "generator": 16384, "transformer": 16384,
 }
 MERGE_MODES = ("dedupe", "vote", "concat", "none")
 
@@ -93,9 +97,9 @@ MERGE_MODES = ("dedupe", "vote", "concat", "none")
 # the per-judge token budget, and the per-judge timeout. applied in build_*_params.
 DEFAULT_EFFORT = os.environ.get("DEFAULT_EFFORT", "med").strip() or "med"
 EFFORT_MODES = {
-    "low":  {"num_models": 1, "max_tokens_mult": 0.5, "timeout_s": 120.0},
-    "med":  {"num_models": 3, "max_tokens_mult": 1.0, "timeout_s": 300.0},
-    "high": {"num_models": 5, "max_tokens_mult": 1.5, "timeout_s": 600.0},
+    "low":  {"num_models": 1, "max_tokens_mult": 0.5, "timeout_s": 300.0},
+    "med":  {"num_models": 3, "max_tokens_mult": 1.0, "timeout_s": 900.0},
+    "high": {"num_models": 5, "max_tokens_mult": 1.5, "timeout_s": 1200.0},
     "max":  {"num_models": 99, "max_tokens_mult": 2.0, "timeout_s": JUDGE_TIMEOUT_S},
 }
 
@@ -107,7 +111,7 @@ def resolve_effort(effort: str | None) -> dict:
 # deep-reasoning / research "burn tokens" budget. when reasoning or research is on,
 # the per-judge budget jumps to this floor and the timeout maxes out (long by design;
 # prefer async). research adds the web ReAct loop on top.
-RESEARCH_MAX_TOKENS = int(os.environ.get("RESEARCH_MAX_TOKENS", "16000"))
+RESEARCH_MAX_TOKENS = int(os.environ.get("RESEARCH_MAX_TOKENS", "32768"))
 
 
 def apply_effort(params: dict, effort: str) -> dict:
@@ -277,7 +281,7 @@ def build_panel_params(panel: Panel, *, input_text: str, role: str,
         system_prompt = f"{system.strip()}\n\n## Input\n{input_text}"
         role_label = "custom"
         mode = merge_mode or "concat"
-        mt = max_tokens or 4000
+        mt = max_tokens or 16384
     else:
         system_prompt = make_prompt(
             role,
@@ -288,7 +292,7 @@ def build_panel_params(panel: Panel, *, input_text: str, role: str,
         )
         role_label = role
         mode = merge_mode or ROLE_DEFAULT_MERGE.get(role, "none")
-        mt = max_tokens or ROLE_DEFAULT_MAX_TOKENS.get(role, 2000)
+        mt = max_tokens or ROLE_DEFAULT_MAX_TOKENS.get(role, 8192)
     #   artifacts mode: ask each model to emit a multi-file tree (marker blocks +
     #   nonce); each judge's reply is parsed into its OWN tree, kept fully separate.
     nonce = ""
@@ -673,8 +677,8 @@ class Handler(BaseHTTPRequestHandler):
         if merge_mode is not None and merge_mode not in MERGE_MODES:
             raise _BadRequest(f"'merge' must be one of {list(MERGE_MODES)}")
         max_tokens = payload.get("max_tokens")
-        if max_tokens is not None and (not isinstance(max_tokens, int) or not 1 <= max_tokens <= 32000):
-            raise _BadRequest("'max_tokens' must be an int in 1..32000")
+        if max_tokens is not None and (not isinstance(max_tokens, int) or not 1 <= max_tokens <= 131072):
+            raise _BadRequest("'max_tokens' must be an int in 1..131072")
         panel_override = payload.get("panel")
         if not self._valid_panel(panel_override):
             raise _BadRequest("'panel' must be a list of 'provider/model' strings")

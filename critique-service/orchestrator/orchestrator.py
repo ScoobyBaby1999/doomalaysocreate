@@ -69,14 +69,17 @@ STAGE_FAILURE_THRESHOLD = 2
 # cannot decompose further (would risk infinite tree growth).
 MAX_DECOMPOSITION_DEPTH = 1
 
-# Default max_tokens by role when the StageDef doesn't specify.
+# Default max_tokens by role when the StageDef doesn't specify. Upper bounds, not
+# targets - thinking models spend part of the budget on reasoning traces, so these
+# sit at playground-grade levels; the per-provider limits.max_out clamp in call_slot
+# protects hosts with real per-request ceilings (e.g. GitHub Models).
 _ROLE_DEFAULT_MAX_TOKENS = {
-    Role.PLANNER: 4000,
-    Role.GENERATOR: 8000,
-    Role.REVIEWER: 4000,
-    Role.TRANSFORMER: 8000,
-    Role.EXTRACTOR: 2000,
-    Role.VERIFIER: 200,
+    Role.PLANNER: 16384,
+    Role.GENERATOR: 16384,
+    Role.REVIEWER: 8192,
+    Role.TRANSFORMER: 16384,
+    Role.EXTRACTOR: 8192,
+    Role.VERIFIER: 1024,
 }
 
 
@@ -464,7 +467,7 @@ async def _execute_one_call(
         inputs_rendered=inputs_rendered,
     )
 
-    max_tokens = stage.max_tokens or _ROLE_DEFAULT_MAX_TOKENS.get(stage.role, 4000)
+    max_tokens = stage.max_tokens or _ROLE_DEFAULT_MAX_TOKENS.get(stage.role, 8192)
 
     # Up to 3 retries at the call layer (different slot each time via
     # scheduler bandit). Each retry adds the failed slot's provider to

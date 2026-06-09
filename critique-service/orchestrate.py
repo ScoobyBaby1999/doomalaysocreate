@@ -169,7 +169,7 @@ _FREEFORM = {
     "stages": [{"name": "write", "role": "generator",
                 "instructions": "Produce exactly what the user asked for. No preamble, "
                                 "no meta-commentary; begin with the content directly.",
-                "inputs": ["prompt"], "max_tokens": 4000}],
+                "inputs": ["prompt"], "max_tokens": 16384}],
     "output_rules": {"format": "markdown"},
     "judge_config": {"rules": [], "plugins": [], "llm_judges": []},
     "max_rounds": 1,

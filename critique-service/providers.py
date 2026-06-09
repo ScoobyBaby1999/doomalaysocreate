@@ -45,6 +45,7 @@ class provider:
     tpd: int | None = None                              # tokens/day
     concurrency: int | None = None
     monthly_credit: str = ""
+    max_out: int | None = None                          # hard per-request output-token ceiling (None = uncapped)
 
 
 @dataclass(frozen=True)
@@ -240,6 +241,7 @@ def make_provider_registry() -> list[provider]:
             tpd=limits.get("tpd"),
             concurrency=limits.get("concurrency"),
             monthly_credit=limits.get("monthly_credit", ""),
+            max_out=limits.get("max_out"),
         ))
     return providers
 

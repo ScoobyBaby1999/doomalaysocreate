@@ -381,6 +381,11 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
             timeout_s=timeout_s, response_format=response_format)
 
     p = picked.provider
+    #   clamp to the provider's published per-request output ceiling (e.g. GitHub
+    #   Models free tier rejects ~4k+). everywhere else stays uncapped so frontier
+    #   models can use their full budget.
+    if p.max_out:
+        max_tokens = min(max_tokens, p.max_out)
     headers = {
         "Authorization": f"Bearer {p.api_key}",
         "Content-Type": "application/json",

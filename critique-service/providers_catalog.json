@@ -52,7 +52,7 @@
       "env_var": ["GITHUB_TOKEN", "GH_TOKEN"],
       "base_url": "https://models.github.ai/inference/chat/completions",
       "region": "us",
-      "limits": {"rpm": 15, "rpd": 150, "tpm": null, "tpd": null, "concurrency": 1, "monthly_credit": "free (low-tier rate limits)"},
+      "limits": {"rpm": 15, "rpd": 150, "tpm": null, "tpd": null, "concurrency": 1, "monthly_credit": "free (low-tier rate limits)", "max_out": 4000},
       "models": [
         "meta/llama-3.3-70b-instruct",
         "deepseek/deepseek-v3-0324",

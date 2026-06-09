@@ -52,7 +52,7 @@ the default panel, available roles and merge modes. Used by HF's healthcheck.
   "system":       "<fully custom system prompt; overrides role if given>",     // optional
   "panel":        ["llama-3.3-70b", "glm-5.1", "provider/model", ...], // logical names OR physical slots; defaults to panel.json
   "merge":        "dedupe|vote|concat|none", // optional; sensible default per role
-  "max_tokens":   1500,                       // optional
+  "max_tokens":   16384,                      // optional; upper bound (1..131072). GitHub Models clamps to its ~4k ceiling automatically
   "profile":      "default",                  // optional; metrics namespace (a user may have many)
   "effort":       "low|med|high|max"          // optional; manual fan-out width + token/timeout budget
 }
