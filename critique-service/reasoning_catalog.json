@@ -7,28 +7,37 @@
   "//5": "confirm the exact param from each provider's docs (editable, zero code changes).",
   "//6": "Leave 'body' empty {} to rely on big token budget + the model's default behaviour.",
   "//7": "IMPORTANT: the SAME logical model uses DIFFERENT param shapes per host - NVIDIA",
-  "//8": "NIM uses chat_template_kwargs, OpenRouter uses top-level reasoning:{enabled}. So",
-  "//9": "multi-host models are keyed by exact 'provider/model' to avoid leaking the wrong",
-  "//10": "shape to a host that would reject it; single-host models keep the logical key.",
+  "//8": "NIM uses chat_template_kwargs, OpenRouter uses top-level reasoning:{enabled},",
+  "//9": "Cloudflare's newer slots use top-level reasoning_effort or chat_template_kwargs.",
+  "//10": "Multi-host models are keyed by exact 'provider/model' so the wrong shape never",
+  "//11": "leaks to a host that would 400 it (a 400 blacklists the slot - keep shapes exact).",
+  "//12": "Capability sweep 2026-06: ctx windows + extra knobs recorded in notes below.",
 
   "reasoning": {
     "*": { "body": {}, "note": "default: no special param; rely on token budget + native behaviour" },
 
-    "glm-5.1": { "body": {"chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false}}, "note": "NVIDIA NIM only; confirmed thinking mode" },
-    "deepseek-v4-pro": { "body": {"chat_template_kwargs": {"thinking": true, "reasoning_effort": "max"}}, "note": "NVIDIA NIM only; thinking + reasoning_effort max|high|none (confirmed)" },
-    "deepseek-v3": { "body": {}, "note": "non-reasoning by default" },
-    "deepseek-r1": { "body": {}, "note": "github/openrouter reason natively; emit reasoning_content" },
-    "phi-4-reasoning": { "body": {}, "note": "reasoning model by design (github models)" },
+    "glm-5.1": { "body": {"chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false}}, "note": "NVIDIA NIM only; confirmed. ctx 131k in/out; emits reasoning_content" },
+    "deepseek-v4-pro": { "body": {"chat_template_kwargs": {"thinking": true, "reasoning_effort": "max"}}, "note": "NVIDIA NIM only; confirmed. reasoning_effort max|high|none; ctx 1M" },
+    "deepseek-v3": { "body": {}, "note": "non-reasoning by default (github models)" },
+    "deepseek-r1": { "body": {}, "note": "github R1-0528 + cloudflare r1-distill-qwen-32b (80k ctx) reason natively; no param" },
+    "phi-4-reasoning": { "body": {}, "note": "reasoning model by design (github models; streams its think trace)" },
 
-    "nvidia/moonshotai/kimi-k2.6": { "body": {"chat_template_kwargs": {"thinking": true}}, "note": "NVIDIA NIM Kimi thinking (confirmed; top-level param, merged into body)" },
-    "openrouter/moonshotai/kimi-k2.6:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle" },
-    "kimi-k2.6": { "body": {}, "note": "fallback (e.g. cloudflare host): no thinking param" },
+    "nvidia/moonshotai/kimi-k2.6": { "body": {"chat_template_kwargs": {"thinking": true}}, "note": "NVIDIA NIM Kimi thinking (confirmed). ctx 256k; vision-capable (MoonViT)" },
+    "openrouter/moonshotai/kimi-k2.6:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle; ctx 262k" },
+    "cloudflare/@cf/moonshotai/kimi-k2.6": { "body": {"reasoning_effort": "high"}, "note": "CF schema exposes reasoning_effort (no chat_template_kwargs); ctx 262k; tools + parallel_tool_calls" },
+    "kimi-k2.6": { "body": {}, "note": "fallback for unlisted hosts: no thinking param" },
 
-    "nvidia/nvidia/nemotron-3-ultra-550b-a55b": { "body": {"chat_template_kwargs": {"enable_thinking": true}, "reasoning_budget": 16384}, "note": "NVIDIA NIM Nemotron-3 Ultra thinking + reasoning_budget (confirmed)" },
-    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle" },
+    "nvidia/nvidia/nemotron-3-ultra-550b-a55b": { "body": {"chat_template_kwargs": {"enable_thinking": true}, "reasoning_budget": 16384}, "note": "confirmed. ctx up to 1M. extra knobs: chat_template_kwargs.medium_effort (cheaper traces), force_nonempty_content:true REQUIRED when combining tools+thinking; reasoning_budget is soft (closes at newline before budget or +500 tok)" },
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle; ctx 1M" },
+    "cloudflare/@cf/nvidia/nemotron-3-120b-a12b": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "note": "CF schema exposes chat_template_kwargs + reasoning_effort; ctx 256k; tools" },
     "nemotron-ultra": { "body": {}, "note": "fallback: no thinking param" },
 
-    "nvidia/google/gemma-4-31b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "note": "NVIDIA NIM Gemma-4 thinking (confirmed)" },
-    "openrouter/google/gemma-4-31b-it:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle" }
+    "nvidia/google/gemma-4-31b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "note": "confirmed. ctx 256k; vision (image+video). rec sampling: temp 1.0 / top_p 0.95 / top_k 64" },
+    "openrouter/google/gemma-4-31b-it:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle; ctx 256k" },
+    "cloudflare/@cf/google/gemma-4-26b-a4b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "note": "CF schema exposes chat_template_kwargs + reasoning_effort; ctx 256k; vision" },
+
+    "gpt-oss-120b": { "body": {}, "note": "CF chat-completions schema does NOT list reasoning_effort (responses API only) - a rejected param would 400-blacklist the slot, so effort stays default. raise via system prompt 'Reasoning: high' if needed. ctx 128k" },
+    "qwen3-coder-480b": { "body": {}, "note": "non-thinking by design; ctx 262k native (1M YaRN); tools w/ qwen3_coder parser" },
+    "step-flash": { "body": {}, "note": "no thinking param documented; ctx 256k; vision; 100-350 tok/s" }
   }
 }

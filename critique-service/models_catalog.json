@@ -42,7 +42,14 @@
     "deepseek-r1": {
       "family": "deepseek-r1",
       "candidates": [
-        {"provider": "github-models", "model": "deepseek/DeepSeek-R1-0528"}
+        {"provider": "github-models", "model": "deepseek/DeepSeek-R1-0528"},
+        {"provider": "cloudflare", "model": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b"}
+      ]
+    },
+    "nemotron-120b": {
+      "family": "nemotron-3-120b",
+      "candidates": [
+        {"provider": "cloudflare", "model": "@cf/nvidia/nemotron-3-120b-a12b"}
       ]
     },
 
