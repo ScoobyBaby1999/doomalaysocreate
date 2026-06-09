@@ -6,15 +6,29 @@
   "//4": "Every host exposes thinking differently, so these are filled in per model as we",
   "//5": "confirm the exact param from each provider's docs (editable, zero code changes).",
   "//6": "Leave 'body' empty {} to rely on big token budget + the model's default behaviour.",
+  "//7": "IMPORTANT: the SAME logical model uses DIFFERENT param shapes per host - NVIDIA",
+  "//8": "NIM uses chat_template_kwargs, OpenRouter uses top-level reasoning:{enabled}. So",
+  "//9": "multi-host models are keyed by exact 'provider/model' to avoid leaking the wrong",
+  "//10": "shape to a host that would reject it; single-host models keep the logical key.",
 
   "reasoning": {
     "*": { "body": {}, "note": "default: no special param; rely on token budget + native behaviour" },
-    "glm-5.1": { "body": {"chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false}}, "note": "NVIDIA NIM GLM thinking mode (confirmed)" },
-    "deepseek-v4-pro": { "body": {}, "note": "reasons natively; no param" },
+
+    "glm-5.1": { "body": {"chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false}}, "note": "NVIDIA NIM only; confirmed thinking mode" },
+    "deepseek-v4-pro": { "body": {"chat_template_kwargs": {"thinking": true, "reasoning_effort": "max"}}, "note": "NVIDIA NIM only; thinking + reasoning_effort max|high|none (confirmed)" },
     "deepseek-v3": { "body": {}, "note": "non-reasoning by default" },
-    "deepseek-r1": { "body": {}, "note": "reasons natively; emits reasoning_content" },
-    "kimi-k2.6": { "body": {}, "note": "TODO: confirm Moonshot/NIM thinking param" },
-    "nemotron-ultra": { "body": {}, "note": "TODO: confirm" },
-    "phi-4-reasoning": { "body": {}, "note": "reasoning model by design" }
+    "deepseek-r1": { "body": {}, "note": "github/openrouter reason natively; emit reasoning_content" },
+    "phi-4-reasoning": { "body": {}, "note": "reasoning model by design (github models)" },
+
+    "nvidia/moonshotai/kimi-k2.6": { "body": {"chat_template_kwargs": {"thinking": true}}, "note": "NVIDIA NIM Kimi thinking (confirmed; top-level param, merged into body)" },
+    "openrouter/moonshotai/kimi-k2.6:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle" },
+    "kimi-k2.6": { "body": {}, "note": "fallback (e.g. cloudflare host): no thinking param" },
+
+    "nvidia/nvidia/nemotron-3-ultra-550b-a55b": { "body": {"chat_template_kwargs": {"enable_thinking": true}, "reasoning_budget": 16384}, "note": "NVIDIA NIM Nemotron-3 Ultra thinking + reasoning_budget (confirmed)" },
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle" },
+    "nemotron-ultra": { "body": {}, "note": "fallback: no thinking param" },
+
+    "nvidia/google/gemma-4-31b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "note": "NVIDIA NIM Gemma-4 thinking (confirmed)" },
+    "openrouter/google/gemma-4-31b-it:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle" }
   }
 }

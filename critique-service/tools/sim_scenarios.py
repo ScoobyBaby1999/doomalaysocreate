@@ -99,7 +99,7 @@ async def scenario_failover():
 async def scenario_budget():
     print("scenario: per-profile budget exhaustion cools the provider")
     panel = fresh_panel(budgets={"GITHUB_MODELS": 2})
-    results = [await run(panel, ["gpt-4o-mini"], "p_bud", effort="low") for _ in range(4)]
+    results = [await run(panel, ["deepseek-v3"], "p_bud", effort="low") for _ in range(4)]
     oks = [r["judges"][0].get("ok") for r in results]
     check("first calls ok then exhausted", oks[0] and not oks[-1], f"oks={oks}")
     roll = panel.scheduler.provider_rollup().get("github-models", {})
