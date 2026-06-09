@@ -24,17 +24,17 @@
 
     "nvidia/moonshotai/kimi-k2.6": { "body": {"chat_template_kwargs": {"thinking": true}}, "note": "NVIDIA NIM Kimi thinking (confirmed). ctx 256k; vision-capable (MoonViT)" },
     "openrouter/moonshotai/kimi-k2.6:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle; ctx 262k" },
-    "cloudflare/@cf/moonshotai/kimi-k2.6": { "body": {"reasoning_effort": "high"}, "note": "CF schema exposes reasoning_effort (no chat_template_kwargs); ctx 262k; tools + parallel_tool_calls" },
+    "cloudflare/@cf/moonshotai/kimi-k2.6": { "body": {"reasoning_effort": "high", "max_completion_tokens": 32768}, "note": "CF schema exposes reasoning_effort (no chat_template_kwargs); ctx 262k; tools. CF deprecates max_tokens -> send max_completion_tokens or thinking gets cut mid-trace (seen live)" },
     "kimi-k2.6": { "body": {}, "note": "fallback for unlisted hosts: no thinking param" },
 
     "nvidia/nvidia/nemotron-3-ultra-550b-a55b": { "body": {"chat_template_kwargs": {"enable_thinking": true}, "reasoning_budget": 16384}, "note": "confirmed. ctx up to 1M. extra knobs: chat_template_kwargs.medium_effort (cheaper traces), force_nonempty_content:true REQUIRED when combining tools+thinking; reasoning_budget is soft (closes at newline before budget or +500 tok)" },
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle; ctx 1M" },
-    "cloudflare/@cf/nvidia/nemotron-3-120b-a12b": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "note": "CF schema exposes chat_template_kwargs + reasoning_effort; ctx 256k; tools" },
+    "cloudflare/@cf/nvidia/nemotron-3-120b-a12b": { "body": {"chat_template_kwargs": {"enable_thinking": true}, "max_completion_tokens": 32768}, "note": "CF schema exposes chat_template_kwargs + reasoning_effort; ctx 256k; tools. max_completion_tokens (max_tokens deprecated on CF)" },
     "nemotron-ultra": { "body": {}, "note": "fallback: no thinking param" },
 
     "nvidia/google/gemma-4-31b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "note": "confirmed. ctx 256k; vision (image+video). rec sampling: temp 1.0 / top_p 0.95 / top_k 64" },
     "openrouter/google/gemma-4-31b-it:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle; ctx 256k" },
-    "cloudflare/@cf/google/gemma-4-26b-a4b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "note": "CF schema exposes chat_template_kwargs + reasoning_effort; ctx 256k; vision" },
+    "cloudflare/@cf/google/gemma-4-26b-a4b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}, "max_completion_tokens": 32768}, "note": "CF schema exposes chat_template_kwargs + reasoning_effort; ctx 256k; vision. max_completion_tokens (max_tokens deprecated on CF)" },
 
     "gpt-oss-120b": { "body": {}, "note": "CF chat-completions schema does NOT list reasoning_effort (responses API only) - a rejected param would 400-blacklist the slot, so effort stays default. raise via system prompt 'Reasoning: high' if needed. ctx 128k" },
     "qwen3-coder-480b": { "body": {}, "note": "non-thinking by design; ctx 262k native (1M YaRN); tools w/ qwen3_coder parser" },

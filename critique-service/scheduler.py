@@ -72,6 +72,24 @@ def is_network_code(code: str) -> bool:
     return code in network_codes
 
 
+# upstream proxies (openrouter etc.) report errors as STRING codes inside an
+# http-200 body. normalize the common ones to our numeric codes so the failure
+# routing (429 -> proportional cooldown, 401/403 -> blacklist) actually fires
+# instead of falling through to the generic 60s cooldown.
+UPSTREAM_CODE_MAP = {
+    "rate_limit_exceeded": "429", "insufficient_quota": "429", "rate_limited": "429",
+    "invalid_api_key": "401", "unauthorized": "401", "authentication_error": "401",
+    "forbidden": "403", "permission_denied": "403",
+    "not_found": "404", "model_not_found": "404",
+    "context_length_exceeded": "413", "tokens_limit_reached": "413",
+}
+
+
+def normalize_upstream_code(raw) -> str:
+    code = str(raw if raw is not None else "unknown")
+    return UPSTREAM_CODE_MAP.get(code.lower(), code)
+
+
 class SlotScheduler:
     """pick slots using provider rotation + family score + cooldown."""
 
@@ -219,7 +237,11 @@ class SlotScheduler:
             family.successes += 1
             family.last_success_ts = time.time()
             state = self.slot_state[picked.who]
-            state.cooldown_until = 0.0
+            #       clear ERROR cooldowns only. budget cooldowns are set far ahead
+            #       (hours); an in-flight success must not erase them or the
+            #       scheduler resumes routing to an over-budget provider.
+            if state.cooldown_until <= time.time() + cooldown_rate_limit:
+                state.cooldown_until = 0.0
             state.last_error = ""
             #       provider rotation - count successful calls per provider so the
             #       next pick rotates to whichever has been used least.
@@ -247,7 +269,7 @@ class SlotScheduler:
         #   different fail codes route to different penalties:
         #     json/shape/empty/refusal -> family-wide demerit
         #     429                      -> long slot cooldown
-        #     400/401/403/404/524      -> blacklist the slot for the run
+        #     400/401/403/404          -> blacklist the slot for the run (524 is transient: short cooldown)
         #     other (5xx, http, ...)   -> short slot cooldown
         state = self.slot_state[picked.who]
         state.last_error = f"{code}:{reason}"[:200]
@@ -258,10 +280,12 @@ class SlotScheduler:
                       slot=picked.who, family=picked.model_family,
                       code=code, reason=reason[:160])
         elif code == "429":
-            #       proportional cooldown - low-rpm providers come back fast,
-            #       high-rpm ones wait longer. floor at 15s so we don't hammer
-            #       a freshly-rate-limited slot, ceiling at the legacy 5min.
-            cooldown_s = min(cooldown_rate_limit, max(15.0, 120.0 / picked.provider.rpm * 2))
+            #       proportional cooldown - LOW-rpm providers wait longer (stricter
+            #       published limit), high-rpm ones hit the 15s floor. ceiling at the
+            #       legacy 5min. rpm guarded >=1: a 0-rpm misconfig must not crash
+            #       the failure path.
+            cooldown_s = min(cooldown_rate_limit,
+                             max(15.0, 120.0 / max(1, picked.provider.rpm) * 2))
             state.cooldown_until = time.time() + cooldown_s
             log_event("cooldown_set",
                       slot=picked.who, code=code, rpm=picked.provider.rpm,
@@ -429,6 +453,15 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
             log_event("call_fail", **log_base, http_status=status,
                       fail_code=str(status), reason=msg, duration_s=duration)
             raise ProviderError(f"{status}:{msg}")
+        if status is not None and 400 <= status < 500:
+            #       any other 4xx (402 payment-required, 408, 451, ...) is a real
+            #       provider verdict, not a network blip - surface its numeric code
+            #       so failure routing cools the slot instead of treating it as
+            #       network-class ('http') and retrying a permanently-failing host.
+            msg = f"HTTP {status}: {response.text[:160]}"
+            log_event("call_fail", **log_base, http_status=status,
+                      fail_code=str(status), reason=msg, duration_s=duration)
+            raise ProviderError(f"{status}:{msg}")
         if status is not None and status >= 500:
             msg = f"HTTP {status}: {response.text[:160]}"
             code = "524" if status == 524 else "5xx"
@@ -448,7 +481,7 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
         # like {"error": {"code": ..., "message": ...}}. catch that.
         if isinstance(data, dict) and data.get("error"):
             err = data["error"]
-            err_code = str(err.get("code", "unknown"))
+            err_code = normalize_upstream_code(err.get("code", "unknown"))
             msg = err.get("message", "")[:200]
             log_event("call_fail", **log_base, http_status=status,
                       fail_code=err_code, upstream_code=err_code,
@@ -456,12 +489,20 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
             raise ProviderError(f"{err_code}:upstream {err_code}: {msg}")
 
         try:
-            content = data["choices"][0]["message"]["content"]
+            message = data["choices"][0]["message"]
+            content = message["content"]
         except (KeyError, IndexError, TypeError) as e:
             msg = f"bad shape: {e!r}; body={str(data)[:200]}"
             log_event("call_fail", **log_base, http_status=status,
                       fail_code="shape", reason=msg[:300], duration_s=duration)
             raise ProviderError(f"shape:{msg}")
+
+        #       reasoning models return the trace as message.reasoning_content in
+        #       non-streamed responses; surface it in usage exactly like the
+        #       streaming path does (and fall back to it when content is empty).
+        reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+        if (not content or not content.strip()) and reasoning and reasoning.strip():
+            content = reasoning
 
         if not content or not content.strip():
             log_event("call_fail", **log_base, http_status=status,
@@ -469,6 +510,8 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
             raise ProviderError(f"empty:empty content from {picked.who}")
 
         usage = data.get("usage", {}) if isinstance(data, dict) else {}
+        if reasoning and isinstance(reasoning, str) and reasoning.strip():
+            usage = dict(usage if isinstance(usage, dict) else {}, reasoning_content=reasoning)
         log_event("call_ok", **log_base, http_status=status,
                   duration_s=duration,
                   in_tokens=usage.get("prompt_tokens"),
@@ -503,7 +546,9 @@ async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: di
                     log_event("call_fail", **log_base, http_status=429, fail_code="429",
                               reason="HTTP 429", duration_s=duration)
                     raise ProviderError(f"429:HTTP 429 from {picked.who}")
-                if status in (400, 401, 403, 404, 413, 422):
+                if status in (400, 401, 403, 404, 413, 422) or 400 <= status < 500:
+                    #       includes other 4xx (402 etc.) - provider verdicts, not
+                    #       network blips; numeric code routes to the right penalty.
                     log_event("call_fail", **log_base, http_status=status, fail_code=str(status),
                               reason=f"HTTP {status}: {text}", duration_s=duration)
                     raise ProviderError(f"{status}:HTTP {status}: {text}")
@@ -528,7 +573,7 @@ async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: di
                     continue
                 if isinstance(chunk, dict) and chunk.get("error"):
                     err = chunk["error"]
-                    ecode = str(err.get("code", "unknown"))
+                    ecode = normalize_upstream_code(err.get("code", "unknown"))
                     raise ProviderError(f"{ecode}:upstream {ecode}: {str(err.get('message',''))[:200]}")
                 for ch in (chunk.get("choices") or []):
                     delta = ch.get("delta") or {}
