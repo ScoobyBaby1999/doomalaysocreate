@@ -76,3 +76,22 @@ Live streaming progress now works: while a judge thinks, `GET /api/jobs/<id>` sh
 `judges[].progress = {content_chars, reasoning_chars, tail, updated_at}`. Watched kimi
 climb 11k→44k reasoning chars in real time during this round.
 
+## Round 3 (solo DeepSeek-V4-Pro, max effort) — provider outage, one real fix
+
+Three solo attempts (panel `["deepseek-v4-pro"]`, effort max, reasoning on) inside
+20 minutes, all failed **on NVIDIA's side**:
+1. instant `HTTP 400 "DEGRADED function cannot be invoked"` — NVIDIA's own status
+   for a temporarily-down function;
+2. & 3. queued ~5 min → gateway `504`.
+
+Same-day probes had returned `ready`, so the function fluctuates. **Verdict
+unchanged: keep, async-only — and retry the solo run when NVIDIA recovers** (same
+benchmark prompt, `panel: ["deepseek-v4-pro"]`, `effort: "max"`, `reasoning: true`).
+
+**Real fix this round:** the DEGRADED 400 was hitting the hard-4xx path and
+**blacklisting the slot until restart**. Both call paths now classify a
+`400 + "DEGRADED"` body as 5xx-class → short cooldown, so the slot rejoins rotation
+the moment NVIDIA recovers (commit 256035b). Attempt 2 confirmed the fix live:
+the failure cooled instead of blacklisting.
+
+
