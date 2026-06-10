@@ -13,6 +13,7 @@ from jobstore import JobStore
 from merge import merge_critiques, merge_panel
 from oplog import log_event
 from orchestrator.orchestrator import execute as orchestrator_execute
+from providers import slot_is_privacy_safe
 from scheduler import ProviderError, call_slot
 
 # Panel execution with cross-provider failover.
@@ -83,11 +84,38 @@ async def call_once(client: httpx.AsyncClient, picked, system_prompt: str, *,
     return res
 
 
+def _privacy_tiers(candidates: list, privacy: str) -> list[list]:
+    #   partition a logical model's hosts by privacy posture. the router tries each
+    #   tier in order, only descending to the next when the current one is exhausted.
+    #     off      -> [all]                     (no filtering)
+    #     strict   -> [safe]                     (NEVER touch a training/logging host)
+    #     fallback -> [safe, unsafe]             (safe first; unsafe only as last resort)
+    if privacy == "off":
+        return [list(candidates)]
+    safe = [c for c in candidates if slot_is_privacy_safe(c)]
+    if privacy == "fallback":
+        return [safe, [c for c in candidates if not slot_is_privacy_safe(c)]]
+    return [safe]  # strict
+
+
+def _pick_tiered(scheduler, tiers: list[list], tried: set[str]):
+    #   pick the best eligible host from the highest-priority non-empty tier. only
+    #   descends to a lower (less private) tier when the higher one has nothing left.
+    for tier in tiers:
+        if not tier:
+            continue
+        picked = scheduler.pick_slot_from(tier, _PICK_ROLE, exclude_providers=tried)
+        if picked is not None:
+            return picked
+    return None
+
+
 async def route_judge(scheduler, client, logical: str, candidates: list, system_prompt: str, *,
                       role_label: str, effort: str, profile: str, metrics,
                       user_msg: str, max_tokens: int, timeout_s: float,
                       nonce: str = "", reasoning: bool = False, research: bool = False,
                       reasoning_catalog: dict | None = None,
+                      privacy: str = "off", cache=None, no_store: bool = False,
                       on_progress=None) -> dict:
     #   run one logical judge with cross-provider failover. asks the scheduler for
     #   the best eligible host, calls it, and on ANY failure records the penalty
@@ -104,9 +132,32 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
                 "candidates_tried": [], "trace": [], "elapsed_s": 0.0,
                 "error": "not registered (no configured provider hosts this model)"}
 
-    max_hops = len(candidates) + JUDGE_RETRIES
+    #   exact-repeat cache: a hit returns prior output with NO provider call (and sends
+    #   no data anywhere - the result is already local to this single-tenant space).
+    ckey = None
+    if cache is not None:
+        ckey = cache.key(logical=logical, system_prompt=system_prompt, user_msg=user_msg,
+                         max_tokens=max_tokens, reasoning=reasoning, research=research)
+        hit = cache.get(ckey)
+        if hit is not None:
+            out = dict(hit)
+            out.update(model=logical, ok=True, status="done", cached=True)
+            log_event("judge_cache_hit", logical=logical, profile=profile)
+            return out
+
+    #   privacy router: try hosts by posture tier; strict never touches an unsafe host.
+    tiers = _privacy_tiers(candidates, privacy)
+    flat = [c for tier in tiers for c in tier]
+    if not flat:
+        return {"model": logical, "ok": False, "routed_to": None, "attempts": 0,
+                "candidates_tried": [], "trace": [], "elapsed_s": 0.0,
+                "code": "privacy_blocked",
+                "error": (f"no privacy-safe host for '{logical}' (privacy={privacy}); "
+                          "every configured host trains on or logs submissions")}
+
+    max_hops = len(flat) + JUDGE_RETRIES
     for _ in range(max_hops):
-        picked = scheduler.pick_slot_from(candidates, _PICK_ROLE, exclude_providers=tried)
+        picked = _pick_tiered(scheduler, tiers, tried)
         if picked is None:
             break
         attempts += 1
@@ -158,6 +209,9 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
                 #   tree (kept fully separate; nothing merged).
                 import artifacts as _artifacts
                 out["artifacts"] = _artifacts.parse_artifacts(res["output"], nonce)
+            #   cache the success for exact repeats - unless the caller said no_store.
+            if cache is not None and ckey is not None and not no_store:
+                cache.put(ckey, dict(out))
             return out
         #       failure: penalise the slot, record the metric, bounce providers.
         code = res["code"]
@@ -226,18 +280,21 @@ async def run_panel_slots(panel, who_list: list[str], system_prompt: str, *,
                           role_label: str, effort: str, profile: str, metrics,
                           user_msg: str, max_tokens: int, timeout_s: float,
                           nonce: str = "", reasoning: bool = False,
-                          research: bool = False) -> list[dict]:
+                          research: bool = False, privacy: str = "off",
+                          no_store: bool = False) -> list[dict]:
     #   synchronous fan-out: every logical judge in parallel, each with its own
     #   cross-provider failover. returns once all have settled.
     resolved = [(who, *panel.resolve_candidates(who)) for who in who_list]
     rcat = getattr(panel, "reasoning_catalog", None)
+    cache = getattr(panel, "cache", None)
     async with httpx.AsyncClient() as client:
         results = await asyncio.gather(*[
             route_judge(panel.scheduler, client, logical, candidates, system_prompt,
                         role_label=role_label, effort=effort, profile=profile,
                         metrics=metrics, user_msg=user_msg, max_tokens=max_tokens,
                         timeout_s=timeout_s, nonce=nonce, reasoning=reasoning,
-                        research=research, reasoning_catalog=rcat)
+                        research=research, reasoning_catalog=rcat,
+                        privacy=privacy, cache=cache, no_store=no_store)
             for (_who, logical, candidates) in resolved
         ])
     return results
@@ -281,10 +338,11 @@ class JobRunner:
 
     def _persist(self, job_id: str) -> None:
         #   snapshot the job to durable storage (called after every state transition).
+        #   a no_store job is kept in memory only - its content is never written to disk.
         with self.lock:
             job = self.jobs.get(job_id)
             snap = dict(job) if job is not None else None
-        if snap is not None:
+        if snap is not None and not (snap.get("_exec") or {}).get("no_store"):
             self.store.save(snap)
 
     def _prune_locked(self) -> None:
@@ -344,7 +402,8 @@ class JobRunner:
                                     ex["user_msg"], ex["max_tokens"], ex["role"],
                                     ex["profile"], ex["effort"], ex["timeout_s"],
                                     ex.get("nonce", ""), ex.get("reasoning", False),
-                                    ex.get("research", False)),
+                                    ex.get("research", False), ex.get("privacy", "off"),
+                                    ex.get("no_store", False)),
                     self.loop)
                 resumed += 1
             self.store.save(self.jobs[jid])
@@ -356,7 +415,8 @@ class JobRunner:
                max_tokens: int, role: str, merge_mode: str, kind: str,
                profile: str = "default", effort: str = "med",
                timeout_s: float | None = None, nonce: str = "",
-               reasoning: bool = False, research: bool = False) -> dict:
+               reasoning: bool = False, research: bool = False,
+               privacy: str = "off", no_store: bool = False) -> dict:
         job_id = secrets.token_hex(8)
         judges: dict[str, dict] = {}
         scheduled = []
@@ -378,29 +438,34 @@ class JobRunner:
                          "user_msg": user_msg, "max_tokens": max_tokens, "role": role,
                          "merge_mode": merge_mode, "kind": kind, "profile": profile,
                          "effort": effort, "timeout_s": jt, "nonce": nonce,
-                         "reasoning": reasoning, "research": research}}
+                         "reasoning": reasoning, "research": research,
+                         "privacy": privacy, "no_store": no_store}}
+        #   no_store: keep the job pollable in memory but never persist its content.
         with self.lock:
             self._prune_locked()
             self.jobs[job_id] = job
-        self.store.save(job)
+        if not no_store:
+            self.store.save(job)
         #   schedule each logical judge as its own task; each does cross-provider
         #   failover through the shared scheduler + emits per-profile metrics.
         for who, logical, candidates in scheduled:
             asyncio.run_coroutine_threadsafe(
                 self._run_judge(job_id, who, logical, candidates, system_prompt,
                                 user_msg, max_tokens, role, profile, effort, jt, nonce,
-                                reasoning, research),
+                                reasoning, research, privacy, no_store),
                 self.loop,
             )
         log_event("job_submitted", job_id=job_id, req_kind=kind, role=role,
-                  profile=profile, effort=effort, research=research, judges=len(who_list))
+                  profile=profile, effort=effort, research=research, judges=len(who_list),
+                  privacy=privacy, no_store=no_store)
         return self.snapshot(job_id)
 
     async def _run_judge(self, job_id: str, who: str, logical: str, candidates: list,
                          system_prompt: str, user_msg: str, max_tokens: int,
                          role_label: str, profile: str, effort: str,
                          timeout_s: float, nonce: str = "",
-                         reasoning: bool = False, research: bool = False) -> None:
+                         reasoning: bool = False, research: bool = False,
+                         privacy: str = "off", no_store: bool = False) -> None:
         with self.lock:
             j = self.jobs.get(job_id)
             if j is not None:
@@ -426,6 +491,7 @@ class JobRunner:
             metrics=self.panel.metrics, user_msg=user_msg, max_tokens=max_tokens,
             timeout_s=timeout_s, nonce=nonce, reasoning=reasoning, research=research,
             reasoning_catalog=getattr(self.panel, "reasoning_catalog", None),
+            privacy=privacy, cache=getattr(self.panel, "cache", None), no_store=no_store,
             on_progress=_progress)
         res["model"] = who
         res["status"] = "done" if res.get("ok") else "error"

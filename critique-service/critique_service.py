@@ -14,7 +14,9 @@ from metrics import MetricStore
 from oplog import log_event
 from orchestrate import OrchestrateError
 from orchestrator.orchestrator import execute as orchestrator_execute
+from promptcache import PromptCache
 from providers import (
+    load_benchmarks,
     load_models_catalog,
     load_reasoning_catalog,
     make_provider_registry,
@@ -22,6 +24,7 @@ from providers import (
     make_slot_registry,
     provider,
     slot,
+    slot_is_privacy_safe,
 )
 from scheduler import SlotScheduler
 
@@ -150,6 +153,8 @@ class Panel:
         self.metrics = MetricStore()
         self.templates = orchestrate.TemplateStore()
         self.reasoning_catalog = load_reasoning_catalog()
+        self.benchmarks = load_benchmarks()
+        self.cache = PromptCache()
 
         #   pre-register logical-model candidate slots + default-panel slots so they
         #   join rotation from boot.
@@ -194,6 +199,50 @@ class Panel:
             if s is not None:
                 cands.append(s)
         return (who, cands)
+
+    def roster(self) -> dict:
+        #   join the logical catalog with benchmarks + LIVE host health so a caller can
+        #   see, per model: how strong it is, who hosts it, which hosts are privacy-safe,
+        #   and whether it's routable RIGHT NOW. Also computes the >=2-frontier guarantee.
+        now = time.time()
+        models: list[dict] = []
+        frontier_total = 0
+        frontier_safe_available = 0
+        for logical in sorted(self.logical_models.keys()):
+            _, cands = self.resolve_candidates(logical)
+            bench = self.benchmarks.get(logical, {})
+            is_frontier = bool(bench.get("frontier"))
+            hosts = []
+            routable = safe_routable = False
+            for s in cands:
+                st = self.scheduler.slot_state.get(s.who)
+                cooling = bool(st and st.cooldown_until > now)
+                blacklisted = bool(st and st.blacklisted)
+                live = not (cooling or blacklisted)
+                safe = slot_is_privacy_safe(s)
+                hosts.append({"slot": s.who, "privacy_safe": safe,
+                              "stability_tier": s.provider.stability_tier,
+                              "cooling": cooling, "blacklisted": blacklisted})
+                routable = routable or live
+                safe_routable = safe_routable or (live and safe)
+            if is_frontier:
+                frontier_total += 1
+                if safe_routable:
+                    frontier_safe_available += 1
+            models.append({
+                "logical": logical, "frontier": is_frontier,
+                "arena_elo": bench.get("arena_elo"), "aa_index": bench.get("aa_index"),
+                "hosts": hosts, "routable": routable,
+                "privacy_safe_routable": safe_routable,
+            })
+        models.sort(key=lambda m: (m["arena_elo"] or 0), reverse=True)
+        return {
+            "models": models,
+            "frontier_total": frontier_total,
+            "frontier_privacy_safe_available": frontier_safe_available,
+            "frontier_ok": frontier_safe_available >= 2,
+            "benchmark_note": "indicative, hand-curated (see benchmarks.json) - not authoritative",
+        }
 
 
 def _load_panel_cfg() -> dict:
@@ -326,6 +375,7 @@ async def run_sync(panel: Panel, params: dict) -> dict:
         timeout_s=params.get("timeout_s", JUDGE_TIMEOUT_S),
         nonce=params.get("nonce", ""), reasoning=params.get("reasoning", False),
         research=params.get("research", False),
+        privacy=params.get("privacy", "off"), no_store=params.get("no_store", False),
     )
     finished, merged = finalize_judges(judges, params["kind"], params["merge"])
     ok_count = sum(1 for j in finished if j.get("ok"))
@@ -356,6 +406,7 @@ def submit_async(server_jobs: JobRunner, params: dict) -> dict:
         profile=params.get("profile", "default"), effort=params.get("effort", DEFAULT_EFFORT),
         timeout_s=params.get("timeout_s"), nonce=params.get("nonce", ""),
         reasoning=params.get("reasoning", False), research=params.get("research", False),
+        privacy=params.get("privacy", "off"), no_store=params.get("no_store", False),
     )
 
 
@@ -411,12 +462,20 @@ class Handler(BaseHTTPRequestHandler):
         route = urlsplit(self.path).path.rstrip("/")
         if route in ("", "/health"):
             panel: Panel = self.server.panel  # type: ignore[attr-defined]
+            roster = panel.roster()
             self._send_json(200, {
                 "service": "loom model panel",
                 "status": "ok",
                 "token_required": True,
                 "token_configured": bool(os.environ.get("CRITIQUE_TOKEN", "").strip()),
                 "providers_configured": [p.name for p in panel.providers],
+                #   the >=2-frontier guarantee, measured over privacy-safe routable hosts.
+                "frontier_ok": roster["frontier_ok"],
+                "frontier_privacy_safe_available": roster["frontier_privacy_safe_available"],
+                "frontier_total": roster["frontier_total"],
+                "privacy_default": ("strict" if os.environ.get("PRIVACY_MODE", "").strip().lower()
+                                     in ("1", "true", "on", "strict")
+                                     else os.environ.get("DEFAULT_PRIVACY", "strict")),
                 "default_panel": panel.default_panel,
                 "default_rubric": panel.default_rubric,
                 "endpoints": {
@@ -430,7 +489,9 @@ class Handler(BaseHTTPRequestHandler):
                     "GET /api/jobs/<id>": "poll an async job/run (when called with async:true)",
                     "GET /api/stats": "live rotation/health per provider + slot",
                     "GET /api/metrics?profile=<id>": "per-profile cost/throttle/latency aggregates",
+                    "GET /api/roster": "per-model benchmark + hosts + privacy-safe routability + frontier guarantee",
                 },
+                "privacy_modes": ["strict", "fallback", "off"],
                 "async": "add \"async\": true to any POST to get a job_id back instantly; "
                          "each judge runs independently, poll GET /api/jobs/<id> for partial results",
                 "roles": list(VALID_ROLES),
@@ -454,13 +515,17 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send_json(200, {"id": tid, "schematic": data})
             return
-        if route in ("/api/stats", "/api/metrics"):
+        if route in ("/api/stats", "/api/metrics", "/api/roster"):
             #   telemetry endpoints share the bearer token with the POST routes.
             if not _token_ok(self.headers.get("Authorization")):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             panel: Panel = self.server.panel  # type: ignore[attr-defined]
-            if route == "/api/stats":
+            if route == "/api/roster":
+                roster = panel.roster()
+                roster["cache"] = panel.cache.stats()
+                self._send_json(200, roster)
+            elif route == "/api/stats":
                 self._send_json(200, {
                     "providers": panel.scheduler.provider_rollup(),
                     "slots": panel.scheduler.snapshot(),
@@ -530,6 +595,22 @@ class Handler(BaseHTTPRequestHandler):
         if effort not in EFFORT_MODES:
             raise _BadRequest(f"'effort' must be one of {list(EFFORT_MODES)}")
         return profile.strip(), effort
+
+    @staticmethod
+    def _privacy_and_store(payload: dict) -> tuple[str, bool]:
+        #   privacy mode: strict (never use a training/logging host) | fallback (safe
+        #   first, unsafe only as last resort) | off. default from DEFAULT_PRIVACY env
+        #   (=strict). PRIVACY_MODE locks the whole space to strict regardless of request.
+        lock = os.environ.get("PRIVACY_MODE", "").strip().lower()
+        if lock in ("1", "true", "on", "strict"):
+            privacy = "strict"
+        else:
+            privacy = str(payload.get("privacy") or os.environ.get("DEFAULT_PRIVACY", "strict")).strip().lower()
+            if privacy not in ("strict", "fallback", "off"):
+                raise _BadRequest("'privacy' must be one of ['strict','fallback','off']")
+        no_store = bool(payload.get("no_store")) or \
+            os.environ.get("NO_STORE", "").strip().lower() in ("1", "true", "on")
+        return privacy, no_store
 
     def do_POST(self) -> None:
         route = self.path.rstrip("/")
@@ -659,6 +740,7 @@ class Handler(BaseHTTPRequestHandler):
         params = build_critique_params(panel, plan, fmt_req, panel_override or None,
                                        inline_rubric or None)
         params["profile"] = profile
+        params["privacy"], params["no_store"] = self._privacy_and_store(payload)
         return apply_effort(params, effort)
 
     def _params_panel(self, payload: dict, panel: Panel) -> dict:
@@ -694,6 +776,7 @@ class Handler(BaseHTTPRequestHandler):
             reasoning=bool(payload.get("reasoning")), research=bool(payload.get("research")),
         )
         params["profile"] = profile
+        params["privacy"], params["no_store"] = self._privacy_and_store(payload)
         return apply_effort(params, effort)
 
 

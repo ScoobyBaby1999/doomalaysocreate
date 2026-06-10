@@ -16,6 +16,7 @@
       "base_url": "https://integrate.api.nvidia.com/v1/chat/completions",
       "region": "us",
       "limits": {"rpm": 40, "rpd": null, "tpm": null, "tpd": null, "concurrency": 4, "monthly_credit": "free credits"},
+      "privacy": {"trains_on_data": false, "stability_tier": 1, "optout_url": "https://www.nvidia.com/en-us/about-nvidia/privacy-policy/"},
       "models": [
         "qwen/qwen3-coder-480b-a35b-instruct",
         "z-ai/glm-5.1",
@@ -35,6 +36,7 @@
       "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1/chat/completions",
       "region": "global",
       "limits": {"rpm": 30, "rpd": 10000, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "Workers AI free allocation (neurons/day)"},
+      "privacy": {"trains_on_data": false, "stability_tier": 1, "optout_url": "https://www.cloudflare.com/privacypolicy/"},
       "models": [
         "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
         "@cf/openai/gpt-oss-120b",
@@ -52,6 +54,7 @@
       "base_url": "https://models.github.ai/inference/chat/completions",
       "region": "us",
       "limits": {"rpm": 15, "rpd": 150, "tpm": null, "tpd": null, "concurrency": 1, "monthly_credit": "free (low-tier rate limits)", "max_out": 4000},
+      "privacy": {"trains_on_data": false, "stability_tier": 2, "optout_url": "https://docs.github.com/en/github-models/use-github-models/prototyping-with-ai-models#about-data-privacy"},
       "models": [
         "meta/llama-3.3-70b-instruct",
         "deepseek/deepseek-v3-0324",
@@ -67,6 +70,7 @@
       "base_url": "https://openrouter.ai/api/v1/chat/completions",
       "region": "us",
       "limits": {"rpm": 20, "rpd": 50, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "shared free quota"},
+      "privacy": {"trains_on_data": "per-model", "stability_tier": 3, "optout_url": "https://openrouter.ai/docs/features/privacy-and-logging", "note": "':free' routes REQUIRE prompt logging/training consent -> NOT privacy-safe; paid routes are safe with account Privacy enabled."},
       "extra_headers": {
         "HTTP-Referer": "https://huggingface.co/spaces",
         "X-Title": "loom model panel"

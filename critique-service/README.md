@@ -316,12 +316,27 @@ plan with my judge panel"* — the skill POSTs the plan here and shows the merge
 critique. The phone is a **client**, not the server; the hosted Space is the
 reachable backbone.
 
+## Privacy — one space per user, your own keys
+
+Deploy model: **duplicate the Space and add your own provider keys** — nothing is
+shared between users, so your prompts/outputs stay in your own instance. On top of
+that, a **privacy router** keeps data off providers that train on / log it:
+
+- Per request: `"privacy": "strict" | "fallback" | "off"` (default **strict** — never
+  routes to a training/logging host; `fallback` uses one only as a last resort).
+- `"no_store": true` — run without persisting the prompt/output anywhere.
+- `GET /api/roster` + `frontier_ok` on `/health` show the live posture and the
+  **≥2 privacy-safe frontier models** guarantee.
+
+Full per-provider opt-out steps and every off-switch: **[`PRIVACY.md`](PRIVACY.md)**.
+
 ## Security
 
 - The endpoint is **always token-guarded** — if `CRITIQUE_TOKEN` is unset the
   service refuses `/api/critique` with `503` rather than serving openly.
 - **Never commit a real `.env`** (it's gitignored). All keys live in HF Secrets.
-- No file writes, no chat endpoint, no unauthenticated routes.
+- No chat endpoint, no unauthenticated routes. Job/cache state is written only to
+  your instance's local disk + your **private** HF Dataset mirror.
 
 ## Files
 

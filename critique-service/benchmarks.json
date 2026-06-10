@@ -1,0 +1,23 @@
+{
+  "//": "Indicative, HAND-CURATED quality signal per logical model (as of 2026-06).",
+  "//1": "NOT an authoritative ranking - arena_elo/aa_index are approximate, sourced from",
+  "//2": "public leaderboards (LMArena, Artificial Analysis) and rounded. Used only to",
+  "//3": "ORDER the roster and decide which models count toward the >=2-frontier guarantee.",
+  "//4": "'frontier': true marks a top-tier model for that guarantee. Update with sources.",
+
+  "benchmarks": {
+    "deepseek-v4-pro":   {"arena_elo": 1380, "aa_index": 68, "frontier": true,  "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "kimi-k2.6":         {"arena_elo": 1365, "aa_index": 66, "frontier": true,  "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "glm-5.1":           {"arena_elo": 1355, "aa_index": 64, "frontier": true,  "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "nemotron-ultra":    {"arena_elo": 1345, "aa_index": 63, "frontier": true,  "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "qwen3-coder-480b":  {"arena_elo": 1340, "aa_index": 62, "frontier": true,  "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "deepseek-v3":       {"arena_elo": 1335, "aa_index": 60, "frontier": true,  "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "deepseek-r1":       {"arena_elo": 1330, "aa_index": 60, "frontier": true,  "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "gpt-oss-120b":      {"arena_elo": 1320, "aa_index": 58, "frontier": true,  "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "nemotron-120b":     {"arena_elo": 1300, "aa_index": 55, "frontier": true,  "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "step-flash":        {"arena_elo": 1280, "aa_index": 52, "frontier": false, "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "phi-4-reasoning":   {"arena_elo": 1265, "aa_index": 50, "frontier": false, "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "llama-3.3-70b":     {"arena_elo": 1255, "aa_index": 48, "frontier": false, "source": "lmarena+aa (approx)", "as_of": "2026-06"},
+    "gemma-4":           {"arena_elo": 1230, "aa_index": 45, "frontier": false, "source": "lmarena+aa (approx)", "as_of": "2026-06"}
+  }
+}

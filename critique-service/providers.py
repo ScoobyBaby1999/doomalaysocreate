@@ -46,6 +46,24 @@ class provider:
     concurrency: int | None = None
     monthly_credit: str = ""
     max_out: int | None = None                          # hard per-request output-token ceiling (None = uncapped)
+    #   privacy posture (see providers_catalog.json -> "privacy" + docs/PRIVACY-RESEARCH.md).
+    #   trains_on_data: True | False | "per-model" | "unknown". UNKNOWN is treated as
+    #   UNSAFE by the privacy router (fail-safe for a privacy-first product).
+    trains_on_data: object = "unknown"
+    privacy_optout_url: str = ""
+    stability_tier: int = 0                             # 1=most stable host ... higher=flakier
+
+
+def slot_is_privacy_safe(s: "slot") -> bool:
+    #   privacy-safe = the host is verified NOT to train on / retain submissions.
+    #   "per-model" (OpenRouter): a ':free' route REQUIRES logging/training consent,
+    #   so only non-':free' routes are safe. unknown/None posture -> NOT safe.
+    t = s.provider.trains_on_data
+    if t == "per-model":
+        return not s.model.strip().lower().endswith(":free")
+    if isinstance(t, bool):
+        return not t
+    return False
 
 
 @dataclass(frozen=True)
@@ -161,6 +179,20 @@ def load_models_catalog() -> dict[str, dict]:
             if not k.startswith("//") and isinstance(v, dict) and v.get("candidates")}
 
 
+BENCHMARKS_PATH = Path(os.environ.get("BENCHMARKS_CATALOG", HERE / "benchmarks.json"))
+
+
+def load_benchmarks() -> dict[str, dict]:
+    #   logical-model -> {arena_elo, aa_index, frontier, source, as_of}. hand-curated
+    #   and DATED; indicative quality signal for the roster, not an authoritative
+    #   ranking. tolerant: a missing/garbled file just means an empty roster signal.
+    try:
+        raw = _load_json_commented(BENCHMARKS_PATH).get("benchmarks", {})
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in raw.items() if not k.startswith("//") and isinstance(v, dict)}
+
+
 REASONING_CATALOG_PATH = Path(os.environ.get("REASONING_CATALOG", HERE / "reasoning_catalog.json"))
 
 
@@ -238,6 +270,7 @@ def make_provider_registry() -> list[provider]:
         for var in requires:
             url = url.replace("{" + var + "}", os.environ.get(var, "").strip())
         limits = entry.get("limits", {}) or {}
+        privacy = entry.get("privacy", {}) or {}
         providers.append(provider(
             name=name,
             url=url,
@@ -254,6 +287,9 @@ def make_provider_registry() -> list[provider]:
             concurrency=limits.get("concurrency"),
             monthly_credit=limits.get("monthly_credit", ""),
             max_out=limits.get("max_out"),
+            trains_on_data=privacy.get("trains_on_data", "unknown"),
+            privacy_optout_url=privacy.get("optout_url", ""),
+            stability_tier=int(privacy.get("stability_tier") or 0),
         ))
     return providers
 
