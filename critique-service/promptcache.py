@@ -43,10 +43,13 @@ class PromptCache:
 
     @staticmethod
     def key(*, logical: str, system_prompt: str, user_msg: str, max_tokens: int,
-            reasoning: bool, research: bool) -> str:
+            reasoning: bool, research: bool, privacy: str = "off") -> str:
+        #   privacy is part of the key: a result produced under privacy=off may have
+        #   come from a training/logging host, and must never be served to a strict
+        #   request (panel-found bypass, whole-repo review 2026-06).
         h = hashlib.sha256()
         for part in (logical, system_prompt, user_msg, str(int(max_tokens)),
-                     "1" if reasoning else "0", "1" if research else "0"):
+                     "1" if reasoning else "0", "1" if research else "0", privacy):
             h.update(part.encode("utf-8", "replace"))
             h.update(b"\x00")
         return h.hexdigest()

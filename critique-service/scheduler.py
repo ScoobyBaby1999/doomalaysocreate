@@ -319,6 +319,13 @@ class SlotScheduler:
         #   pace calls per provider to stay under rpm. RESERVE the next allowed
         #   call time under the threading lock (so concurrent callers across loops
         #   stack their waits), then sleep outside the lock. min_gap=0 disables.
+        #
+        #   NOTE on the apparent "race" here (flagged in a whole-repo model review,
+        #   2026-06; judged a FALSE POSITIVE): provider_last_call is advanced to the
+        #   RESERVED time under the lock, so the Nth concurrent caller reads the
+        #   (N-1)th caller's reservation and reserves min_gap after it. Callers sleep
+        #   to their own staggered reservations - they cannot collapse onto the same
+        #   slot, regardless of which thread or event loop they came from.
         name = picked.provider.name
         min_gap = 60.0 / max(1, picked.provider.rpm)
         with self._lock:

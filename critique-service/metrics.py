@@ -111,6 +111,13 @@ class _ProfileMetrics:
         tok = int(ev.get("in_tokens") or 0) + int(ev.get("out_tokens") or 0)
         if tok:
             self.day_tokens[prov].append((now, tok))
+        #   prune >24h entries on WRITE too (not just on the budget-read path) so a
+        #   long-running instance can't grow these lists without bound.
+        cutoff = now - 24 * 3600.0
+        if self.day_calls[prov] and self.day_calls[prov][0] < cutoff:
+            self.day_calls[prov] = [t for t in self.day_calls[prov] if t >= cutoff]
+        if self.day_tokens[prov] and self.day_tokens[prov][0][0] < cutoff:
+            self.day_tokens[prov] = [(t, n) for (t, n) in self.day_tokens[prov] if t >= cutoff]
 
 
 class MetricStore:

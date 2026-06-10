@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import copy
 import os
 import secrets
 import threading
@@ -137,7 +138,8 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
     ckey = None
     if cache is not None:
         ckey = cache.key(logical=logical, system_prompt=system_prompt, user_msg=user_msg,
-                         max_tokens=max_tokens, reasoning=reasoning, research=research)
+                         max_tokens=max_tokens, reasoning=reasoning, research=research,
+                         privacy=privacy)
         hit = cache.get(ckey)
         if hit is not None:
             out = dict(hit)
@@ -193,8 +195,10 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
                       "latency_s": res.get("elapsed_s", 0.0)})
         if res["ok"]:
             scheduler.record_success(picked)
+            #   no_store: the output must not reach metrics output-sampling either.
             _emit(metrics, profile, logical, picked, role_label, effort, res,
-                  in_tok, out_tok, attempts, candidates_tried, res.get("output"))
+                  in_tok, out_tok, attempts, candidates_tried,
+                  None if no_store else res.get("output"))
             out = {"model": logical, "routed_to": picked.who, "ok": True,
                    "output": res["output"], "elapsed_s": res["elapsed_s"],
                    "attempts": attempts, "candidates_tried": list(candidates_tried),
@@ -225,6 +229,15 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
         log_event("judge_failover", logical=logical, slot=picked.who, code=code,
                   attempt=attempts, remaining=len(candidates) - len(tried))
 
+    #   strict mode with nothing attempted = every privacy-safe host is cooling and
+    #   the unsafe ones were (correctly) excluded - say so, with the explicit code,
+    #   rather than the generic "all cooling" error (panel-found fallthrough).
+    if privacy == "strict" and attempts == 0 and len(flat) < len(candidates):
+        return {"model": logical, "ok": False, "routed_to": None, "attempts": 0,
+                "candidates_tried": [], "trace": list(trace), "elapsed_s": 0.0,
+                "code": "privacy_blocked",
+                "error": (f"privacy-safe hosts for '{logical}' are temporarily "
+                          "cooling/blacklisted; non-safe hosts excluded by privacy=strict")}
     err = (last or {}).get("error", "all candidate providers cooling/blacklisted/unconfigured")
     return {"model": logical, "ok": False, "routed_to": None,
             "error": err[:300], "attempts": attempts,
@@ -339,9 +352,11 @@ class JobRunner:
     def _persist(self, job_id: str) -> None:
         #   snapshot the job to durable storage (called after every state transition).
         #   a no_store job is kept in memory only - its content is never written to disk.
+        #   deep-copy UNDER the lock: a shallow dict() would share the nested judge
+        #   dicts with concurrent mutators while the store serializes them.
         with self.lock:
             job = self.jobs.get(job_id)
-            snap = dict(job) if job is not None else None
+            snap = copy.deepcopy(job) if job is not None else None
         if snap is not None and not (snap.get("_exec") or {}).get("no_store"):
             self.store.save(snap)
 

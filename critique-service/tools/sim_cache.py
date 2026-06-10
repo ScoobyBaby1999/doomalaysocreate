@@ -32,13 +32,14 @@ def check(name, cond, detail=""):
 _TMP = Path(tempfile.mkdtemp(prefix="sim-cache-"))
 
 
-async def _judge(panel, cache, *, sysprompt="review", user="go", no_store=False):
+async def _judge(panel, cache, *, sysprompt="review", user="go", no_store=False,
+                 privacy="off"):
     async with httpx.AsyncClient() as client:
         return await route_judge(
             panel.scheduler, client, "llama-3.3-70b", panel.resolve_candidates("llama-3.3-70b")[1],
             sysprompt, role_label="critiquer", effort="low", profile="p_cache",
             metrics=panel.metrics, user_msg=user, max_tokens=128, timeout_s=30,
-            reasoning_catalog=panel.reasoning_catalog, privacy="off",
+            reasoning_catalog=panel.reasoning_catalog, privacy=privacy,
             cache=cache, no_store=no_store)
 
 
@@ -60,6 +61,14 @@ def main() -> int:
     print("scenario: a different prompt is a separate key (miss)")
     r3 = asyncio.run(_judge(panel, cache, user="different question"))
     check("different user_msg -> miss (not served from cache)", not r3.get("cached"), f"cached={r3.get('cached')}")
+
+    print("scenario: privacy mode is part of the key (no off->strict bypass)")
+    #   the identical request under privacy=strict must NOT be served the result the
+    #   privacy=off call produced (it may have come from a training host).
+    rs = asyncio.run(_judge(panel, cache, privacy="strict"))
+    check("same prompt under strict -> miss, fresh call", not rs.get("cached"), f"cached={rs.get('cached')}")
+    rs2 = asyncio.run(_judge(panel, cache, privacy="strict"))
+    check("strict repeat -> hit on the strict-keyed entry", rs2.get("cached") is True, f"cached={rs2.get('cached')}")
 
     print("scenario: no_store skips the write")
     cache2 = PromptCache(enabled=True, dirpath=_TMP / "cache2", ttl_s=3600, max_entries=8)

@@ -65,6 +65,8 @@ def main() -> int:
           f"routed_to={r.get('routed_to')}")
     check("strict: never tried any unsafe host",
           all(t not in [u.who for u in unsafe] for t in tried), f"tried={tried}")
+    check("strict: explicit privacy_blocked code (not generic 'all cooling')",
+          r.get("code") == "privacy_blocked", f"code={r.get('code')} err={str(r.get('error'))[:80]}")
 
     print("scenario: FALLBACK uses the unsafe host only as a last resort")
     r = asyncio.run(_judge(panel, cands, "fallback"))
