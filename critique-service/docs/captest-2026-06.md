@@ -44,4 +44,35 @@ believing it.
 - GLM's 22-min run only survived because JUDGE_TIMEOUT_S was raised to 1800.
 - Don't trust unverified model fixes: r1-distill's "critical fix" was a deadlock.
 
-## Round 2 (roster-tuning retest) — results appended below when run
+## Round 2 (roster-tuning retest) — results
+
+All four "problem" models retested live against the round-1 fixes (profile `captest2`,
+job `45a6...`, probes `1e0b...`). `in_tokens` from `/api/metrics` proves who saw the code.
+
+| Model | Round-2 outcome | Verdict |
+|---|---|---|
+| **kimi-k2.6** | Both hosts now run **uncut**: CF 48k-char output, NVIDIA 122k reasoning → clean 3.2k final. Found a real latent bug (unconditional `stream_options`) + a malformed-SSE crash guard. `max_completion_tokens` fix worked. | **Strongest reviewer. Keep.** |
+| **deepseek-v4-pro** | Probe returned `ready` (135s, in=42/out=2) — slot serves. `reasoning_effort:high` default; full-review still slow (async-only). **Resolved** (round-1 failure was the redeploy killing it). | **Keep, async-only.** |
+| **qwen3-coder-480b** | Now serves reliably (probe `ready` 9s; 5.1k review 47s; 2/2 ok). But its top "critical" finding was a **false positive** — claimed `wait_for_provider_pacing` sleeps under the lock; the code already releases it first. | **Keep as fast worker, NOT a frontier judge** (non-thinking; misreads). |
+| **phi-4-reasoning** | `system_in_user` quirk worked: on a small excerpt `in_tokens=962` (saw the code, vs round-1's 233) and produced a review. But it 413s (`tokens_limit_reached`) on any real-size input (GitHub free-tier input cap) and the review was rambling/low-confidence with **no real finds**. | **Marginal: stays available, NOT default-panel; small inputs only.** |
+
+### Removed
+- **deepseek-r1-distill** — round 1 deadlock hallucination.
+
+### Round-2 fixes applied (verified against code)
+- `usage: null` from a provider no longer AttributeErrors the non-stream path (CF kimi).
+- non-dict SSE payload (`data: []`) skipped instead of crashing `.get()` (NVIDIA kimi).
+- `record_success` now clears only **already-expired** cooldowns — closes the
+  concurrent-429-vs-success race kimi described (strengthens round-1's GLM fix).
+
+### Known / deferred (real but not worth the blast radius now)
+- `stream_options:{include_usage}` is sent unconditionally; a provider that rejects it
+  would 400→blacklist. Latent — all four current hosts support it. (kimi #1)
+- cooldowns use wall-clock `time.time()`; NTP skew could mistime them. Touches budget +
+  metrics; deferred. (kimi #4)
+
+### New roster note
+Live streaming progress now works: while a judge thinks, `GET /api/jobs/<id>` shows
+`judges[].progress = {content_chars, reasoning_chars, tail, updated_at}`. Watched kimi
+climb 11k→44k reasoning chars in real time during this round.
+

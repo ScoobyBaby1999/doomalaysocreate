@@ -237,10 +237,12 @@ class SlotScheduler:
             family.successes += 1
             family.last_success_ts = time.time()
             state = self.slot_state[picked.who]
-            #       clear ERROR cooldowns only. budget cooldowns are set far ahead
-            #       (hours); an in-flight success must not erase them or the
-            #       scheduler resumes routing to an over-budget provider.
-            if state.cooldown_until <= time.time() + cooldown_rate_limit:
+            #       only clear ALREADY-EXPIRED cooldown markers. an in-flight success
+            #       must never erase an ACTIVE cooldown - not a budget cooldown (set
+            #       hours ahead) nor a concurrent 429's cooldown (captest race, kimi):
+            #       two calls race on one slot, one 429s (long cooldown), the other
+            #       succeeds and would wipe it -> we'd hammer a rate-limited provider.
+            if state.cooldown_until <= time.time():
                 state.cooldown_until = 0.0
             state.last_error = ""
             #       provider rotation - count successful calls per provider so the
@@ -577,6 +579,10 @@ async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: di
                 try:
                     chunk = json.loads(payload)
                 except ValueError:
+                    continue
+                if not isinstance(chunk, dict):
+                    #       a bare array/string payload ('data: []') would crash the
+                    #       .get() calls below with AttributeError (captest, kimi).
                     continue
                 if isinstance(chunk, dict) and chunk.get("error"):
                     err = chunk["error"]
