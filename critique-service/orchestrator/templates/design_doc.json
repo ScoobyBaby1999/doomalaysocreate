@@ -10,66 +10,122 @@
       "name": "requirements",
       "role": "extractor",
       "instructions": "From the prompt, extract the design problem as JSON {\"goals\": [str], \"non_goals\": [str], \"constraints\": [str], \"unknowns\": [str]}. Infer reasonable items if the prompt is terse, but mark inferred constraints with '(inferred)'. Be concrete - 'p99 < 200ms' not 'fast'.",
-      "inputs": ["prompt"],
-      "max_tokens": 1500
+      "inputs": [
+        "prompt"
+      ],
+      "max_tokens": 3000
     },
     {
       "name": "approaches",
       "role": "extractor",
       "instructions": "Propose EXACTLY 3 genuinely DIFFERENT architectural approaches to meet the goals/constraints. They must differ in substance (e.g. different storage model, sync vs async, monolith vs split) - not three flavors of one idea. Output ONLY a single JSON object with the top-level key \"approaches\" (never a bare array): {\"approaches\": [{\"name\": str, \"sketch\": str (2-3 sentences), \"bet\": str (the core trade-off it makes)}]}.",
-      "inputs": ["requirements"],
-      "max_tokens": 1500
+      "inputs": [
+        "requirements"
+      ],
+      "max_tokens": 3000
     },
     {
       "name": "deep_dive",
       "role": "generator",
       "instructions": "Design your assigned approach in depth: components and their responsibilities, data flow, key interfaces, failure modes and how they're handled, and how it satisfies (or strains) each requirement. Be honest about where it's weak. End with explicit 'Pros', 'Cons', and 'Biggest risk' for this approach.",
-      "fanout": {"over": "approaches.approaches", "max_parallel": 3},
-      "inputs": ["requirements", "approaches.approaches.{i}"],
-      "max_tokens": 3500
+      "fanout": {
+        "over": "approaches.approaches",
+        "max_parallel": 3
+      },
+      "inputs": [
+        "requirements",
+        "approaches.approaches.{i}"
+      ],
+      "max_tokens": 8000
     },
     {
       "name": "tradeoff",
       "role": "reviewer",
       "instructions": "Compare the 3 deep-dived approaches against the goals and constraints. Build a trade-off matrix (rows = constraints/goals, columns = approaches, cells = how well each meets it). Then RECOMMEND exactly one, with a 3-5 sentence justification grounded in the constraints - and name what you're giving up by choosing it.",
-      "inputs": ["requirements", "approaches", "deep_dive.*"],
-      "max_tokens": 4000
+      "inputs": [
+        "requirements",
+        "approaches",
+        "deep_dive.*"
+      ],
+      "max_tokens": 8000
     },
     {
       "name": "doc",
       "role": "transformer",
       "instructions": "Write the final design document in markdown with EXACTLY these sections: '## Context', '## Goals & Non-Goals', '## Options Considered' (one subsection per approach with its key pros/cons), '## Decision' (the recommendation + justification from the trade-off analysis), '## Detailed Design' (expand the chosen approach: components, data flow, interfaces, failure handling), '## Risks & Mitigations', '## Open Questions'. Preserve the trade-off reasoning. Be specific and committal in Decision; be honest in Risks.",
-      "inputs": ["requirements", "approaches", "tradeoff"],
-      "max_tokens": 9000
+      "inputs": [
+        "requirements",
+        "approaches",
+        "tradeoff"
+      ],
+      "max_tokens": 16000
     },
     {
       "name": "critique",
       "role": "reviewer",
       "instructions": "Review the design doc for: unjustified decisions, hidden assumptions stated as fact, missing failure modes, risks without mitigations, vague interfaces, and any constraint from Goals that the Detailed Design silently drops. List concrete fixes only.",
-      "inputs": ["body"],
-      "max_tokens": 3000
+      "inputs": [
+        "body"
+      ],
+      "max_tokens": 6000
     },
     {
       "name": "revise",
       "role": "transformer",
       "instructions": "Apply every critique point. Tighten vague claims, add missing mitigations, surface dropped constraints. Return the FULL revised design doc with all section headers intact.",
-      "inputs": ["body", "critique"],
-      "max_tokens": 9000
+      "inputs": [
+        "body",
+        "critique"
+      ],
+      "max_tokens": 16000
     }
   ],
   "output_rules": {
     "format": "markdown",
-    "required_sections": ["Decision", "Risks & Mitigations", "Open Questions"],
-    "banned_phrases": ["best practice", "industry standard", "obviously", "trivial", "simply use", "hybrid of all", "while also keeping option"],
+    "required_sections": [
+      "Decision",
+      "Risks & Mitigations",
+      "Open Questions"
+    ],
+    "banned_phrases": [
+      "best practice",
+      "industry standard",
+      "obviously",
+      "trivial",
+      "simply use",
+      "hybrid of all",
+      "while also keeping option"
+    ],
     "tone": "decisive but honest about trade-offs"
   },
   "judge_config": {
     "rules": [
-      {"type": "min_words", "value": 600},
-      {"type": "section_present", "value": "Decision"},
-      {"type": "section_present", "value": "Risks & Mitigations"},
-      {"type": "section_present", "value": "Open Questions"},
-      {"type": "no_banned_phrases", "value": ["best practice", "obviously", "industry standard", "hybrid of all", "while also keeping option"]}
+      {
+        "type": "min_words",
+        "value": 1500
+      },
+      {
+        "type": "section_present",
+        "value": "Decision"
+      },
+      {
+        "type": "section_present",
+        "value": "Risks & Mitigations"
+      },
+      {
+        "type": "section_present",
+        "value": "Open Questions"
+      },
+      {
+        "type": "no_banned_phrases",
+        "value": [
+          "best practice",
+          "obviously",
+          "industry standard",
+          "hybrid of all",
+          "while also keeping option"
+        ]
+      }
     ],
     "plugins": [],
     "llm_judges": [

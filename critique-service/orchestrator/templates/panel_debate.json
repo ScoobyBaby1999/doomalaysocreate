@@ -10,45 +10,89 @@
       "name": "frame",
       "role": "extractor",
       "instructions": "Turn the prompt into a sharp debate. Output JSON {\"question\": str (the crux, stated neutrally), \"positions\": [{\"stance\": str, \"one_liner\": str}]}. Produce 3-4 positions that are genuinely DISTINCT and each defensible by a smart person - not strawmen, not near-duplicates. Avoid a fake 'it depends' middle position unless it's substantively different. Return ONLY a single JSON object with top-level keys \"question\" and \"positions\" (positions is a non-empty array).",
-      "inputs": ["prompt"],
-      "max_tokens": 1500
+      "inputs": [
+        "prompt"
+      ],
+      "max_tokens": 3000
     },
     {
       "name": "argue",
       "role": "generator",
       "instructions": "Make the STRONGEST honest case for your assigned position on the framed question. Give concrete reasoning and evidence/examples. Then add 'Strongest objection I must answer:' naming the best counter-argument and your response to it. Argue in good faith - no rhetorical tricks, no attacking strawmen.",
-      "fanout": {"over": "frame.positions", "max_parallel": 4},
-      "inputs": ["frame", "frame.positions.{i}"],
-      "max_tokens": 2500
+      "fanout": {
+        "over": "frame.positions",
+        "max_parallel": 4
+      },
+      "inputs": [
+        "frame",
+        "frame.positions.{i}"
+      ],
+      "max_tokens": 6000
     },
     {
       "name": "rebut",
       "role": "reviewer",
       "instructions": "You are a cross-examiner. For EACH of the other positions' arguments: first STEELMAN it in one sentence (state its strongest form fairly), then give your sharpest rebuttal grounded in reasoning or evidence. Be rigorous and fair - concede points that are actually correct. Do not rebut your own assigned position.",
-      "fanout": {"over": "frame.positions", "max_parallel": 4},
-      "inputs": ["frame", "argue.*", "frame.positions.{i}"],
-      "max_tokens": 3000
+      "fanout": {
+        "over": "frame.positions",
+        "max_parallel": 4
+      },
+      "inputs": [
+        "frame",
+        "argue.*",
+        "frame.positions.{i}"
+      ],
+      "max_tokens": 7000
     },
     {
       "name": "converge",
       "role": "transformer",
       "instructions": "You are the moderator. Synthesize the arguments and rebuttals into markdown with EXACTLY these sections: '## The question' (the crux), '## Positions in brief' (one line each), '## Points of agreement' (what survived cross-examination - claims most positions accept), '## Irreducible disagreements' (the real cruxes that remain - PRESERVE them honestly, name WHY each side holds its view, do NOT collapse to false consensus), '## What would resolve this' (the specific evidence, experiment, or value-judgment that would settle each disagreement), and '## Moderator's read' (your honest weighing - which position is best-supported and under what assumptions, while respecting that reasonable people differ).",
-      "inputs": ["frame", "argue.*", "rebut.*"],
-      "max_tokens": 6000
+      "inputs": [
+        "frame",
+        "argue.*",
+        "rebut.*"
+      ],
+      "max_tokens": 14000
     }
   ],
   "output_rules": {
     "format": "markdown",
-    "required_sections": ["Points of agreement", "Irreducible disagreements", "What would resolve this"],
-    "banned_phrases": ["everyone agrees", "the answer is obvious", "clearly the best", "no reasonable person"],
+    "required_sections": [
+      "Points of agreement",
+      "Irreducible disagreements",
+      "What would resolve this"
+    ],
+    "banned_phrases": [
+      "everyone agrees",
+      "the answer is obvious",
+      "clearly the best",
+      "no reasonable person"
+    ],
     "tone": "fair, rigorous, comfortable with unresolved disagreement"
   },
   "judge_config": {
     "rules": [
-      {"type": "min_words", "value": 400},
-      {"type": "section_present", "value": "Irreducible disagreements"},
-      {"type": "section_present", "value": "What would resolve this"},
-      {"type": "no_banned_phrases", "value": ["everyone agrees", "the answer is obvious", "no reasonable person"]}
+      {
+        "type": "min_words",
+        "value": 1200
+      },
+      {
+        "type": "section_present",
+        "value": "Irreducible disagreements"
+      },
+      {
+        "type": "section_present",
+        "value": "What would resolve this"
+      },
+      {
+        "type": "no_banned_phrases",
+        "value": [
+          "everyone agrees",
+          "the answer is obvious",
+          "no reasonable person"
+        ]
+      }
     ],
     "plugins": [],
     "llm_judges": [
