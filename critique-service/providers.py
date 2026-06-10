@@ -174,15 +174,27 @@ def load_reasoning_catalog() -> dict[str, dict]:
     return {k: v for k, v in raw.items() if not k.startswith("//") and isinstance(v, dict)}
 
 
-def resolve_reasoning_body(catalog: dict[str, dict], *, logical: str | None,
-                           who: str | None, family: str | None) -> dict:
-    #   pick the most specific reasoning body: provider/model -> logical -> family -> '*'.
+def resolve_reasoning_entry(catalog: dict[str, dict], *, logical: str | None,
+                            who: str | None, family: str | None) -> dict:
+    #   pick the most specific catalog entry: provider/model -> logical -> family -> '*'.
+    #   the entry carries "body" (thinking params) and optional "quirks" (per-model
+    #   transport adaptations, e.g. system_in_user for hosts that strip system prompts).
     for key in (who, logical, family, "*"):
         if key and key in catalog:
-            body = catalog[key].get("body")
-            if isinstance(body, dict):
-                return dict(body)
+            return catalog[key]
     return {}
+
+
+def resolve_reasoning_body(catalog: dict[str, dict], *, logical: str | None,
+                           who: str | None, family: str | None) -> dict:
+    body = resolve_reasoning_entry(catalog, logical=logical, who=who, family=family).get("body")
+    return dict(body) if isinstance(body, dict) else {}
+
+
+def resolve_quirks(catalog: dict[str, dict], *, logical: str | None,
+                   who: str | None, family: str | None) -> dict:
+    quirks = resolve_reasoning_entry(catalog, logical=logical, who=who, family=family).get("quirks")
+    return dict(quirks) if isinstance(quirks, dict) else {}
 
 
 def _first_env(env_var) -> str:

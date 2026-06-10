@@ -21,13 +21,20 @@ RESEARCH_MAX_STEPS = int(os.environ.get("RESEARCH_MAX_STEPS", "8"))
 
 async def research_call(client: httpx.AsyncClient, picked, system_prompt: str, *,
                         user_msg: str, max_tokens: int, timeout_s: float,
-                        extra_body: dict | None = None, max_steps: int | None = None) -> dict:
+                        extra_body: dict | None = None, max_steps: int | None = None,
+                        system_in_user: bool = False) -> dict:
     max_steps = RESEARCH_MAX_STEPS if max_steps is None else max_steps
     t0 = time.monotonic()
-    messages = [
-        {"role": "system", "content": system_prompt + web_tools.TOOLS_PROTOCOL},
-        {"role": "user", "content": user_msg},
-    ]
+    prompt_full = system_prompt + web_tools.TOOLS_PROTOCOL
+    if system_in_user:
+        #   hosts that strip custom system prompts (e.g. GitHub Phi-4) get the whole
+        #   protocol folded into the first user message instead.
+        messages = [{"role": "user", "content": f"{prompt_full}\n\n---\n\n{user_msg}"}]
+    else:
+        messages = [
+            {"role": "system", "content": prompt_full},
+            {"role": "user", "content": user_msg},
+        ]
     steps = searches = fetches = 0
     reasoning_all: list[str] = []
     in_tok = out_tok = 0

@@ -394,7 +394,8 @@ class SlotScheduler:
 async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict[str, str]],
                     *, max_tokens: int, timeout_s: float = 600.0,
                     response_format: dict | None = None,
-                    extra_body: dict | None = None) -> tuple[str, dict]:
+                    extra_body: dict | None = None,
+                    on_progress=None) -> tuple[str, dict]:
     #   extra_body carries per-model reasoning/thinking fields (from reasoning_catalog)
     #   that are shallow-merged into the request. On success, usage may include a
     #   "reasoning_content" key when a thinking model streamed its trace.
@@ -430,7 +431,8 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
                     slot=picked.who)
 
     if STREAM_DEFAULT:
-        return await _call_slot_stream(client, picked, headers, body, timeout_s, log_base)
+        return await _call_slot_stream(client, picked, headers, body, timeout_s, log_base,
+                                       on_progress=on_progress)
 
     t_call = time.monotonic()
     status: int | None = None
@@ -528,10 +530,13 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
 
 
 async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: dict,
-                            body: dict, timeout_s: float, log_base: dict) -> tuple[str, dict]:
+                            body: dict, timeout_s: float, log_base: dict,
+                            on_progress=None) -> tuple[str, dict]:
     #   streaming variant: keeps the connection alive across long generations and
     #   surfaces reasoning_content for thinking models. accumulates SSE deltas into
     #   one (content, usage) result, mapping the same error codes as the sync path.
+    #   on_progress(content_chars, reasoning_chars, tail) is called every ~25 chunks
+    #   so callers (the async JobRunner) can expose live "watch it think" state.
     p = picked.provider
     sbody = dict(body, stream=True, stream_options={"include_usage": True})
     t_call = time.monotonic()
@@ -559,6 +564,8 @@ async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: di
 
             content_parts: list[str] = []
             reasoning_parts: list[str] = []
+            content_len = reasoning_len = 0
+            chunks_seen = 0
             usage: dict = {}
             async for line in response.aiter_lines():
                 line = line.strip()
@@ -579,10 +586,20 @@ async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: di
                     delta = ch.get("delta") or {}
                     if delta.get("content"):
                         content_parts.append(delta["content"])
+                        content_len += len(delta["content"])
                     if delta.get("reasoning_content"):
                         reasoning_parts.append(delta["reasoning_content"])
+                        reasoning_len += len(delta["reasoning_content"])
                 if isinstance(chunk.get("usage"), dict):
                     usage = chunk["usage"]
+                chunks_seen += 1
+                if on_progress is not None and chunks_seen % 25 == 0:
+                    tail_src = content_parts if content_parts else reasoning_parts
+                    try:
+                        on_progress(content_len, reasoning_len,
+                                    "".join(tail_src[-8:])[-200:])
+                    except Exception:  # noqa: BLE001 - progress is best-effort
+                        pass
 
         content = "".join(content_parts)
         reasoning = "".join(reasoning_parts)

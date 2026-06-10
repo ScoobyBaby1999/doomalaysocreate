@@ -48,19 +48,26 @@ _PICK_ROLE = Roles("critiquer")
 
 async def call_once(client: httpx.AsyncClient, picked, system_prompt: str, *,
                     user_msg: str, max_tokens: int, timeout_s: float,
-                    extra_body: dict | None = None) -> dict:
+                    extra_body: dict | None = None,
+                    system_in_user: bool = False,
+                    on_progress=None) -> dict:
     #   exactly one http exchange against one slot. never raises; returns a
     #   structured result carrying ok / code / usage / latency. extra_body carries
-    #   per-model reasoning/thinking fields.
+    #   per-model reasoning/thinking fields. system_in_user folds the system prompt
+    #   into the user message for hosts that strip/override custom system prompts
+    #   (e.g. GitHub's Phi-4-reasoning). on_progress streams live output counters.
     t0 = time.monotonic()
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_msg},
-    ]
+    if system_in_user:
+        messages = [{"role": "user", "content": f"{system_prompt}\n\n---\n\n{user_msg}"}]
+    else:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ]
     try:
         content, usage = await call_slot(client, picked, messages=messages,
                                          max_tokens=max_tokens, timeout_s=timeout_s,
-                                         extra_body=extra_body)
+                                         extra_body=extra_body, on_progress=on_progress)
         text = content.strip()
         if looks_like_refusal(text):
             res = {"ok": False, "code": "refusal", "error": f"refusal: {text[:160]!r}", "usage": usage}
@@ -79,7 +86,8 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
                       role_label: str, effort: str, profile: str, metrics,
                       user_msg: str, max_tokens: int, timeout_s: float,
                       nonce: str = "", reasoning: bool = False, research: bool = False,
-                      reasoning_catalog: dict | None = None) -> dict:
+                      reasoning_catalog: dict | None = None,
+                      on_progress=None) -> dict:
     #   run one logical judge with cross-provider failover. asks the scheduler for
     #   the best eligible host, calls it, and on ANY failure records the penalty
     #   (cooldown/blacklist) + a metric event and bounces to the next provider that
@@ -102,21 +110,30 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
         attempts += 1
         candidates_tried.append(picked.who)
         await scheduler.wait_for_provider_pacing(picked)
-        #   resolve this model's thinking params when deep reasoning is requested.
+        #   resolve this model's thinking params when deep reasoning is requested,
+        #   and its transport quirks ALWAYS (they fix how the host is talked to).
         extra_body = None
-        if (reasoning or research) and reasoning_catalog is not None:
-            from providers import resolve_reasoning_body
-            extra_body = resolve_reasoning_body(
+        system_in_user = False
+        if reasoning_catalog is not None:
+            from providers import resolve_quirks, resolve_reasoning_body
+            if reasoning or research:
+                extra_body = resolve_reasoning_body(
+                    reasoning_catalog, logical=logical, who=picked.who,
+                    family=picked.model_family) or None
+            system_in_user = bool(resolve_quirks(
                 reasoning_catalog, logical=logical, who=picked.who,
-                family=picked.model_family) or None
+                family=picked.model_family).get("system_in_user"))
         if research:
             import agent
             res = await agent.research_call(
                 client, picked, system_prompt, user_msg=user_msg,
-                max_tokens=max_tokens, timeout_s=timeout_s, extra_body=extra_body)
+                max_tokens=max_tokens, timeout_s=timeout_s, extra_body=extra_body,
+                system_in_user=system_in_user)
         else:
             res = await call_once(client, picked, system_prompt, user_msg=user_msg,
-                                  max_tokens=max_tokens, timeout_s=timeout_s, extra_body=extra_body)
+                                  max_tokens=max_tokens, timeout_s=timeout_s,
+                                  extra_body=extra_body, system_in_user=system_in_user,
+                                  on_progress=on_progress)
         usage = res.get("usage") or {}
         in_tok, out_tok = usage.get("prompt_tokens"), usage.get("completion_tokens")
         if res["ok"]:
@@ -305,12 +322,27 @@ class JobRunner:
             j = self.jobs.get(job_id)
             if j is not None:
                 j["judges"][who] = {"model": who, "status": "running"}
+
+        def _progress(content_chars: int, reasoning_chars: int, tail: str) -> None:
+            #   live "watch it think" state: poll GET /api/jobs/<id> while a judge
+            #   streams and see its counters + the tail of what it's writing.
+            with self.lock:
+                jj = self.jobs.get(job_id)
+                if jj is not None and jj["judges"].get(who, {}).get("status") == "running":
+                    jj["judges"][who]["progress"] = {
+                        "content_chars": content_chars,
+                        "reasoning_chars": reasoning_chars,
+                        "tail": tail,
+                        "updated_at": round(time.time(), 1),
+                    }
+
         res = await route_judge(
             self.panel.scheduler, self._client, logical, candidates, system_prompt,
             role_label=role_label, effort=effort, profile=profile,
             metrics=self.panel.metrics, user_msg=user_msg, max_tokens=max_tokens,
             timeout_s=timeout_s, nonce=nonce, reasoning=reasoning, research=research,
-            reasoning_catalog=getattr(self.panel, "reasoning_catalog", None))
+            reasoning_catalog=getattr(self.panel, "reasoning_catalog", None),
+            on_progress=_progress)
         res["model"] = who
         res["status"] = "done" if res.get("ok") else "error"
         with self.lock:

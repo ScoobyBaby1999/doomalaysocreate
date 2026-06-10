@@ -63,6 +63,29 @@ async def main():
     check("reasoning-only judge ok", j2.get("ok"), f"err={j2.get('error')}")
     check("reasoning-only did NOT run agent steps", j2.get("steps") is None)
 
+    print("scenario: system_in_user quirk folds system into the user message")
+    import jobs as jobs_mod
+    captured: dict = {}
+    orig_call_slot = jobs_mod.call_slot
+    async def spy_call_slot(client, picked, messages, **kw):
+        captured["messages"] = messages
+        return await orig_call_slot(client, picked, messages, **kw)
+    jobs_mod.call_slot = spy_call_slot
+    try:
+        res3 = await run(panel, "phi-4-reasoning", "p_quirk")
+    finally:
+        jobs_mod.call_slot = orig_call_slot
+    msgs = captured.get("messages") or []
+    check("quirk: single user message (no system role)",
+          len(msgs) == 1 and msgs[0]["role"] == "user",
+          f"roles={[m['role'] for m in msgs]}")
+    check("quirk: system prompt folded into user content",
+          len(msgs) == 1 and "Produce the requested output now." in msgs[0]["content"]
+          and len(msgs[0]["content"]) > 200,
+          f"len={len(msgs[0]['content']) if msgs else 0}")
+    check("quirk judge still ok", res3["judges"][0].get("ok"),
+          f"err={res3['judges'][0].get('error')}")
+
     print()
     if FAILS:
         print(f"FAILED ({len(FAILS)}): {FAILS}"); return 1

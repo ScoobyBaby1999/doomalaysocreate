@@ -17,10 +17,10 @@
     "*": { "body": {}, "note": "default: no special param; rely on token budget + native behaviour" },
 
     "glm-5.1": { "body": {"chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false}}, "note": "NVIDIA NIM only; confirmed. ctx 131k in/out; emits reasoning_content" },
-    "deepseek-v4-pro": { "body": {"chat_template_kwargs": {"thinking": true, "reasoning_effort": "max"}}, "note": "NVIDIA NIM only; confirmed. reasoning_effort max|high|none; ctx 1M" },
+    "deepseek-v4-pro": { "body": {"chat_template_kwargs": {"thinking": true, "reasoning_effort": "high"}}, "note": "NVIDIA NIM only; confirmed. reasoning_effort max|high|none; ctx 1M. 'high' default - 'max' thinks past every timeout we have (captest judge killed at 35min still thinking); override per-request when truly needed" },
     "deepseek-v3": { "body": {}, "note": "non-reasoning by default (github models)" },
-    "deepseek-r1": { "body": {}, "note": "github R1-0528 + cloudflare r1-distill-qwen-32b (80k ctx) reason natively; no param" },
-    "phi-4-reasoning": { "body": {}, "note": "reasoning model by design (github models; streams its think trace)" },
+    "deepseek-r1": { "body": {}, "note": "github R1-0528 reasons natively; no param. 403s on our tier - kept for when the tier rises. CF r1-distill removed (captest: hallucinated a deadlock fix)" },
+    "phi-4-reasoning": { "body": {}, "quirks": {"system_in_user": true}, "note": "reasoning model by design (github models; streams its think trace). GitHub strips/overrides custom system prompts for this model (captest: in_tokens=233, never saw the input) - quirk folds system into the user message" },
 
     "nvidia/moonshotai/kimi-k2.6": { "body": {"chat_template_kwargs": {"thinking": true}}, "note": "NVIDIA NIM Kimi thinking (confirmed). ctx 256k; vision-capable (MoonViT)" },
     "openrouter/moonshotai/kimi-k2.6:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle; ctx 262k" },
