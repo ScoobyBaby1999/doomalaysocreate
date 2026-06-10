@@ -381,21 +381,20 @@ async def _execute_stage(
 
     async def _shard(i: int) -> StageRecord:
         async with sem:
-            # Capture current set of running providers AT THIS MOMENT so
-            # this shard picks a different one. We're inside the
-            # semaphore so up to max_parallel shards are running.
+            # Snapshot the providers sibling shards are CURRENTLY holding so this
+            # shard starts on a different one. _execute_one_call keeps the shared
+            # set live as it picks/retries/releases (registration happens there).
             async with inflight_lock:
                 exclude_now = set(inflight_providers)
             try:
-                rec = await _execute_one_call(
+                return await _execute_one_call(
                     stage, schematic, scheduler, http_client, context,
                     exclude_providers=exclude_now,
                     shard_index=i,
                     log=log,
+                    inflight=inflight_providers,
+                    inflight_lock=inflight_lock,
                 )
-                async with inflight_lock:
-                    inflight_providers.discard(rec.provider) if rec.provider else None
-                return rec
             except StageFailure as e:
                 return StageRecord(
                     name=f"{stage.name}[{i}]",
@@ -404,10 +403,8 @@ async def _execute_stage(
                     duration_s=0.0, ok=False, error=str(e)[:200],
                 )
 
-    # Track inflight providers as shards START (we add) and END (we remove).
-    # _execute_one_call adds the picked provider to inflight_providers
-    # right before pacing, removes it after the call returns. We just
-    # gather here.
+    # _execute_one_call registers each shard's picked provider in inflight_providers
+    # right after picking and releases it in a finally; we just gather here.
     records = await asyncio.gather(*(_shard(i) for i in range(len(items))))
 
     # If too many shards failed, the whole stage is a failure.
@@ -431,8 +428,17 @@ async def _execute_one_call(
     exclude_providers: set[str],
     shard_index: int | None,
     log: Callable[[str], None],
+    inflight: set[str] | None = None,
+    inflight_lock: "asyncio.Lock | None" = None,
 ) -> StageRecord:
-    """Execute one LLM call for a stage. Handles retries on call-level failure."""
+    """Execute one LLM call for a stage. Handles retries on call-level failure.
+
+    When `inflight`/`inflight_lock` are supplied (fanout), this call REGISTERS its
+    currently-picked provider into the shared set so sibling shards exclude it, swaps
+    the registration on each retry, and discards it in a finally. (Previously the
+    fanout passed only a snapshot copy and nothing was ever added, so concurrent
+    shards did not actually avoid each other - whole-repo review finding, 2026-06.)
+    """
     t0 = time.monotonic()
 
     # Build prompts.
@@ -474,10 +480,24 @@ async def _execute_one_call(
     # the exclude set so we don't keep hitting the same one.
     excluded_so_far: set[str] = set(exclude_providers)
     last_error: str | None = None
+    registered: str | None = None  # provider currently held in the shared inflight set
+
+    async def _register(provider_name: str | None) -> None:
+        #   swap this shard's reservation in the shared fanout set (under its lock).
+        nonlocal registered
+        if inflight is None or inflight_lock is None:
+            return
+        async with inflight_lock:
+            if registered is not None:
+                inflight.discard(registered)
+            registered = provider_name
+            if provider_name is not None:
+                inflight.add(provider_name)
 
     shard_label = f"{stage.name}[{shard_index}]" if shard_index is not None else stage.name
 
-    for attempt in range(STAGE_CALL_ATTEMPTS):
+    try:
+      for attempt in range(STAGE_CALL_ATTEMPTS):
         try:
             slot = scheduler.pick_slot(
                 role=stage.role, exclude_providers=excluded_so_far,
@@ -490,6 +510,9 @@ async def _execute_one_call(
                       attempt=attempt + 1, fail_code="no_slot",
                       reason=last_error[:200])
             break
+
+        #   reserve this provider so sibling shards in the fanout avoid it.
+        await _register(slot.provider.name)
 
         log_event("stage_attempt",
                   stage=shard_label, role=stage.role.value,
@@ -570,6 +593,10 @@ async def _execute_one_call(
             duration_s=duration,
             ok=True,
         )
+    finally:
+        #   release this shard's provider reservation on ANY exit (success, failure,
+        #   exception) so the shared inflight set never leaks a stale entry.
+        await _register(None)
 
     raise StageFailure(
         f"all {STAGE_CALL_ATTEMPTS} attempts failed for stage {stage.name!r}; last: {last_error}"

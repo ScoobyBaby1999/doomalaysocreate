@@ -600,8 +600,12 @@ async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: di
                     #       a bare array/string payload ('data: []') would crash the
                     #       .get() calls below with AttributeError (captest, kimi).
                     continue
-                if isinstance(chunk, dict) and chunk.get("error"):
+                if chunk.get("error"):
                     err = chunk["error"]
+                    #   some hosts send a STRING error instead of an object; coerce so
+                    #   err.get() can't raise AttributeError (whole-repo review finding).
+                    if not isinstance(err, dict):
+                        err = {"code": "unknown", "message": str(err)}
                     ecode = normalize_upstream_code(err.get("code", "unknown"))
                     raise ProviderError(f"{ecode}:upstream {ecode}: {str(err.get('message',''))[:200]}")
                 for ch in (chunk.get("choices") or []):

@@ -153,7 +153,9 @@ def _mock_content(picked, system: str, digest: str) -> str:
             f"===== END FILE [{nonce}] path=src/app.py =====\n"
         )
     low = system.lower()
-    if "json" in low and ("task_type" in low or "schematic" in low or "stages" in low):
+    #   schematic-PLANNING prompts are marked by task_type/schematic; plain "stages"
+    #   also appears in other skeletons (e.g. extractor guidance), so don't match on it.
+    if "json" in low and ("task_type" in low or "schematic" in low):
         return ('{"task_type": "freeform", "task": "mock planned task", '
                 '"stages": [{"name": "write", "role": "generator", '
                 '"instructions": "Produce what the prompt asks for.", '
@@ -164,7 +166,11 @@ def _mock_content(picked, system: str, digest: str) -> str:
     if "json" in low and ('"pass"' in low or "verifier" in low or "pass:" in low):
         return '{"pass": true, "reason": "mock verifier approves"}'
     if "json" in low and ("extract" in low or "topics" in low):
-        return '{"topics": [{"name": "Mock topic", "scope": "x", "target_words": 700}]}'
+        #   three topics so fanout stages produce multiple shards in tests.
+        return ('{"topics": ['
+                '{"name": "Mock topic one", "scope": "a", "target_words": 700}, '
+                '{"name": "Mock topic two", "scope": "b", "target_words": 700}, '
+                '{"name": "Mock topic three", "scope": "c", "target_words": 700}]}')
     return (
         f"[mock:{picked.who}] synthetic output {digest}. Deterministic placeholder "
         f"text for offline testing, long enough to read as real prose.\n\n"

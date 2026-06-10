@@ -111,8 +111,36 @@ async def scenario_judge_retry():
     check("final report has hard fails", res.final_report and not res.final_report.ok)
 
 
+async def scenario_fanout_diversity():
+    print("scenario: concurrent fanout shards spread across providers (inflight exclusion)")
+    #   a planner emits a list, then a fanout stage runs one shard per item with
+    #   max_parallel=3. with the inflight-exclusion fix, simultaneous shards must land
+    #   on DIFFERENT providers (mock has 4). without it they collapse onto one.
+    schem = from_json_text(json.dumps({
+        "task_type": "freeform", "task": "fanout spread",
+        "stages": [
+            {"name": "outline", "role": "extractor",
+             "instructions": "Extract exactly 3 topics as JSON.", "inputs": ["prompt"],
+             "max_tokens": 300},
+            {"name": "sections", "role": "generator",
+             "instructions": "Write the section.", "inputs": ["outline.topics.{i}"],
+             "max_tokens": 300, "fanout": {"over": "outline.topics", "max_parallel": 3}},
+        ],
+        "output_rules": {"format": "markdown"},
+        "judge_config": {"rules": [], "plugins": [], "llm_judges": []},
+        "max_rounds": 1,
+    }))
+    res, _ = await run(schem, "Spread across providers.", "p_fanout")
+    shard_provs = [s.provider for s in res.stages
+                   if s.name.startswith("sections[") and s.ok and s.provider]
+    check("fanout produced >=2 ok shards", len(shard_provs) >= 2, f"shards={shard_provs}")
+    check("concurrent shards used >=2 distinct providers",
+          len(set(shard_provs)) >= 2, f"providers={shard_provs}")
+
+
 async def main():
-    for sc in (scenario_freeform, scenario_artifacts, scenario_judge_retry):
+    for sc in (scenario_freeform, scenario_artifacts, scenario_judge_retry,
+               scenario_fanout_diversity):
         await sc()
     print()
     if FAILS:
