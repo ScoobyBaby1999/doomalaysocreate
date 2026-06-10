@@ -1,0 +1,86 @@
+{
+  "task_type": "research_paper",
+  "task": "<FILL ME IN: short topic label>",
+  "description": "10-stage research pipeline: parse outline → discover peer-reviewed URLs → verify URLs via trafilatura fetch → plan sub-questions → draft grounded sections with strict citation rules → intro → conclusion → references → uncertainties → assemble. Best for multi-section research papers with real source grounding.",
+  "stages": [
+    {
+      "name": "outline",
+      "role": "parser",
+      "instructions": "From the user prompt, extract the numbered topic list as JSON with the EXACT shape {\"topics\": [{\"name\": str, \"scope\": str, \"target_words\": int}, ...]}. EVERY topic object MUST contain all three keys - 'name' is the short topic label (e.g. 'Mathematical Foundations'), 'scope' is a one-line list of sub-areas to cover, 'target_words' is an int around 700. Topics missing 'name' will silently drop the topic name and cause downstream sections to drift off-subject. If the prompt has no numbered list, infer 4-6 topics from the prompt's headings or central themes; still emit the 'name' field for each.",
+      "max_tokens": 1000
+    },
+    {
+      "name": "source_discovery",
+      "role": "planner",
+      "instructions": "For this topic, identify 1-10 specific URLs pointing to peer-reviewed articles, academic papers, or authoritative sources that can be fetched and read. Output JSON array: [{\"url\": \"https://...\", \"title\": \"...\", \"relevance\": \"one-line why this matters\"}].\n\nRULES:\n- DO NOT invent URLs. Only list sources you have HIGH confidence exist and are accessible.\n- Prefer: .edu, .gov, arxiv.org, nature.com, science.org, jstor.org, ncbi.nlm.nih.gov, and known academic publishers (Springer, Elsevier, IEEE, ACM).\n- URLs must be fully formed (start with http:// or https://).\n- If you are uncertain whether a URL is valid, OMIT it. Better to list fewer real URLs than many fake ones.\n- Include a mix of: survey papers, recent studies, foundational research, and data sources.\n- This list will be passed to a web fetcher that extracts readable article text with trafilatura. Avoid sites that are paywalled, JS-heavy, or login-gated.",
+      "fanout": {"over": "outline.topics", "max_parallel": 3},
+      "inputs": ["outline.topics.{i}"],
+      "max_tokens": 1200
+    },
+    {
+      "name": "url_verification",
+      "role": "parser",
+      "instructions": "You are given source_discovery output (proposed URLs) AND a fetched_sources block (what was actually retrieved). Your job: verify and filter.\n\nFor each proposed URL, check if it appears in fetched_sources. If YES, it is verified — keep it. If NO, mark it as unreachable/fake.\n\nOutput JSON: {\"verified\": [{\"url\": str, \"title\": str, \"relevance\": str, \"chars_extracted\": int}, ...], \"dropped\": [{\"url\": str, \"reason\": str}, ...]}\n\nReasons for dropping: \"not_fetched\", \"empty_content\", \"paywall_detected\", \"unreachable\".\nIf a URL was fetched but returned very little text (<100 chars), still keep it but note the low content.",
+      "inputs": ["source_discovery.*", "fetched_sources"],
+      "max_tokens": 1500
+    },
+    {
+      "name": "research_plan",
+      "role": "planner",
+      "instructions": "For this single topic, list 3-5 specific sub-questions worth researching to write 600-800 words. Output JSON: [{\"question\": str, \"why\": str}, ...]. Use the VERIFIED sources (from url_verification.verified) to guide your questions — ask about specific findings, methodologies, or gaps mentioned in the actual source text. Do not invent sources; just list questions grounded in real content.",
+      "fanout": {"over": "outline.topics", "max_parallel": 3},
+      "inputs": ["outline.topics.{i}", "url_verification.verified"],
+      "max_tokens": 800
+    },
+    {
+      "name": "section_draft",
+      "role": "generator",
+      "instructions": "Draft 600-800 words on the given topic, addressing each sub-question from the research plan.\n\nGROUNDING RULES (strict — no exceptions):\n- You MUST ground every factual claim in the fetched_sources text below. Read the actual content before writing.\n- For every factual claim, cite the supporting source by its number: 'cats see ~6x better in low light [1].'\n- NEVER invent a citation. NEVER write [Title](URL) inline links. If no source in fetched_sources supports a claim, soften it ('it appears that...', 'I am uncertain whether...') or omit it.\n- Never cite a number not present in fetched_sources. Cite multiple sources for one claim as [1, 3].\n- If fetched_sources is empty, write the section without any citations and explicitly state: 'Note: No source material was available for this section; the following is speculative.'\n- NEVER fabricate statistics, dates, author names, study results, or paper titles that do not appear in the actual fetched source text.\n- If a claim cannot be supported by any source, write '[no source support]' and move on.\n\nCRITICAL: stay on the OVERALL paper subject named in the user prompt. Do NOT drift to a related-but-different organism, technology, or field.\n\nBegin with '## <topic name>'. End with a 1-2 sentence open questions note as '### Open questions:' on its own line.",
+      "fanout": {"over": "outline.topics", "max_parallel": 3},
+      "inputs": ["prompt", "fetched_sources", "url_verification.verified", "outline.topics.{i}", "research_plan.{i}"],
+      "max_tokens": 2500
+    },
+    {
+      "name": "intro",
+      "role": "generator",
+      "instructions": "Write a 200-250 word introduction to a research paper covering the topics listed below. Frame the overall topic, motivate why each topic matters, and end with a one-sentence 'this paper covers...' summary. Begin with '# <derived paper title>'. Do not write section content - the sections come later.",
+      "inputs": ["outline.topics.*", "url_verification.verified", "prompt"],
+      "max_tokens": 600
+    },
+    {
+      "name": "conclusion",
+      "role": "generator",
+      "instructions": "Write a 150-200 word conclusion that synthesizes the research paper's findings without repeating each section. Identify the 2-3 most important cross-cutting takeaways. Begin with '## Conclusion'. Do not introduce new claims or citations.",
+      "inputs": ["outline.topics.*", "section_draft.*"],
+      "max_tokens": 500
+    },
+    {
+      "name": "references",
+      "role": "generator",
+      "instructions": "Build a '## References' section listing exactly the sources from url_verification.verified in their order. For each source emit a numbered entry formatted as:\n\n[N] Author or site name. \"Title\". Year (if known). URL\n\nDo NOT add new sources, reorder, or skip any. The body's [N] citation markers correspond to these numbers. Begin output with the literal heading '## References' on its own line.",
+      "inputs": ["url_verification.verified"],
+      "max_tokens": 1500
+    },
+    {
+      "name": "uncertainties_synthesis",
+      "role": "generator",
+      "instructions": "Build a '## What I'm not sure about' section listing 3-5 substantive open questions or uncertainties. Use the 'Open questions' notes from each section as raw material - synthesize them into cross-cutting themes, don't just copy-paste. Each bullet should name a specific gap or uncertainty, not generic filler. Begin output with the literal heading '## What I'm not sure about' on its own line.",
+      "inputs": ["outline.topics.*", "section_draft.*"],
+      "max_tokens": 700
+    },
+    {
+      "name": "assemble_body",
+      "role": "assembler",
+      "instructions": "{intro}\n\n{section_draft.*}\n\n{conclusion}\n\n{references}\n\n{uncertainties_synthesis}\n",
+      "inputs": ["intro", "section_draft.*", "conclusion", "references", "uncertainties_synthesis"]
+    }
+  ],
+  "output_rules": {
+    "format": "markdown",
+    "min_words": 4000,
+    "max_words": 12000,
+    "required_sections": ["References", "What I'm not sure about"],
+    "banned_phrases": ["clearly", "obviously", "state-of-the-art", "industry standard", "everyone knows", "undoubtedly", "definitively"],
+    "tone": "rigorous, hedged, attribution-heavy"
+  }
+}

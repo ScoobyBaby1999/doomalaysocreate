@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Dashboard</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css?v=2">
+</head>
+
+<body>
+
+    <!-- NAVBAR -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+
+            <a class="navbar-brand d-flex align-items-center gap-2" href="#">
+                <img src="Images/icon.png" alt="Time Manager" height="32" width="32">
+                <span>Time Manager</span>
+            </a>
+
+            <button class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navApp">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+
+            <div class="collapse navbar-collapse" id="navApp">
+                <ul class="navbar-nav ms-auto">
+
+                    <li class="nav-item">
+                        <button class="nav-link btn btn-link text-white" id="calendarBtn">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                                <line x1="16" y1="2" x2="16" y2="6"/>
+                                <line x1="8" y1="2" x2="8" y2="6"/>
+                                <line x1="3" y1="10" x2="21" y2="10"/>
+                            </svg>
+                            Calendar
+                        </button>
+                    </li>
+
+                    <li class="nav-item">
+                        <button class="nav-link btn btn-link text-white" id="outputsBtn">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                            </svg>
+                            Outputs
+                        </button>
+                    </li>
+
+                    <li class="nav-item">
+                        <button class="nav-link btn btn-link text-white" id="logBtn">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+                                <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+                                <line x1="8" y1="10" x2="16" y2="10"/>
+                                <line x1="8" y1="14" x2="16" y2="14"/>
+                                <line x1="8" y1="18" x2="12" y2="18"/>
+                                <polyline points="15 16 17 18 19 16"/>
+                            </svg>
+                            Log
+                        </button>
+                    </li>
+
+                    <li class="nav-item">
+                        <button class="nav-link btn btn-link text-white" id="helpBtn">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                            </svg>
+                            Help
+                        </button>
+                    </li>
+
+                    <!-- CONTACT -->
+                    <li class="nav-item">
+                        <button class="nav-link btn btn-link text-white" onclick="window.location.href='contact.html'">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                                <polyline points="22,6 12,13 2,6"/>
+                            </svg>
+                            Contact Us
+                        </button>
+                    </li>
+
+                    <li class="nav-item">
+                        <button class="nav-link btn btn-link text-white" id="settingsBtn">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="3"/>
+                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                            </svg>
+                        </button>
+                    </li>
+
+                    <li class="nav-item">
+                        <button class="nav-link btn btn-danger ms-2" id="logoutBtn">Logout</button>
+                    </li>
+
+                </ul>
+            </div>
+
+        </div>
+    </nav>
+
+    <div id="content">
+
+        <!-- TASKS -->
+        <div id="tasksPage" class="page" style="display:flex;">
+
+            <div id="sidebar">
+                <h3>Tasks</h3>
+                <div id="noteList"></div>
+
+                <button id="addBtn">+ New Task</button>
+            </div>
+
+            <div id="editor">
+
+                <label>Title</label>
+                <input id="noteTitle">
+
+                <label>Description</label>
+                <textarea id="noteContent"></textarea>
+
+                <label>Priority</label>
+                <select id="priority">
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                </select>
+
+                <label>Template</label>
+                <select id="template"></select>
+
+                <label>Date</label>
+                <input id="date" type="date">
+
+                <div class="task-buttons">
+                    <button id="saveBtn">Save</button>
+                    <button id="deleteBtn">Delete</button>
+                    <button id="processBtn">Process (AI)</button>
+                </div>
+
+                <div id="processStatus" class="process-status" style="display:none;"></div>
+
+            </div>
+        </div>
+
+    </div>
+
+    <!-- OVERLAY PANEL -->
+    <div id="overlayBackdrop" class="overlay-backdrop"></div>
+    <div id="overlayPanel" class="overlay-panel">
+
+        <!-- Collapsed strip (visible when panel is collapsed) -->
+        <div id="overlayStrip" class="overlay-strip" onclick="expandPanel()">
+            <svg class="strip-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="15 18 9 12 15 6"/>
+            </svg>
+        </div>
+
+        <!-- Expanded panel -->
+        <div id="overlayContent" class="overlay-content">
+
+            <!-- Panel header -->
+            <div class="overlay-header">
+                <h3 id="overlayTitle">Settings</h3>
+                <div class="overlay-actions">
+                    <button id="overlayCollapseBtn" onclick="collapsePanel()" title="Collapse">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="9 18 15 12 9 6"/>
+                        </svg>
+                    </button>
+                    <button id="overlayCloseBtn" onclick="closePanel()" title="Close">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Panel body: Settings view -->
+            <div id="settingsView" class="overlay-view">
+
+                <!-- Theme toggle -->
+                <div class="setting-row">
+                    <div class="setting-label">
+                        <span>Appearance</span>
+                        <span class="setting-desc">Switch between dark and light mode</span>
+                    </div>
+                    <label class="theme-toggle">
+                        <input type="checkbox" id="themeToggle">
+                        <span class="toggle-track">
+                            <span class="toggle-thumb"></span>
+                        </span>
+                        <span class="toggle-label" id="themeLabel">Dark</span>
+                    </label>
+                </div>
+
+                <div class="setting-divider"></div>
+
+                <!-- API Keys -->
+                <h4 class="section-title">API Keys</h4>
+                <p class="section-desc">Keys are stored in the backend .env file. Changes apply on next task processing.</p>
+
+                <div class="api-keys-grid">
+
+                    <div class="api-key-card" data-provider="openrouter">
+                        <div class="api-key-header">
+                            <span class="api-key-name">OpenRouter</span>
+                            <span class="api-key-status" id="status-openrouter"></span>
+                        </div>
+                        <input type="password" id="key-openrouter" placeholder="sk-or-v1-..." class="api-key-input">
+                        <div class="api-key-actions">
+                            <button onclick="toggleKeyVisibility('openrouter')" class="btn-icon" title="Show/hide">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                            </button>
+                            <button onclick="saveApiKey('openrouter')" class="btn-save">Save</button>
+                        </div>
+                    </div>
+
+                    <div class="api-key-card" data-provider="groq">
+                        <div class="api-key-header">
+                            <span class="api-key-name">Groq</span>
+                            <span class="api-key-status" id="status-groq"></span>
+                        </div>
+                        <input type="password" id="key-groq" placeholder="gsk_..." class="api-key-input">
+                        <div class="api-key-actions">
+                            <button onclick="toggleKeyVisibility('groq')" class="btn-icon" title="Show/hide">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                            </button>
+                            <button onclick="saveApiKey('groq')" class="btn-save">Save</button>
+                        </div>
+                    </div>
+
+                    <div class="api-key-card" data-provider="cerebras">
+                        <div class="api-key-header">
+                            <span class="api-key-name">Cerebras</span>
+                            <span class="api-key-status" id="status-cerebras"></span>
+                        </div>
+                        <input type="password" id="key-cerebras" placeholder="csk-..." class="api-key-input">
+                        <div class="api-key-actions">
+                            <button onclick="toggleKeyVisibility('cerebras')" class="btn-icon" title="Show/hide">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                            </button>
+                            <button onclick="saveApiKey('cerebras')" class="btn-save">Save</button>
+                        </div>
+                    </div>
+
+                    <div class="api-key-card" data-provider="nvidia">
+                        <div class="api-key-header">
+                            <span class="api-key-name">NVIDIA</span>
+                            <span class="api-key-status" id="status-nvidia"></span>
+                        </div>
+                        <input type="password" id="key-nvidia" placeholder="nvapi-..." class="api-key-input">
+                        <div class="api-key-actions">
+                            <button onclick="toggleKeyVisibility('nvidia')" class="btn-icon" title="Show/hide">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                            </button>
+                            <button onclick="saveApiKey('nvidia')" class="btn-save">Save</button>
+                        </div>
+                    </div>
+
+                </div>
+
+            </div>
+
+            <!-- Panel body: Calendar view -->
+            <div id="calendarView" class="overlay-view" style="display:none;">
+                <div class="calendar-nav">
+                    <button onclick="prevMonth()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="15 18 9 12 15 6"/>
+                        </svg>
+                    </button>
+                    <h2 id="calendarTitle"></h2>
+                    <button onclick="nextMonth()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="9 18 15 12 9 6"/>
+                        </svg>
+                    </button>
+                </div>
+                <div id="calendar" class="calendar-grid">
+                    <div class="day-name">Sun</div>
+                    <div class="day-name">Mon</div>
+                    <div class="day-name">Tue</div>
+                    <div class="day-name">Wed</div>
+                    <div class="day-name">Thu</div>
+                    <div class="day-name">Fri</div>
+                    <div class="day-name">Sat</div>
+                </div>
+            </div>
+
+            <!-- Panel body: Chat view -->
+            <div id="chatView" class="overlay-view" style="display:none;">
+                <div class="chat-toolbar">
+                    <label class="chat-toggle-label">
+                        <input type="checkbox" id="includeTaskToggle">
+                        <span class="toggle-track-small">
+                            <span class="toggle-thumb-small"></span>
+                        </span>
+                        Include current task
+                    </label>
+                    <span id="chatTaskLabel" class="chat-task-label">No task selected</span>
+                    <div class="chat-toolbar-right">
+                        <span id="chatProviderInfo" class="chat-provider-info"></span>
+                        <button class="btn-new-chat" onclick="clearChat()">New Chat</button>
+                    </div>
+                </div>
+                <div id="overlayChatBox"></div>
+                <div id="overlayChatArea">
+                    <textarea id="overlayChatInput" rows="1" placeholder="Ask anything..." oninput="autoResizeChatInput();" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+                    <button id="overlaySendBtn" onclick="sendChat()">Send</button>
+                </div>
+            </div>
+
+            <!-- Panel body: Log view -->
+            <div id="logView" class="overlay-view" style="display:none;">
+                <div class="log-toolbar">
+                    <span>Showing orchestrator events</span>
+                    <button class="btn-clear-log" onclick="clearLog()" title="Clear log file">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"/>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                        </svg>
+                        Clear
+                    </button>
+                </div>
+                <div id="logContent">
+                    <div id="logEntries"></div>
+                    <div id="logEmpty" class="log-empty" style="display:none;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+                            <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+                        </svg>
+                        <p>No log entries yet.</p>
+                        <span>Process a task to start seeing orchestrator events.</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Panel body: Outputs view -->
+            <div id="outputsView" class="overlay-view" style="display:none;">
+                <div id="outputsList">
+                    <div id="outputsListContent"></div>
+                    <div id="outputsEmpty" class="outputs-empty" style="display:none;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                            <polyline points="14 2 14 8 20 8"/>
+                        </svg>
+                        <p>No outputs yet.</p>
+                        <span>Process a task with AI to generate outputs.</span>
+                    </div>
+                </div>
+                <div id="outputViewer" style="display:none;">
+                    <button class="btn-back" onclick="backToOutputsList()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="15 18 9 12 15 6"/>
+                        </svg>
+                        All Outputs
+                    </button>
+                    <div id="outputMeta" class="output-meta"></div>
+                    <div id="outputBody" class="output-body"></div>
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script src="js/auth.js"></script>
+    <script src="js/state.js"></script>
+    <script src="js/tasks.js"></script>
+    <script src="js/chat.js"></script>
+    <script src="js/calendar.js"></script>
+    <script src="js/ui.js"></script>
+    <script src="js/app.js"></script>
+    <script src="js/overlay.js"></script>
+    <script src="js/outputs.js"></script>
+    <script src="js/log.js"></script>
+
+</body>
+</html>

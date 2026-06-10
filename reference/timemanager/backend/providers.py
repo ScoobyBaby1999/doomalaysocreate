@@ -1,0 +1,241 @@
+from __future__ import annotations
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from content.roles import Roles
+
+# providers and slots: top-level registry of llm endpoints and the (provider, model)
+# pairs they expose. each slot carries which roles it's allowed to play.
+
+@dataclass(frozen=True)
+class provider:
+    name: str
+    url: str
+    api_key: str
+    models: tuple[str, ...]
+    rpm: int = 30                                       # rate per minute
+    extra_headers: dict = field(default_factory=dict)   # some providers want custom headers
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class slot:
+    provider: provider
+    model: str
+    model_family: str
+    roles: tuple[Roles, ...] = (
+        Roles("planner"), Roles("parser"),
+        Roles("critiquer"), Roles("verifier"),
+        Roles("generator"), Roles("transformer"),
+    )
+
+    @property
+    def who(self) -> str:
+        return f"{self.provider.name}/{self.model}"
+
+
+def load_env() -> None:
+    #   tiny .env loader. format: KEY=value per line. only sets keys not already set.
+    envfile = Path(__file__).resolve().parent / ".env"
+    if not envfile.exists():
+        return
+    for line in envfile.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+# normalize model strings to a 'family' so multiple providers serving the same
+# weights (qwen-3-32b on cerebras vs qwen/qwen3-32b on groq) share one stats bucket.
+LLM_suffixes = (
+    ":free", "-instruct-2507", "-instruct-fp8-fast", "-instruct-fast",
+    "-fp8-fast", "-instruct", "-versatile", "-it", "-chat", "-preview",
+)
+LLM_prefixes = (
+    "@cf/meta/", "@cf/", "openai/", "google/", "meta-llama/",
+    "nousresearch/", "arcee-ai/", "qwen/", "z-ai/", "nvidia/",
+    "minimax/", "openrouter/", "meta/",
+)
+
+
+def make_model_family(models: str) -> str:
+    model = models.lower().strip()
+    #   strip a known prefix once if present.
+    for pfx in sorted(LLM_prefixes, key=len, reverse=True):
+        if model.startswith(pfx):
+            model = model[len(pfx):]
+            break
+    #   strip every recognised suffix - some models have multiple stacked.
+    loop = True
+    while loop:
+        loop = False
+        for sfx in sorted(LLM_suffixes, key=len, reverse=True):
+            if model.endswith(sfx):
+                model = model[:-len(sfx)]
+                loop = True
+                break
+    return model
+
+
+def make_model_role(models: str) -> tuple[Roles, ...]:
+    #   route based on parameter count tags in the model name.
+    #   high tier -> generator/transformer/planner only. low tier -> small jobs.
+    model = models.lower()
+    if any(tag in model for tag in ("120b", "200b", "235b", "405b", "480b", "671b")):
+        return (Roles("generator"), Roles("transformer"), Roles("planner"))
+    if any(tag in model for tag in ("70b", "72b", "80b", "4.5", "air")):
+        return (
+            Roles("planner"), Roles("parser"),
+            Roles("critiquer"), Roles("verifier"),
+            Roles("generator"), Roles("transformer"),
+        )
+    if any(tag in model for tag in ("8b", "17b", "20b", "26b", "27b", "30b", "31b", "32b", "flash", "nano")):
+        return (Roles("parser"), Roles("verifier"), Roles("critiquer"))
+    #       unknown size -> trust it on every role.
+    return (
+        Roles("planner"), Roles("parser"),
+        Roles("critiquer"), Roles("verifier"),
+        Roles("generator"), Roles("transformer"),
+    )
+
+
+# every provider we know about. only ones with an api key in env are returned.
+
+def make_provider_registry() -> list[provider]:
+    load_env()
+    providers: list[provider] = []
+
+    # openrouter - shared free quota, easy to 429 across all users.
+    tempkey = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if tempkey:
+        providers.append(provider(
+            name="openrouter",
+            url="https://openrouter.ai/api/v1/chat/completions",
+            api_key=tempkey,
+            models=(
+                "openai/gpt-oss-120b:free",
+                "nousresearch/hermes-3-llama-3.1-405b:free",
+                "qwen/qwen3-coder:free",
+                "qwen/qwen3-next-80b-a3b-instruct:free",
+                "meta-llama/llama-3.3-70b-instruct:free",
+                "z-ai/glm-4.5-air:free",
+                "google/gemma-3-27b-it:free",
+                "openai/gpt-oss-20b:free",
+            ),
+            rpm=20,
+            extra_headers={
+                "HTTP-Referer": "",
+                "X-Title": "Senior research loop",
+            },
+            note="mostly shared quota, once it 429's it stays capped for a long time.",
+        ))
+
+    # cerebras - very fast, capped at ~1m tokens/day.
+    tempkey = os.environ.get("CEREBRAS_API_KEY", "").strip()
+    if tempkey:
+        providers.append(provider(
+            name="cerebras",
+            url="https://api.cerebras.ai/v1/chat/completions",
+            api_key=tempkey,
+            #       these are what the free tier actually exposes (verified via
+            #       /v1/models). gpt-oss-120b is listed but 404s on chat in this
+            #       account, so it's deliberately excluded - probe would catch
+            #       new mismatches automatically anyway.
+            models=(
+                "qwen-3-235b-a22b-instruct-2507",
+                "llama3.1-8b",
+            ),
+            rpm=40,
+            note=">2000 tokens/sec, 1M tokens/day cap.",
+        ))
+
+    # groq - fastest provider, low daily budget.
+    tempkey = os.environ.get("GROQ_API_KEY", "").strip()
+    if tempkey:
+        providers.append(provider(
+            name="groq",
+            url="https://api.groq.com/openai/v1/chat/completions",
+            api_key=tempkey,
+            models=(
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant",
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "qwen/qwen3-32b",
+            ),
+            rpm=30,
+            note="30 rpm, ~14.4k req/day. fastest provider.",
+        ))
+
+    # nvidia nim - openai-compat, free credits, generous rpm.
+    # replaces gemini which had an 8 rpm cap that made it unusable in rotation.
+    tempkey = os.environ.get("NVIDIA_API_KEY", "").strip()
+    if tempkey:
+        providers.append(provider(
+            name="nvidia",
+            url="https://integrate.api.nvidia.com/v1/chat/completions",
+            api_key=tempkey,
+            models=(
+                "meta/llama-3.3-70b-instruct",
+                "nvidia/llama-3.3-nemotron-super-49b-v1",
+                "deepseek-ai/deepseek-r1",
+                "meta/llama-4-maverick-17b-128e-instruct",
+                "qwen/qwen2.5-coder-32b-instruct",
+            ),
+            rpm=40,
+            note="free credits, generous rpm, broad model lineup.",
+        ))
+
+    return providers
+
+
+def make_slot_registry(providers: list[provider]) -> list[slot]:
+    #   one slot per (provider, model). family + role tuple are derived once here.
+    slots: list[slot] = []
+    for p in providers:
+        for model in p.models:
+            slots.append(slot(
+                provider=p,
+                model=model,
+                model_family=make_model_family(model),
+                roles=make_model_role(model),
+            ))
+    return slots
+
+
+
+def print_provider_registry(providers: list[provider]) -> str:
+    if not providers:
+        return "!!! no registered providers, AI will not work."
+    lines = []
+    for p in providers:
+        lines.append(f"- {p.name}: {len(p.models)} model(s), rpm={p.rpm}")
+        lines.append(f"    url: {p.url}")
+        if p.note:
+            lines.append(f"    note: {p.note}")
+    return "\n".join(lines)
+
+
+def print_slot_registry(slots: list[slot]) -> str:
+    lines = []
+    for s in slots:
+        roles = ",".join(r.value for r in s.roles)
+        lines.append(f"  {s.who:60} family={s.model_family:25} roles=[{roles}]")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    providers = make_provider_registry()
+    print(f"providers: {len(providers)}")
+    print(print_provider_registry(providers))
+    slots = make_slot_registry(providers)
+    print(f"slots: {len(slots)}")
+    print(print_slot_registry(slots))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

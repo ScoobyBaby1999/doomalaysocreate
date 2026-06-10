@@ -1,0 +1,4 @@
+
+# timemanager reference runtime data (keep source, drop user data)
+reference/timemanager/data/
+reference/timemanager/backend/outputs/

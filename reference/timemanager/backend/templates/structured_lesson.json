@@ -1,0 +1,48 @@
+{
+  "task_type": "structured_lesson",
+  "task": "<FILL ME IN: short lesson description or topic>",
+  "description": "5-stage pipeline: extract params → generate objectives → write full lesson with 6 required sections → quality critique → polish with transformer. More thorough than lesson_plan, enforces Bloom's taxonomy objectives and exact time-budgeted procedure steps.",
+  "stages": [
+    {
+      "name": "extract_params",
+      "role": "parser",
+      "instructions": "From the user prompt, extract a JSON object with these keys: topic (string, the main subject), audience (string, who this is for e.g. 'high school students' or 'beginner programmers'), duration_min (integer, total lesson length — infer 30 if not stated), prerequisites (list of strings, skills/knowledge the learner needs already). Emit ONLY the JSON object with these exact four keys.",
+      "max_tokens": 400
+    },
+    {
+      "name": "objectives",
+      "role": "generator",
+      "instructions": "Given the extracted lesson parameters, generate 3-5 measurable learning objectives. Each objective MUST start with an action verb from Bloom's taxonomy (e.g. identify, explain, demonstrate, calculate, compare, construct). Objectives must be observable and testable — avoid vague verbs like 'understand' or 'know'. Output a JSON array: [\"Objective 1\", \"Objective 2\", ...].",
+      "inputs": ["prompt", "extract_params"],
+      "max_tokens": 400
+    },
+    {
+      "name": "full_lesson",
+      "role": "generator",
+      "instructions": "Write a complete lesson plan. Use the exact section headings below — each must be present and non-empty:\n\n## Learning Objectives\n(List the objectives from the objectives stage, one per line, as bullet points)\n\n## Prerequisites\n(Expand from extract_params.prerequisites — add brief explanations for each)\n\n## Materials\n(Concrete, specific items needed. NOT generic things like 'computer' — name specific tools, handouts, software versions, or content references)\n\n## Procedure\n(Numbered steps with per-step time allocations in brackets like [5 min]. Times MUST sum to extract_params.duration_min. Each step must be actionable: 'Begin by...', 'Ask students...', 'Have learners...'. Include timing for transitions.)\n\n## Assessment\n(3-5 concrete items for checking understanding. Each must specify HOW to check: 'Ask students to...', 'Give a short quiz on...', 'Observe whether...')\n\n## Differentiation\n(2-3 specific strategies to adapt the lesson for different learner needs: advanced students, struggling students, different learning styles)\n\nWrite in second-person imperative voice. Be concrete and specific throughout.",
+      "inputs": ["prompt", "extract_params", "objectives"],
+      "max_tokens": 4000
+    },
+    {
+      "name": "quality_check",
+      "role": "critiquer",
+      "instructions": "Audit the full_lesson against these criteria. For each failure, output ONE bullet with a specific actionable fix:\n1. ALL six required sections present with exact headings: Learning Objectives, Prerequisites, Materials, Procedure, Assessment, Differentiation\n2. Learning Objectives start with action verbs (not 'understand'/'know'/'learn')\n3. Materials are specific (not generic items like 'computer' or 'notebook')\n4. Procedure step times sum to the stated duration_min from extract_params\n5. Each procedure step is actionable (imperative voice, not vague descriptions)\n6. Assessment items are concrete enough to grade\n7. No unexplained jargon on first use\n8. Voice is consistent second-person imperative throughout\n\nOutput ONLY the bullet list of issues (or 'No issues found' if all pass).",
+      "inputs": ["full_lesson", "extract_params"],
+      "max_tokens": 800
+    },
+    {
+      "name": "polish",
+      "role": "transformer",
+      "instructions": "Apply each fix from quality_check to the full_lesson. If any Procedure times don't sum to the stated duration, adjust them. If any section is missing, add it. If objectives use weak verbs, strengthen them. Return the FULL polished lesson plan with all sections intact.",
+      "inputs": ["full_lesson", "quality_check", "extract_params"],
+      "max_tokens": 4000
+    }
+  ],
+  "output_rules": {
+    "format": "markdown",
+    "min_words": 600,
+    "max_words": 5000,
+    "required_sections": ["Learning Objectives", "Prerequisites", "Materials", "Procedure", "Assessment", "Differentiation"],
+    "tone": "instructive, supportive, second-person imperative"
+  }
+}
