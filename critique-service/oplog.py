@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 # structured operations log - one json line per notable event (call ok/fail,
@@ -38,3 +39,17 @@ def _json_default(obj: Any) -> Any:
     if hasattr(obj, "__fspath__"):
         return os.fspath(obj)
     return repr(obj)
+
+
+def atomic_write_json(path: Path, payload: Any, *, indent: int | None = None) -> None:
+    #   write to <path>.tmp then os.replace - never leaves a half-written file if the
+    #   process is killed mid-write (ported from timemanager prior art). used for job
+    #   snapshots / checkpoints where a partial read would corrupt resumed state.
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, indent=indent, ensure_ascii=False, default=_json_default),
+        encoding="utf-8",
+    )
+    tmp.replace(path)

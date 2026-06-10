@@ -9,6 +9,7 @@ import httpx
 
 import orchestrate
 from content.roles import Roles, looks_like_refusal
+from jobstore import JobStore
 from merge import merge_critiques, merge_panel
 from oplog import log_event
 from orchestrator.orchestrator import execute as orchestrator_execute
@@ -95,11 +96,12 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
     #   reasoning -> merge the model's thinking params; research -> web ReAct loop.
     tried: set[str] = set()
     candidates_tried: list[str] = []
+    trace: list[dict] = []          # per-hop {slot, code, latency_s} for ?trace=true
     attempts = 0
     last = None
     if not candidates:
         return {"model": logical, "ok": False, "routed_to": None, "attempts": 0,
-                "candidates_tried": [], "elapsed_s": 0.0,
+                "candidates_tried": [], "trace": [], "elapsed_s": 0.0,
                 "error": "not registered (no configured provider hosts this model)"}
 
     max_hops = len(candidates) + JUDGE_RETRIES
@@ -136,13 +138,16 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
                                   on_progress=on_progress)
         usage = res.get("usage") or {}
         in_tok, out_tok = usage.get("prompt_tokens"), usage.get("completion_tokens")
+        trace.append({"slot": picked.who, "code": res["code"],
+                      "latency_s": res.get("elapsed_s", 0.0)})
         if res["ok"]:
             scheduler.record_success(picked)
             _emit(metrics, profile, logical, picked, role_label, effort, res,
                   in_tok, out_tok, attempts, candidates_tried, res.get("output"))
             out = {"model": logical, "routed_to": picked.who, "ok": True,
                    "output": res["output"], "elapsed_s": res["elapsed_s"],
-                   "attempts": attempts, "candidates_tried": list(candidates_tried)}
+                   "attempts": attempts, "candidates_tried": list(candidates_tried),
+                   "trace": list(trace)}
             if usage.get("reasoning_content"):
                 out["reasoning"] = usage["reasoning_content"]
             for k in ("steps", "searches", "tool_calls"):
@@ -156,6 +161,7 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
             return out
         #       failure: penalise the slot, record the metric, bounce providers.
         code = res["code"]
+        trace[-1]["fallback_reason"] = res.get("error", code)[:160]
         scheduler.record_failure(picked, code, res.get("error", ""))
         _emit(metrics, profile, logical, picked, role_label, effort, res,
               in_tok, out_tok, attempts, candidates_tried, None)
@@ -168,7 +174,7 @@ async def route_judge(scheduler, client, logical: str, candidates: list, system_
     err = (last or {}).get("error", "all candidate providers cooling/blacklisted/unconfigured")
     return {"model": logical, "ok": False, "routed_to": None,
             "error": err[:300], "attempts": attempts,
-            "candidates_tried": list(candidates_tried),
+            "candidates_tried": list(candidates_tried), "trace": list(trace),
             "elapsed_s": (last or {}).get("elapsed_s", 0.0)}
 
 
@@ -254,16 +260,18 @@ def finalize_judges(judges: list[dict], kind: str, merge_mode: str) -> tuple[lis
 class JobRunner:
     """Runs panels as fire-and-forget jobs on a dedicated background event loop."""
 
-    def __init__(self, panel, *, judge_timeout_s: float) -> None:
+    def __init__(self, panel, *, judge_timeout_s: float, store: JobStore | None = None) -> None:
         self.panel = panel
         self.judge_timeout_s = judge_timeout_s
         self.jobs: dict[str, dict] = {}
+        self.store = store if store is not None else JobStore()
         self.lock = threading.Lock()
         self.loop = asyncio.new_event_loop()
         self._client: httpx.AsyncClient | None = None
         ready = threading.Event()
         threading.Thread(target=self._run_loop, args=(ready,), daemon=True).start()
         ready.wait(10)
+        self._reload_jobs()
 
     def _run_loop(self, ready: threading.Event) -> None:
         asyncio.set_event_loop(self.loop)
@@ -271,11 +279,78 @@ class JobRunner:
         self.loop.call_soon(ready.set)
         self.loop.run_forever()
 
+    def _persist(self, job_id: str) -> None:
+        #   snapshot the job to durable storage (called after every state transition).
+        with self.lock:
+            job = self.jobs.get(job_id)
+            snap = dict(job) if job is not None else None
+        if snap is not None:
+            self.store.save(snap)
+
     def _prune_locked(self) -> None:
         now = time.time()
         stale = [jid for jid, v in self.jobs.items() if now - v["created"] > JOB_TTL_S]
         for jid in stale:
             self.jobs.pop(jid, None)
+            self.store.delete(jid)
+
+    def _reload_jobs(self) -> None:
+        #   on boot: re-hydrate persisted jobs so a deploy / restart doesn't lose work.
+        #   panel jobs reschedule any unfinished judge; run jobs that were mid-flight
+        #   are marked interrupted (no safe stage-level resume yet).
+        try:
+            saved = self.store.load_all()
+        except Exception as e:  # noqa: BLE001
+            log_event("jobstore_reload_error", error=repr(e)[:200])
+            return
+        now = time.time()
+        resumed = interrupted = 0
+        for job in saved:
+            jid = job.get("id")
+            if not jid or now - job.get("created", now) > JOB_TTL_S:
+                if jid:
+                    self.store.delete(jid)
+                continue
+            if job.get("type") == "run":
+                if job.get("status") != "complete":
+                    job["status"] = "interrupted"
+                    job.setdefault("stage_log", []).append(
+                        "[runner] interrupted by restart; resubmit to continue")
+                    interrupted += 1
+                with self.lock:
+                    self.jobs[jid] = job
+                self.store.save(job)
+                continue
+            # panel job: reschedule judges not yet settled
+            ex = job.get("_exec")
+            with self.lock:
+                self.jobs[jid] = job
+            pending = [who for who, j in (job.get("judges") or {}).items()
+                       if j.get("status") not in ("done", "error")]
+            if not ex or not pending:
+                continue
+            for who in pending:
+                logical, candidates = self.panel.resolve_candidates(who)
+                with self.lock:
+                    self.jobs[jid]["judges"][who] = {"model": who, "status": "pending"}
+                if not candidates:
+                    with self.lock:
+                        self.jobs[jid]["judges"][who] = {
+                            "model": who, "ok": False, "status": "error",
+                            "error": "not registered (no configured provider hosts this model)"}
+                    continue
+                asyncio.run_coroutine_threadsafe(
+                    self._run_judge(jid, who, logical, candidates, ex["system_prompt"],
+                                    ex["user_msg"], ex["max_tokens"], ex["role"],
+                                    ex["profile"], ex["effort"], ex["timeout_s"],
+                                    ex.get("nonce", ""), ex.get("reasoning", False),
+                                    ex.get("research", False)),
+                    self.loop)
+                resumed += 1
+            self.store.save(self.jobs[jid])
+        if resumed or interrupted:
+            log_event("jobs_reloaded", resumed_judges=resumed, interrupted_runs=interrupted,
+                      total=len(saved))
 
     def submit(self, *, who_list: list[str], system_prompt: str, user_msg: str,
                max_tokens: int, role: str, merge_mode: str, kind: str,
@@ -293,13 +368,21 @@ class JobRunner:
             else:
                 judges[who] = {"model": who, "status": "pending"}
                 scheduled.append((who, logical, candidates))
+        jt = timeout_s or self.judge_timeout_s
         job = {"id": job_id, "type": "panel", "kind": kind, "role": role, "merge": merge_mode,
                "profile": profile, "effort": effort,
-               "created": time.time(), "judges": judges, "total": len(who_list)}
+               "created": time.time(), "judges": judges, "total": len(who_list),
+               #   _exec carries everything needed to RESUME unfinished judges after a
+               #   restart (who_list, not slot objects - candidates re-resolve on reload).
+               "_exec": {"who_list": list(who_list), "system_prompt": system_prompt,
+                         "user_msg": user_msg, "max_tokens": max_tokens, "role": role,
+                         "merge_mode": merge_mode, "kind": kind, "profile": profile,
+                         "effort": effort, "timeout_s": jt, "nonce": nonce,
+                         "reasoning": reasoning, "research": research}}
         with self.lock:
             self._prune_locked()
             self.jobs[job_id] = job
-        jt = timeout_s or self.judge_timeout_s
+        self.store.save(job)
         #   schedule each logical judge as its own task; each does cross-provider
         #   failover through the shared scheduler + emits per-profile metrics.
         for who, logical, candidates in scheduled:
@@ -322,6 +405,7 @@ class JobRunner:
             j = self.jobs.get(job_id)
             if j is not None:
                 j["judges"][who] = {"model": who, "status": "running"}
+        self._persist(job_id)
 
         def _progress(content_chars: int, reasoning_chars: int, tail: str) -> None:
             #   live "watch it think" state: poll GET /api/jobs/<id> while a judge
@@ -349,6 +433,7 @@ class JobRunner:
             j = self.jobs.get(job_id)
             if j is not None:
                 j["judges"][who] = res
+        self._persist(job_id)
         log_event("job_judge_settled", job_id=job_id, model=who,
                   routed_to=res.get("routed_to"), ok=res.get("ok"),
                   elapsed_s=res.get("elapsed_s"))
@@ -368,6 +453,7 @@ class JobRunner:
         with self.lock:
             self._prune_locked()
             self.jobs[job_id] = job
+        self.store.save(job)
         asyncio.run_coroutine_threadsafe(
             self._run_orchestration(job_id, schematic, prompt, profile, effort, nonce, plan_mode),
             self.loop,
@@ -408,6 +494,7 @@ class JobRunner:
             if j is not None:
                 j["status"] = "complete"
                 j["result"] = serialized
+        self._persist(job_id)
         log_event("run_settled", job_id=job_id, ok=serialized.get("ok"),
                   rounds=serialized.get("rounds"), error=serialized.get("error"))
 
@@ -422,7 +509,7 @@ class JobRunner:
                      "age_s": round(time.time() - job["created"], 1)},
         }
 
-    def snapshot(self, job_id: str) -> dict | None:
+    def snapshot(self, job_id: str, *, trace: bool = False) -> dict | None:
         with self.lock:
             job = self.jobs.get(job_id)
             if job is None:
@@ -433,6 +520,10 @@ class JobRunner:
             kind, role, merge_mode = job["kind"], job["role"], job["merge"]
             created = job["created"]
 
+        #   the per-hop routing chain is verbose; only surface it on ?trace=true.
+        if not trace:
+            for j in raw:
+                j.pop("trace", None)
         settled = [j for j in raw if j.get("status") in ("done", "error")]
         done_count = len(settled)
         total = len(raw)

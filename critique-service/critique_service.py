@@ -481,7 +481,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             job_id = route[len("/api/jobs/"):]
-            snap = self.server.jobs.snapshot(job_id)  # type: ignore[attr-defined]
+            from urllib.parse import parse_qs, urlsplit
+            want_trace = parse_qs(urlsplit(self.path).query).get("trace", ["0"])[0] in ("1", "true", "yes")
+            snap = self.server.jobs.snapshot(job_id, trace=want_trace)  # type: ignore[attr-defined]
             if snap is None:
                 self._send_json(404, {"error": "no such job (unknown id or expired)"})
                 return
