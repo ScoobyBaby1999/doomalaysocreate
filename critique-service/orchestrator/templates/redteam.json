@@ -1,0 +1,59 @@
+{
+  "//": "RED TEAM - adversarial review of a plan, spec, architecture, or codebase. Enumerates",
+  "//1": "distinct attack/failure surfaces, probes each in parallel for concrete exploits and",
+  "//2": "failure scenarios, then ships a severity-ranked threat report with a mitigations",
+  "//3": "checklist. Pass the artifact under review as the prompt.",
+  "task_type": "redteam",
+  "task": "<FILL ME IN: system under review>",
+  "stages": [
+    {
+      "name": "surfaces",
+      "role": "extractor",
+      "instructions": "Read the artifact in the prompt. Enumerate the distinct THREAT/FAILURE SURFACES worth probing separately. Output JSON {\"surfaces\": [{\"name\": str, \"why\": str}]}. Cover at least: authentication/authorization, input handling & injection, data exposure / privacy, resource exhaustion & DoS, failure & recovery (what breaks under partial failure), and abuse/misuse by a malicious user. Produce 5-7 surfaces tailored to THIS artifact. Return ONLY a single JSON object with the top-level key \"surfaces\" (never a bare array, no prose).",
+      "inputs": ["prompt"],
+      "max_tokens": 1500
+    },
+    {
+      "name": "probe",
+      "role": "reviewer",
+      "instructions": "Attack ONLY your assigned surface. Find concrete, plausible vulnerabilities or failure scenarios. For EACH: '[SEVERITY] name - the concrete trigger/exploit (a specific sequence an attacker or unlucky condition would take) - blast radius - mitigation'. Severity in {CRITICAL,HIGH,MEDIUM,LOW}. RULE: a finding must describe a CONCRETE trigger (what input, what sequence, what condition) - reject vague 'could be insecure' hand-waving. If the artifact lacks detail to confirm, say 'CONTINGENT: depends on <X>' and state what to check.",
+      "fanout": {"over": "surfaces.surfaces", "max_parallel": 3},
+      "inputs": ["prompt", "surfaces.surfaces.{i}"],
+      "max_tokens": 3000
+    },
+    {
+      "name": "report",
+      "role": "transformer",
+      "instructions": "Consolidate all probes into ONE threat report. Deduplicate. Re-rank globally by severity x likelihood. Structure: '## Threat summary' (one-paragraph risk posture), '## Findings' grouped '### Critical / ### High / ### Medium / ### Low' each as '[surface] trigger -> impact -> mitigation', '## Contingent (needs more info)' for the CONTINGENT items, and '## Mitigations checklist' (a deduplicated, actionable, ordered to-do list). Be specific about triggers.",
+      "inputs": ["surfaces", "probe.*"],
+      "max_tokens": 7000
+    },
+    {
+      "name": "verify",
+      "role": "verifier",
+      "instructions": "Output JSON {\"pass\": bool, \"reason\": str}. pass=false if ANY finding lacks a concrete trigger, if severity looks inflated (cosmetic marked Critical), if the Mitigations checklist is missing items for Critical/High findings, or if duplicates remain. Otherwise pass=true.",
+      "inputs": ["body"],
+      "max_tokens": 1200
+    }
+  ],
+  "output_rules": {
+    "format": "markdown",
+    "required_sections": ["Mitigations checklist", "Contingent (needs more info)"],
+    "banned_phrases": ["could potentially", "might be vulnerable", "in theory", "best practice"],
+    "tone": "concrete, exploit-oriented, no vague hedging"
+  },
+  "judge_config": {
+    "rules": [
+      {"type": "min_words", "value": 300},
+      {"type": "section_present", "value": "Mitigations checklist"},
+      {"type": "no_banned_phrases", "value": ["could potentially", "might be vulnerable", "in theory", "best practice"]}
+    ],
+    "plugins": [],
+    "llm_judges": [
+      "Does every Critical/High finding describe a concrete trigger (specific input, sequence, or condition) rather than a vague possibility?",
+      "Does the Mitigations checklist contain an actionable item for each Critical and High finding?"
+    ]
+  },
+  "max_rounds": 2,
+  "committee_size": 1
+}

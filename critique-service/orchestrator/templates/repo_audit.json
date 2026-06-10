@@ -1,0 +1,67 @@
+{
+  "//": "REPO AUDIT - deep multi-stage codebase review. Pass the codebase (or a repopack",
+  "//1": "blob) as the prompt. Maps subsystems, deep-reviews each in parallel, then cross-",
+  "//2": "validates to suppress the classic LLM-reviewer failure: confident-but-wrong",
+  "//3": "concurrency/race claims (observed live, 2026-06). Output is a severity-ranked audit.",
+  "task_type": "repo_audit",
+  "task": "<FILL ME IN: repo or subsystem name>",
+  "stages": [
+    {
+      "name": "map",
+      "role": "extractor",
+      "instructions": "Read the codebase in the prompt. Identify the distinct SUBSYSTEMS worth auditing separately (e.g. HTTP layer, scheduler, persistence, auth, orchestration). Output JSON {\"areas\": [{\"name\": str, \"files\": str (comma-separated paths/globs), \"focus\": str (what to scrutinize most)}, ...]}. Produce 3-6 areas; group tiny files together. Do NOT review yet - just map. Return ONLY a single JSON object with the top-level key \"areas\" (never a bare array, no prose).",
+      "inputs": ["prompt"],
+      "max_tokens": 1500
+    },
+    {
+      "name": "deep_review",
+      "role": "reviewer",
+      "instructions": "Audit ONLY your assigned subsystem within the codebase. Find REAL issues ranked by severity. For EACH finding emit a block: '[SEVERITY] path:symbol - issue - evidence (quote the exact code) - concrete fix'. Severity in {CRITICAL,HIGH,MEDIUM,LOW}. Cover: correctness bugs, security (authz, injection, secret handling, data-at-rest), resource leaks / unbounded growth, error handling, and contract mismatches between this subsystem and its callers. RULE: every finding MUST quote real code as evidence - if you cannot quote it, do not report it. If you make any claim about concurrency, races, locks, or event loops, prefix it with 'UNVERIFIED-CONCURRENCY:' because these are the hardest to get right from reading alone.",
+      "fanout": {"over": "map.areas", "max_parallel": 3},
+      "inputs": ["prompt", "map.areas.{i}"],
+      "max_tokens": 3500
+    },
+    {
+      "name": "synthesize",
+      "role": "transformer",
+      "instructions": "Merge all subsystem findings into ONE audit report. Deduplicate overlapping findings. DROP any finding that did not quote real code as evidence. Re-rank globally by severity. Structure: '## Critical', '## High', '## Medium', '## Low', each a list of '[path:symbol] issue - fix'. Then '## False-positive watch' listing every 'UNVERIFIED-CONCURRENCY' claim separately, marked as needs-human-verification (do NOT rank these as Critical/High). End with '## Top 3 to fix first' (the three highest-leverage real bugs) and '## Coverage' (which subsystems were reviewed).",
+      "inputs": ["deep_review.*", "map"],
+      "max_tokens": 8000
+    },
+    {
+      "name": "cross_check",
+      "role": "reviewer",
+      "instructions": "Adversarially check the audit. Flag: (a) any finding still lacking quoted evidence, (b) any concurrency claim NOT in the False-positive watch section, (c) duplicate findings, (d) fixes that would introduce new bugs, (e) severity inflation (a cosmetic issue marked Critical). List concrete corrections only.",
+      "inputs": ["map", "body"],
+      "max_tokens": 3000
+    },
+    {
+      "name": "finalize",
+      "role": "transformer",
+      "instructions": "Apply every cross-check correction. Move unverified concurrency claims into the False-positive watch section. Demote inflated severities. Remove evidence-free findings. Return the FULL corrected audit, preserving all section headers.",
+      "inputs": ["body", "cross_check"],
+      "max_tokens": 8000
+    }
+  ],
+  "output_rules": {
+    "format": "markdown",
+    "required_sections": ["Top 3 to fix first", "False-positive watch", "Coverage"],
+    "banned_phrases": ["obviously", "clearly", "simply", "just refactor", "should be fine"],
+    "tone": "precise, evidence-first, no hand-waving"
+  },
+  "judge_config": {
+    "rules": [
+      {"type": "min_words", "value": 600},
+      {"type": "section_present", "value": "Top 3 to fix first"},
+      {"type": "section_present", "value": "False-positive watch"},
+      {"type": "no_banned_phrases", "value": ["obviously", "clearly", "simply", "just refactor", "should be fine"]}
+    ],
+    "plugins": [],
+    "llm_judges": [
+      "Does every finding outside the False-positive watch section quote or cite specific code (a path and symbol/line)?",
+      "Are all concurrency/race/lock/event-loop claims confined to the False-positive watch section (not ranked as Critical/High)?"
+    ]
+  },
+  "max_rounds": 2,
+  "committee_size": 1
+}

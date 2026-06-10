@@ -188,6 +188,22 @@ stage a prompt through a template (or a custom schematic), frontier models do th
 work across stages with cross-provider rotation, a judge hardens the output, and you
 receive each model's **full output as files**.
 
+### Built-in power templates
+
+Each fans work across providers (parallel shards), then a judge loop hardens the result.
+Run with `POST /api/run {"template": "<id>", "prompt": "...", "async": true}`:
+
+| Template | What it does |
+|---|---|
+| **`repo_audit`** | Maps a codebase into subsystems, deep-reviews each in parallel, then **cross-validates** to suppress confident-but-wrong concurrency/race claims (a real LLM-reviewer failure mode). Ships a severity-ranked audit with a "False-positive watch" + "Top 3 to fix first". |
+| **`design_doc`** | Extracts requirements, generates **3 genuinely distinct architectures** in parallel, builds a trade-off matrix, commits to a decision, and ships a doc with Risks & Mitigations + Open Questions. |
+| **`redteam`** | Enumerates threat/failure surfaces, probes each in parallel for **concrete triggers** (no vague "could be insecure"), and ships a severity-ranked threat report + mitigations checklist. |
+| **`panel_debate`** | The uncorrelated-opinions flagship: frames distinct positions, argues each, runs a steelman-then-rebut round, then a moderator synthesis that **preserves irreducible disagreement** instead of forcing false consensus. |
+
+`GET /api/templates` lists all (these + your saved ones); `GET /api/templates/<id>`
+returns one's schematic to clone. Templates are plain schematic JSON in
+`orchestrator/templates/` — add your own with zero code.
+
 ### `POST /api/run`  *(Bearer token required)*
 
 ```jsonc

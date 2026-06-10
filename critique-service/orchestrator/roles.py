@@ -443,27 +443,35 @@ def render_inputs(context: dict, input_paths: list[str]) -> str:
 
 
 def _resolve_input(context: dict, path: str) -> str:
-    """Single-input resolver. See render_inputs() for path syntax."""
-    if "." not in path:
-        value = context.get(path, "")
-    else:
-        head, rest = path.split(".", 1)
-        if rest == "*":
-            items = context.get(head, [])
+    """Single-input resolver. See render_inputs() for path syntax.
+
+    Walks a dotted path that may mix dict keys and numeric list indices at ANY
+    position (e.g. "outline.topics.2", "deep_review.0"), so a fanout shard can index
+    into the nested list an extractor emitted. A trailing ".*" gathers all elements of
+    a list (used to fan-in shard outputs). Missing/ill-typed parts resolve to "" rather
+    than raising (previously "head.<digit>" crashed when head held a dict).
+    """
+    if path.endswith(".*"):
+        items = _walk_path(context, path[:-2])
+        if isinstance(items, list):
             return "\n\n---\n\n".join(_stringify(i) for i in items if i is not None)
-        if rest.isdigit():
-            items = context.get(head, [])
-            i = int(rest)
-            value = items[i] if 0 <= i < len(items) else ""
+        return _stringify(items)
+    return _stringify(_walk_path(context, path))
+
+
+def _walk_path(context: dict, path: str) -> Any:
+    value: Any = context
+    for part in path.split("."):
+        if isinstance(value, dict):
+            value = value.get(part, "")
+        elif isinstance(value, list):
+            if part.isdigit() and 0 <= int(part) < len(value):
+                value = value[int(part)]
+            else:
+                return ""
         else:
-            value = context.get(head, {})
-            for part in rest.split("."):
-                if isinstance(value, dict):
-                    value = value.get(part, "")
-                else:
-                    value = ""
-                    break
-    return _stringify(value)
+            return ""
+    return value
 
 
 def _stringify(value: Any) -> str:

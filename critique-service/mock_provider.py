@@ -165,12 +165,17 @@ def _mock_content(picked, system: str, digest: str) -> str:
                 '"max_rounds": 1}')
     if "json" in low and ('"pass"' in low or "verifier" in low or "pass:" in low):
         return '{"pass": true, "reason": "mock verifier approves"}'
-    if "json" in low and ("extract" in low or "topics" in low):
-        #   three topics so fanout stages produce multiple shards in tests.
-        return ('{"topics": ['
-                '{"name": "Mock topic one", "scope": "a", "target_words": 700}, '
-                '{"name": "Mock topic two", "scope": "b", "target_words": 700}, '
-                '{"name": "Mock topic three", "scope": "c", "target_words": 700}]}')
+    #   JSON list-extraction (extractor/planner stages that feed a fanout). Return 3
+    #   items under WHICHEVER list key the prompt asks for, so any template's
+    #   fanout.over resolves in tests (topics/surfaces/approaches/positions/areas/...).
+    if "json" in low and any(k in low for k in (
+            "extract", "topics", "surfaces", "approaches", "positions", "areas")):
+        key = next((k for k in ("topics", "surfaces", "approaches", "positions", "areas")
+                    if k in low), "items")
+        item = ('{"name": "Mock %s", "scope": "x", "stance": "x", "one_liner": "x", '
+                '"why": "x", "files": "a.py", "focus": "x", "sketch": "x", "bet": "x", '
+                '"target_words": 700}')
+        return '{"%s": [%s, %s, %s]}' % (key, item % "one", item % "two", item % "three")
     return (
         f"[mock:{picked.who}] synthetic output {digest}. Deterministic placeholder "
         f"text for offline testing, long enough to read as real prose.\n\n"
