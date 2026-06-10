@@ -5,17 +5,17 @@
   "//3": "",
   "//4": "FRONTIER panel (chosen 2026-06, all live-verified): the heavy hitters used as",
   "//5": "the default judges for /api/critique and the default /api/panel + /api/run.",
-  "//6": "  - kimi-k2.6        Kimi K2.6        (nvidia; ~2s)",
-  "//7": "  - deepseek-v4-pro  DeepSeek V4 Pro  (nvidia; ~5s)",
-  "//8": "  - deepseek-v3      DeepSeek V3      (github-models; ~1s)",
-  "//9": "  - glm-5.1          GLM 5.1          (nvidia; ~37s, deep but slow - prefer async)",
-  "//10": "Swap in nemotron-ultra / deepseek-r1 (frontier) or any basic logical anytime.",
+  "//6": "  - kimi-k2.6          Kimi K2.6          (nvidia)",
+  "//7": "  - deepseek-v4-flash  DeepSeek V4 Flash  (nvidia; replaced v4-pro 2026-06 - pro had a >1k queue)",
+  "//8": "  - qwen3.5-397b       Qwen3.5 397B       (nvidia; top MMLU-Pro of the free roster)",
+  "//9": "  - glm-5.1            GLM 5.1            (nvidia; deep but slow - prefer async)",
+  "//10": "Swap in nemotron-ultra / qwen3.5-122b / llama-4-maverick / minimax-m2.7 anytime.",
 
   "judges": [
-    {"slot": "kimi-k2.6",       "weight": 1, "note": "Kimi K2.6 via NVIDIA NIM"},
-    {"slot": "deepseek-v4-pro", "weight": 1, "note": "DeepSeek V4 Pro via NVIDIA NIM"},
-    {"slot": "deepseek-v3",     "weight": 1, "note": "DeepSeek V3 via GitHub Models"},
-    {"slot": "glm-5.1",         "weight": 1, "note": "GLM 5.1 via NVIDIA NIM (slow; use async)"}
+    {"slot": "kimi-k2.6",         "weight": 1, "note": "Kimi K2.6 via NVIDIA NIM"},
+    {"slot": "deepseek-v4-flash", "weight": 1, "note": "DeepSeek V4 Flash via NVIDIA NIM (replaced v4-pro)"},
+    {"slot": "qwen3.5-397b",      "weight": 1, "note": "Qwen3.5 397B via NVIDIA NIM"},
+    {"slot": "glm-5.1",           "weight": 1, "note": "GLM 5.1 via NVIDIA NIM (slow; use async)"}
   ],
 
   "max_parallel": 4,

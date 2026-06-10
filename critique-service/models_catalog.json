@@ -14,7 +14,17 @@
         {"provider": "openrouter", "model": "moonshotai/kimi-k2.6:free", "ctx": 262144}
       ]
     },
+    "deepseek-v4-flash": {
+      "//": "Primary DeepSeek (2026-06): v4-pro had an unusable >1k queue (300s ReadTimeout).",
+      "//1": "v4-flash is the 284B MoE distillation, ~5-8% below pro but reliably served.",
+      "family": "deepseek-v4-flash",
+      "candidates": [
+        {"provider": "nvidia", "model": "deepseek-ai/deepseek-v4-flash", "ctx": 262144},
+        {"provider": "github-models", "model": "deepseek/deepseek-v3-0324", "ctx": 8000}
+      ]
+    },
     "deepseek-v4-pro": {
+      "//": "DEMOTED 2026-06: queue >1k, ReadTimeout-prone. Prefer deepseek-v4-flash.",
       "family": "deepseek-v4",
       "candidates": [
         {"provider": "nvidia", "model": "deepseek-ai/deepseek-v4-pro", "ctx": 163840}
@@ -89,6 +99,44 @@
         {"provider": "nvidia", "model": "google/gemma-4-31b-it", "ctx": 131072},
         {"provider": "openrouter", "model": "google/gemma-4-31b-it:free", "ctx": 96000},
         {"provider": "cloudflare", "model": "@cf/google/gemma-4-26b-a4b-it", "ctx": 262144}
+      ]
+    },
+
+    "//roster-2026-06": "Additions below all live-probed OK (docs/ROSTER-2026-06.md); all stronger than gemma-4.",
+    "qwen3.5-397b": {
+      "family": "qwen3.5-397b",
+      "candidates": [
+        {"provider": "nvidia", "model": "qwen/qwen3.5-397b-a17b", "ctx": 262144}
+      ]
+    },
+    "qwen3.5-122b": {
+      "family": "qwen3.5-122b",
+      "candidates": [
+        {"provider": "nvidia", "model": "qwen/qwen3.5-122b-a10b", "ctx": 262144}
+      ]
+    },
+    "llama-4-maverick": {
+      "family": "llama-4-maverick",
+      "candidates": [
+        {"provider": "nvidia", "model": "meta/llama-4-maverick-17b-128e-instruct", "ctx": 262144}
+      ]
+    },
+    "minimax-m2.7": {
+      "family": "minimax-m2",
+      "candidates": [
+        {"provider": "nvidia", "model": "minimaxai/minimax-m2.7", "ctx": 262144}
+      ]
+    },
+    "mistral-medium-3.5": {
+      "family": "mistral-medium-3.5",
+      "candidates": [
+        {"provider": "nvidia", "model": "mistralai/mistral-medium-3.5-128b", "ctx": 131072}
+      ]
+    },
+    "mistral-small-4": {
+      "family": "mistral-small-4",
+      "candidates": [
+        {"provider": "nvidia", "model": "mistralai/mistral-small-4-119b-2603", "ctx": 131072}
       ]
     }
   }
