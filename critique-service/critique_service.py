@@ -14,6 +14,7 @@ from metrics import MetricStore
 from oplog import log_event
 from orchestrate import OrchestrateError
 from orchestrator.orchestrator import execute as orchestrator_execute
+import repopack
 from promptcache import PromptCache
 from providers import (
     load_benchmarks,
@@ -76,7 +77,13 @@ OUTPUT_RULES = (
 # limits.max_out (e.g. GitHub Models ~4k) and is clamped per-provider in call_slot.
 CRITIQUE_MAX_TOKENS = int(os.environ.get("CRITIQUE_MAX_TOKENS", "16384"))
 JUDGE_TIMEOUT_S = float(os.environ.get("JUDGE_TIMEOUT_S", "1800"))  # frontier reasoning models are slow; async mode makes long waits free
-MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", str(1_000_000)))
+#   8MB default: a whole-repo "files" pack is far larger than a typical prompt (the
+#   full critique-service source is ~0.5MB; leaves headroom for real projects).
+MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", str(8_000_000)))
+REPO_MAX_BYTES = int(os.environ.get("REPO_MAX_BYTES", str(50_000_000)))
+DEFAULT_CTX_TOKENS = int(os.environ.get("DEFAULT_CTX_TOKENS", "131072"))
+#   reserved for the role/rubric scaffolding around the packed repo in the system prompt.
+PACK_SYSTEM_OVERHEAD_TOKENS = 2000
 
 # generalized /api/panel: any loom role (or a fully custom system prompt) fanned
 # out across the model panel. each role maps to a prompt skeleton in
@@ -157,12 +164,27 @@ class Panel:
         self.cache = PromptCache()
 
         #   pre-register logical-model candidate slots + default-panel slots so they
-        #   join rotation from boot.
+        #   join rotation from boot. also index each candidate's context window for
+        #   repo-pack budget fitting.
+        self.ctx_by_who: dict[str, int] = {}
         for spec in self.logical_models.values():
             for cand in spec.get("candidates", []):
-                self._ensure_slot(f"{cand['provider']}/{cand['model']}")
+                who = f"{cand['provider']}/{cand['model']}"
+                self._ensure_slot(who)
+                if cand.get("ctx"):
+                    self.ctx_by_who[who] = int(cand["ctx"])
         for who in self.default_panel:
             self._ensure_slot(who)
+
+    def judge_ctx(self, who: str) -> int:
+        #   a judge's usable context window: for a logical model, the LARGEST among
+        #   its candidate hosts (failover prefers big-ctx hosts anyway; small-ctx
+        #   candidates simply fail over). physical slots look up directly.
+        if "/" in who:
+            return self.ctx_by_who.get(who, DEFAULT_CTX_TOKENS)
+        spec = self.logical_models.get(who) or {}
+        vals = [int(c["ctx"]) for c in spec.get("candidates", []) if c.get("ctx")]
+        return max(vals) if vals else DEFAULT_CTX_TOKENS
 
     def _ensure_slot(self, who: str) -> slot | None:
         if who in self.slot_by_who:
@@ -363,6 +385,101 @@ def build_panel_params(panel: Panel, *, input_text: str, role: str,
     }
 
 
+def resolve_repo_files(payload: dict) -> dict[str, str] | None:
+    #   codebase-ingestion request forms. returns {path: content} or None when the
+    #   request isn't a repo review. raises _BadRequest with a client-safe message.
+    #     "files":    {"path": "content", ...}      client-packed (curl/CI friendly)
+    #     "repo_url": public/private github url     server fetches the tarball
+    #       + "repo_ref" (branch/tag/sha, default HEAD), "repo_token" (auth for
+    #         private repos - used for the fetch only, never logged or persisted),
+    #       + "diff_mode": {"base_ref": ..., "head_ref": ...} -> changed files only
+    files = payload.get("files")
+    repo_url = payload.get("repo_url")
+    if files is None and repo_url is None:
+        return None
+    if files is not None and repo_url is not None:
+        raise _BadRequest("pass either 'files' or 'repo_url', not both")
+    if files is not None:
+        if (not isinstance(files, dict) or not files
+                or not all(isinstance(k, str) and isinstance(v, str) for k, v in files.items())):
+            raise _BadRequest("'files' must be a non-empty {path: content} object of strings")
+        return dict(files)
+    if not isinstance(repo_url, str) or "github.com/" not in repo_url:
+        raise _BadRequest("'repo_url' must be a github.com repository URL")
+    ref = payload.get("repo_ref", "HEAD")
+    token = payload.get("repo_token", "") or ""
+    diff = payload.get("diff_mode")
+    try:
+        if diff is not None:
+            if not (isinstance(diff, dict) and diff.get("base_ref") and diff.get("head_ref")):
+                raise _BadRequest("'diff_mode' needs {'base_ref':..., 'head_ref':...}")
+            base = repopack.fetch_repo_files(repo_url, ref=str(diff["base_ref"]),
+                                             token=token, max_bytes=REPO_MAX_BYTES)
+            head = repopack.fetch_repo_files(repo_url, ref=str(diff["head_ref"]),
+                                             token=token, max_bytes=REPO_MAX_BYTES)
+            return _diff_files(base, head)
+        return repopack.fetch_repo_files(repo_url, ref=str(ref), token=token,
+                                         max_bytes=REPO_MAX_BYTES)
+    except repopack.RepoFetchError as e:
+        raise _BadRequest(str(e)) from e
+
+
+def _diff_files(base: dict[str, str], head: dict[str, str]) -> dict[str, str]:
+    #   diff-aware review: the pack carries each CHANGED/ADDED file in full (head
+    #   version) plus a synthetic CHANGES.diff summary, so judges see both the delta
+    #   and enough surrounding context to judge it.
+    import difflib
+    changed = {p: c for p, c in head.items() if base.get(p) != c}
+    removed = sorted(p for p in base if p not in head)
+    if not changed and not removed:
+        raise repopack.RepoFetchError("diff_mode: no differences between the two refs")
+    diffs: list[str] = [f"removed: {p}" for p in removed]
+    for p in sorted(changed):
+        ud = difflib.unified_diff((base.get(p) or "").splitlines(), changed[p].splitlines(),
+                                  fromfile=f"a/{p}", tofile=f"b/{p}", lineterm="", n=3)
+        diffs.append("\n".join(list(ud)[:400]))
+    out = dict(changed)
+    out["CHANGES.diff"] = "\n\n".join(diffs)[:repopack.MAX_FILE_CHARS]
+    return out
+
+
+def apply_repo_form(panel: Panel, params: dict, pack, *, rebuild) -> dict:
+    #   fit an already-built repo pack to each judge's context budget. `rebuild(text)`
+    #   is the route's own params builder (panel or critique flavor) - re-invoked with
+    #   a judge's REDUCED pack to produce that judge's system prompt, so both routes
+    #   share this logic without caring how the prompt is scaffolded.
+    full_total = pack.total_tokens
+    per_judge: dict = {}
+    smallest_fit = None
+    for who in params["who_list"]:
+        budget = panel.judge_ctx(who) - PACK_SYSTEM_OVERHEAD_TOKENS - int(params["max_tokens"])
+        if budget <= 0:
+            raise _BadRequest(f"judge '{who}': max_tokens leaves no room for the pack "
+                              f"(ctx={panel.judge_ctx(who)})")
+        if full_total <= budget:
+            per_judge[who] = {"coverage": {"files_included": len(pack.files),
+                                           "files_total": len(pack.files),
+                                           "pack_tokens": full_total, "dropped": []}}
+            continue
+        reduced, dropped = repopack.fit_to_budget(pack, budget)
+        if not reduced.files:
+            raise _BadRequest(f"repo pack (~{full_total} tokens) cannot fit judge '{who}' "
+                              f"(budget ~{budget} tokens) - drop judges or split the repo")
+        rp = rebuild(repopack.render(reduced, dropped=dropped))
+        per_judge[who] = {"system_prompt": rp["system_prompt"],
+                          "coverage": {"files_included": len(reduced.files),
+                                       "files_total": len(pack.files),
+                                       "pack_tokens": reduced.total_tokens,
+                                       "dropped": dropped[:50]}}
+        smallest_fit = min(smallest_fit or budget, budget)
+    params["per_judge"] = per_judge
+    params["pack_meta"] = {"files": len(pack.files), "skipped": len(pack.skipped),
+                           "total_tokens": full_total}
+    log_event("repo_pack", files=len(pack.files), tokens=full_total,
+              judges_reduced=sum(1 for v in per_judge.values() if "system_prompt" in v))
+    return params
+
+
 async def run_sync(panel: Panel, params: dict) -> dict:
     #   synchronous execution: every judge in parallel and independent, returns
     #   once all have settled. for slow frontier panels prefer async (JobRunner).
@@ -376,6 +493,7 @@ async def run_sync(panel: Panel, params: dict) -> dict:
         nonce=params.get("nonce", ""), reasoning=params.get("reasoning", False),
         research=params.get("research", False),
         privacy=params.get("privacy", "off"), no_store=params.get("no_store", False),
+        per_judge=params.get("per_judge"),
     )
     finished, merged = finalize_judges(judges, params["kind"], params["merge"])
     ok_count = sum(1 for j in finished if j.get("ok"))
@@ -391,6 +509,8 @@ async def run_sync(panel: Panel, params: dict) -> dict:
         "merged": merged,
         "meta": {"elapsed_s": elapsed, "judges_ok": ok_count, "judges_total": len(finished)},
     }
+    if params.get("pack_meta"):
+        resp["pack"] = params["pack_meta"]
     if params["kind"] == "critique":
         return {"format_detected": params.get("format_detected"), **resp}
     return resp
@@ -399,7 +519,7 @@ async def run_sync(panel: Panel, params: dict) -> dict:
 def submit_async(server_jobs: JobRunner, params: dict) -> dict:
     #   hand the execution plan to the background JobRunner; returns the initial
     #   (all-pending) snapshot immediately. the client polls GET /api/jobs/<id>.
-    return server_jobs.submit(
+    snap = server_jobs.submit(
         who_list=params["who_list"], system_prompt=params["system_prompt"],
         user_msg=params["user_msg"], max_tokens=params["max_tokens"],
         role=params["role"], merge_mode=params["merge"], kind=params["kind"],
@@ -407,7 +527,11 @@ def submit_async(server_jobs: JobRunner, params: dict) -> dict:
         timeout_s=params.get("timeout_s"), nonce=params.get("nonce", ""),
         reasoning=params.get("reasoning", False), research=params.get("research", False),
         privacy=params.get("privacy", "off"), no_store=params.get("no_store", False),
+        per_judge=params.get("per_judge"),
     )
+    if params.get("pack_meta") and isinstance(snap, dict):
+        snap["pack"] = params["pack_meta"]
+    return snap
 
 
 async def run_orchestration_sync(panel: Panel, schematic, prompt: str, *,
@@ -491,6 +615,10 @@ class Handler(BaseHTTPRequestHandler):
                     "GET /api/metrics?profile=<id>": "per-profile cost/throttle/latency aggregates",
                     "GET /api/roster": "per-model benchmark + hosts + privacy-safe routability + frontier guarantee",
                 },
+                "repo_review": "POST /api/panel or /api/critique with 'files': {path: content} "
+                               "or 'repo_url' (+'repo_ref', 'repo_token', 'diff_mode': {base_ref, head_ref}) "
+                               "instead of input/plan; each judge gets a pack fitted to its context "
+                               "window and reports 'coverage' of what it actually saw",
                 "privacy_modes": ["strict", "fallback", "off"],
                 "async": "add \"async\": true to any POST to get a job_id back instantly; "
                          "each judge runs independently, poll GET /api/jobs/<id> for partial results",
@@ -724,9 +852,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"internal error: {type(e).__name__}"})
 
     def _params_critique(self, payload: dict, panel: Panel) -> dict:
+        repo_files = resolve_repo_files(payload)
         plan = payload.get("plan")
-        if not isinstance(plan, str) or not plan.strip():
-            raise _BadRequest("'plan' (non-empty string) is required")
+        if repo_files is None and (not isinstance(plan, str) or not plan.strip()):
+            raise _BadRequest("'plan' (non-empty string) is required (or pass 'files'/'repo_url')")
+        if repo_files is not None and plan is not None:
+            raise _BadRequest("pass either 'plan' or a repo form ('files'/'repo_url'), not both")
         fmt_req = payload.get("format", "auto")
         if fmt_req not in ("auto", "markdown", "schematic"):
             raise _BadRequest("'format' must be auto|markdown|schematic")
@@ -737,16 +868,35 @@ class Handler(BaseHTTPRequestHandler):
         if inline_rubric is not None and not isinstance(inline_rubric, str):
             raise _BadRequest("'rubric' must be a string")
         profile, effort = self._profile_and_effort(payload)
-        params = build_critique_params(panel, plan, fmt_req, panel_override or None,
-                                       inline_rubric or None)
+
+        def _build(text: str) -> dict:
+            return build_critique_params(panel, text, "markdown" if repo_files else fmt_req,
+                                         panel_override or None, inline_rubric or None)
+
+        if repo_files is not None:
+            full_pack = repopack.pack_files(repo_files,
+                                            include_lockfiles=bool(payload.get("include_lockfiles")))
+            if not full_pack.files:
+                raise _BadRequest("repo pack is empty after filtering (binaries/lockfiles only?)")
+            params = _build(repopack.render(full_pack))
+            params["profile"] = profile
+            params["privacy"], params["no_store"] = self._privacy_and_store(payload)
+            params = apply_effort(params, effort)
+            return apply_repo_form(panel, params, full_pack, rebuild=_build)
+        params = _build(plan)
         params["profile"] = profile
         params["privacy"], params["no_store"] = self._privacy_and_store(payload)
         return apply_effort(params, effort)
 
     def _params_panel(self, payload: dict, panel: Panel) -> dict:
+        repo_files = resolve_repo_files(payload)
         input_text = payload.get("input")
-        if not isinstance(input_text, str) or not input_text.strip():
-            raise _BadRequest("'input' (non-empty string) is required")
+        if repo_files is None and (not isinstance(input_text, str) or not input_text.strip()):
+            raise _BadRequest("'input' (non-empty string) is required (or pass 'files'/'repo_url')")
+        if repo_files is not None and input_text is not None:
+            raise _BadRequest("pass either 'input' or a repo form ('files'/'repo_url'), not both")
+        if repo_files is not None and payload.get("artifacts"):
+            raise _BadRequest("'artifacts' is not supported with repo review (nonce per rebuild)")
         system = payload.get("system")
         if system is not None and not isinstance(system, str):
             raise _BadRequest("'system' must be a string")
@@ -767,14 +917,28 @@ class Handler(BaseHTTPRequestHandler):
         if not self._valid_panel(panel_override):
             raise _BadRequest("'panel' must be a list of 'provider/model' strings")
         profile, effort = self._profile_and_effort(payload)
-        params = build_panel_params(
-            panel, input_text=input_text, role=role, system=system or None,
-            instructions=payload.get("instructions"), output_rules=payload.get("output_rules"),
-            template=payload.get("template"), panel_override=panel_override or None,
-            merge_mode=merge_mode, max_tokens=max_tokens,
-            want_artifacts=bool(payload.get("artifacts")),
-            reasoning=bool(payload.get("reasoning")), research=bool(payload.get("research")),
-        )
+
+        def _build(text: str) -> dict:
+            return build_panel_params(
+                panel, input_text=text, role=role, system=system or None,
+                instructions=payload.get("instructions"), output_rules=payload.get("output_rules"),
+                template=payload.get("template"), panel_override=panel_override or None,
+                merge_mode=merge_mode, max_tokens=max_tokens,
+                want_artifacts=bool(payload.get("artifacts")),
+                reasoning=bool(payload.get("reasoning")), research=bool(payload.get("research")),
+            )
+
+        if repo_files is not None:
+            full_pack = repopack.pack_files(repo_files,
+                                            include_lockfiles=bool(payload.get("include_lockfiles")))
+            if not full_pack.files:
+                raise _BadRequest("repo pack is empty after filtering (binaries/lockfiles only?)")
+            params = _build(repopack.render(full_pack))
+            params["profile"] = profile
+            params["privacy"], params["no_store"] = self._privacy_and_store(payload)
+            params = apply_effort(params, effort)
+            return apply_repo_form(panel, params, full_pack, rebuild=_build)
+        params = _build(input_text)
         params["profile"] = profile
         params["privacy"], params["no_store"] = self._privacy_and_store(payload)
         return apply_effort(params, effort)

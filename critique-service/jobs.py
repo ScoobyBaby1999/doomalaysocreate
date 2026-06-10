@@ -294,22 +294,30 @@ async def run_panel_slots(panel, who_list: list[str], system_prompt: str, *,
                           user_msg: str, max_tokens: int, timeout_s: float,
                           nonce: str = "", reasoning: bool = False,
                           research: bool = False, privacy: str = "off",
-                          no_store: bool = False) -> list[dict]:
+                          no_store: bool = False,
+                          per_judge: dict | None = None) -> list[dict]:
     #   synchronous fan-out: every logical judge in parallel, each with its own
-    #   cross-provider failover. returns once all have settled.
+    #   cross-provider failover. returns once all have settled. per_judge (repo-pack
+    #   budget fitting) overrides a judge's system prompt with its REDUCED pack and
+    #   tags the result with what that judge actually saw.
     resolved = [(who, *panel.resolve_candidates(who)) for who in who_list]
     rcat = getattr(panel, "reasoning_catalog", None)
     cache = getattr(panel, "cache", None)
+    pj = per_judge or {}
     async with httpx.AsyncClient() as client:
         results = await asyncio.gather(*[
-            route_judge(panel.scheduler, client, logical, candidates, system_prompt,
+            route_judge(panel.scheduler, client, logical, candidates,
+                        pj.get(who, {}).get("system_prompt") or system_prompt,
                         role_label=role_label, effort=effort, profile=profile,
                         metrics=metrics, user_msg=user_msg, max_tokens=max_tokens,
                         timeout_s=timeout_s, nonce=nonce, reasoning=reasoning,
                         research=research, reasoning_catalog=rcat,
                         privacy=privacy, cache=cache, no_store=no_store)
-            for (_who, logical, candidates) in resolved
+            for (who, logical, candidates) in resolved
         ])
+    for (who, _l, _c), res in zip(resolved, results):
+        if pj.get(who, {}).get("coverage"):
+            res["coverage"] = pj[who]["coverage"]
     return results
 
 
@@ -412,13 +420,16 @@ class JobRunner:
                             "model": who, "ok": False, "status": "error",
                             "error": "not registered (no configured provider hosts this model)"}
                     continue
+                pj = (ex.get("per_judge") or {}).get(who, {})
                 asyncio.run_coroutine_threadsafe(
-                    self._run_judge(jid, who, logical, candidates, ex["system_prompt"],
+                    self._run_judge(jid, who, logical, candidates,
+                                    pj.get("system_prompt") or ex["system_prompt"],
                                     ex["user_msg"], ex["max_tokens"], ex["role"],
                                     ex["profile"], ex["effort"], ex["timeout_s"],
                                     ex.get("nonce", ""), ex.get("reasoning", False),
                                     ex.get("research", False), ex.get("privacy", "off"),
-                                    ex.get("no_store", False)),
+                                    ex.get("no_store", False),
+                                    coverage=pj.get("coverage")),
                     self.loop)
                 resumed += 1
             self.store.save(self.jobs[jid])
@@ -431,7 +442,8 @@ class JobRunner:
                profile: str = "default", effort: str = "med",
                timeout_s: float | None = None, nonce: str = "",
                reasoning: bool = False, research: bool = False,
-               privacy: str = "off", no_store: bool = False) -> dict:
+               privacy: str = "off", no_store: bool = False,
+               per_judge: dict | None = None) -> dict:
         job_id = secrets.token_hex(8)
         judges: dict[str, dict] = {}
         scheduled = []
@@ -454,7 +466,8 @@ class JobRunner:
                          "merge_mode": merge_mode, "kind": kind, "profile": profile,
                          "effort": effort, "timeout_s": jt, "nonce": nonce,
                          "reasoning": reasoning, "research": research,
-                         "privacy": privacy, "no_store": no_store}}
+                         "privacy": privacy, "no_store": no_store,
+                         "per_judge": per_judge or {}}}
         #   no_store: keep the job pollable in memory but never persist its content.
         with self.lock:
             self._prune_locked()
@@ -463,11 +476,14 @@ class JobRunner:
             self.store.save(job)
         #   schedule each logical judge as its own task; each does cross-provider
         #   failover through the shared scheduler + emits per-profile metrics.
+        pj = per_judge or {}
         for who, logical, candidates in scheduled:
             asyncio.run_coroutine_threadsafe(
-                self._run_judge(job_id, who, logical, candidates, system_prompt,
+                self._run_judge(job_id, who, logical, candidates,
+                                pj.get(who, {}).get("system_prompt") or system_prompt,
                                 user_msg, max_tokens, role, profile, effort, jt, nonce,
-                                reasoning, research, privacy, no_store),
+                                reasoning, research, privacy, no_store,
+                                coverage=pj.get(who, {}).get("coverage")),
                 self.loop,
             )
         log_event("job_submitted", job_id=job_id, req_kind=kind, role=role,
@@ -480,7 +496,8 @@ class JobRunner:
                          role_label: str, profile: str, effort: str,
                          timeout_s: float, nonce: str = "",
                          reasoning: bool = False, research: bool = False,
-                         privacy: str = "off", no_store: bool = False) -> None:
+                         privacy: str = "off", no_store: bool = False,
+                         coverage: dict | None = None) -> None:
         with self.lock:
             j = self.jobs.get(job_id)
             if j is not None:
@@ -510,6 +527,8 @@ class JobRunner:
             on_progress=_progress)
         res["model"] = who
         res["status"] = "done" if res.get("ok") else "error"
+        if coverage:
+            res["coverage"] = coverage
         with self.lock:
             j = self.jobs.get(job_id)
             if j is not None:

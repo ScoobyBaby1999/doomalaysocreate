@@ -65,6 +65,27 @@ Response: `{ "role", "merge", "judges": [{model, ok, routed_to, output|error}], 
 all metrics are namespaced per profile so cost/throttle behaviour is tracked per
 identity, not globally. `effort` is a **manual** knob (no auto-prediction):
 `low`→1 judge/½ tokens, `med`→3, `high`→5/1.5×, `max`→all/2×.
+
+**Whole-repo review.** Instead of `input` (or `plan` on `/api/critique`), pass a
+codebase and the panel reviews it in one pass — validated live: kimi/glm/nemotron
+genuinely reasoned over this repo's full ~110k-token pack:
+
+```jsonc
+{
+  "files":    {"src/app.py": "<content>", ...},      // client-packed form, OR:
+  "repo_url": "https://github.com/owner/repo",       // server fetches the tarball
+  "repo_ref": "main",                                 // optional branch/tag/sha
+  "repo_token": "ghp_...",                            // optional, private repos (fetch-only, never stored)
+  "diff_mode": {"base_ref": "main", "head_ref": "pr-branch"},  // optional: review the delta
+  "include_lockfiles": false,
+  "role": "critiquer", "panel": ["kimi-k2.6", "glm-5.1"], "async": true
+}
+```
+
+Binaries/lockfiles/`node_modules` are skipped; each judge's pack is **fitted to its
+own context window** (generated/bulk files dropped first, tests+docs kept — they
+define intended behavior) and its result carries `"coverage"` saying exactly which
+files it saw. Oversized-for-every-budget requests get a clear 400 with the math.
 Merge defaults: critiquer→`dedupe` (consolidated bullets, consensus tagged),
 verifier→`vote` (PASS/FAIL tally + reasons), generator/transformer/parser/planner→`concat`
 (each model's full answer, labelled).

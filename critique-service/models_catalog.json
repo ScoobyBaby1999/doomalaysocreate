@@ -9,86 +9,86 @@
     "kimi-k2.6": {
       "family": "kimi-k2",
       "candidates": [
-        {"provider": "nvidia", "model": "moonshotai/kimi-k2.6"},
-        {"provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.6"},
-        {"provider": "openrouter", "model": "moonshotai/kimi-k2.6:free"}
+        {"provider": "nvidia", "model": "moonshotai/kimi-k2.6", "ctx": 262144},
+        {"provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.6", "ctx": 262144},
+        {"provider": "openrouter", "model": "moonshotai/kimi-k2.6:free", "ctx": 262144}
       ]
     },
     "deepseek-v4-pro": {
       "family": "deepseek-v4",
       "candidates": [
-        {"provider": "nvidia", "model": "deepseek-ai/deepseek-v4-pro"}
+        {"provider": "nvidia", "model": "deepseek-ai/deepseek-v4-pro", "ctx": 163840}
       ]
     },
     "deepseek-v3": {
       "family": "deepseek-v3",
       "candidates": [
-        {"provider": "github-models", "model": "deepseek/deepseek-v3-0324"}
+        {"provider": "github-models", "model": "deepseek/deepseek-v3-0324", "ctx": 8000}
       ]
     },
     "glm-5.1": {
       "family": "glm",
       "candidates": [
-        {"provider": "nvidia", "model": "z-ai/glm-5.1"}
+        {"provider": "nvidia", "model": "z-ai/glm-5.1", "ctx": 131072}
       ]
     },
     "nemotron-ultra": {
       "family": "nemotron-3",
       "candidates": [
-        {"provider": "nvidia", "model": "nvidia/nemotron-3-ultra-550b-a55b"},
-        {"provider": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b:free"}
+        {"provider": "nvidia", "model": "nvidia/nemotron-3-ultra-550b-a55b", "ctx": 131072},
+        {"provider": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b:free", "ctx": 131072}
       ]
     },
     "deepseek-r1": {
       "family": "deepseek-r1",
       "candidates": [
-        {"provider": "github-models", "model": "deepseek/DeepSeek-R1-0528"}
+        {"provider": "github-models", "model": "deepseek/DeepSeek-R1-0528", "ctx": 8000}
       ]
     },
     "nemotron-120b": {
       "family": "nemotron-3-120b",
       "candidates": [
-        {"provider": "cloudflare", "model": "@cf/nvidia/nemotron-3-120b-a12b"}
+        {"provider": "cloudflare", "model": "@cf/nvidia/nemotron-3-120b-a12b", "ctx": 262144}
       ]
     },
 
     "qwen3-coder-480b": {
       "family": "qwen3-coder",
       "candidates": [
-        {"provider": "nvidia", "model": "qwen/qwen3-coder-480b-a35b-instruct"}
+        {"provider": "nvidia", "model": "qwen/qwen3-coder-480b-a35b-instruct", "ctx": 262144}
       ]
     },
     "llama-3.3-70b": {
       "family": "llama-3.3-70b",
       "candidates": [
-        {"provider": "cloudflare", "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"},
-        {"provider": "github-models", "model": "meta/llama-3.3-70b-instruct"}
+        {"provider": "cloudflare", "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "ctx": 24000},
+        {"provider": "github-models", "model": "meta/llama-3.3-70b-instruct", "ctx": 8000}
       ]
     },
     "gpt-oss-120b": {
       "family": "gpt-oss",
       "candidates": [
-        {"provider": "cloudflare", "model": "@cf/openai/gpt-oss-120b"}
+        {"provider": "cloudflare", "model": "@cf/openai/gpt-oss-120b", "ctx": 128000}
       ]
     },
     "phi-4-reasoning": {
       "family": "phi-4",
       "candidates": [
-        {"provider": "github-models", "model": "microsoft/Phi-4-reasoning"}
+        {"provider": "github-models", "model": "microsoft/Phi-4-reasoning", "ctx": 8000}
       ]
     },
     "step-flash": {
       "family": "step-3.7",
       "candidates": [
-        {"provider": "nvidia", "model": "stepfun-ai/step-3.7-flash"}
+        {"provider": "nvidia", "model": "stepfun-ai/step-3.7-flash", "ctx": 131072}
       ]
     },
     "gemma-4": {
       "family": "gemma-4",
       "candidates": [
-        {"provider": "nvidia", "model": "google/gemma-4-31b-it"},
-        {"provider": "openrouter", "model": "google/gemma-4-31b-it:free"},
-        {"provider": "cloudflare", "model": "@cf/google/gemma-4-26b-a4b-it"}
+        {"provider": "nvidia", "model": "google/gemma-4-31b-it", "ctx": 131072},
+        {"provider": "openrouter", "model": "google/gemma-4-31b-it:free", "ctx": 96000},
+        {"provider": "cloudflare", "model": "@cf/google/gemma-4-26b-a4b-it", "ctx": 262144}
       ]
     }
   }
