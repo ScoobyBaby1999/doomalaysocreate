@@ -448,21 +448,24 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
             log_event("call_fail", **log_base, http_status=429,
                       fail_code="429", reason="HTTP 429", duration_s=duration)
             raise ProviderError(f"429:HTTP 429 from {picked.who}")
-        if status in (400, 401, 403, 404, 413, 422):
-            #       413 = payload too large (provider request size limit hit).
-            #       422 = unprocessable entity (model rejects message shape).
-            #       both are slot/provider-specific - rotate away within the stage,
-            #       but they're NOT network-class so the pause logic won't trigger.
-            msg = f"HTTP {status}: {response.text[:160]}"
-            log_event("call_fail", **log_base, http_status=status,
-                      fail_code=str(status), reason=msg, duration_s=duration)
-            raise ProviderError(f"{status}:{msg}")
         if status is not None and 400 <= status < 500:
-            #       any other 4xx (402 payment-required, 408, 451, ...) is a real
-            #       provider verdict, not a network blip - surface its numeric code
-            #       so failure routing cools the slot instead of treating it as
-            #       network-class ('http') and retrying a permanently-failing host.
-            msg = f"HTTP {status}: {response.text[:160]}"
+            body_text = response.text[:160]
+            #       NVIDIA NIM reports a temporarily-down model as HTTP 400
+            #       "DEGRADED function cannot be invoked" (seen live on
+            #       deepseek-v4-pro). that's a transient outage, NOT a permanent
+            #       slot verdict - classify as 5xx so it cools instead of
+            #       blacklisting until restart.
+            if status == 400 and "DEGRADED" in body_text:
+                msg = f"HTTP 400 (degraded): {body_text}"
+                log_event("call_fail", **log_base, http_status=status,
+                          fail_code="5xx", reason=msg, duration_s=duration)
+                raise ProviderError(f"5xx:{msg}")
+            #       413 = payload too large, 422 = message-shape rejection
+            #       (slot-specific: rotate away, short cooldown). 400/401/403/404
+            #       blacklist. other 4xx (402, 408, 451, ...) surface their numeric
+            #       code so failure routing cools the slot rather than treating it
+            #       as network-class ('http') and retrying a failing host forever.
+            msg = f"HTTP {status}: {body_text}"
             log_event("call_fail", **log_base, http_status=status,
                       fail_code=str(status), reason=msg, duration_s=duration)
             raise ProviderError(f"{status}:{msg}")
@@ -553,6 +556,12 @@ async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: di
                     log_event("call_fail", **log_base, http_status=429, fail_code="429",
                               reason="HTTP 429", duration_s=duration)
                     raise ProviderError(f"429:HTTP 429 from {picked.who}")
+                if status == 400 and "DEGRADED" in text:
+                    #       NVIDIA NIM transient outage reported as 400 - cool, don't
+                    #       blacklist (mirrors the non-stream path).
+                    log_event("call_fail", **log_base, http_status=status, fail_code="5xx",
+                              reason=f"HTTP 400 (degraded): {text}", duration_s=duration)
+                    raise ProviderError(f"5xx:HTTP 400 (degraded): {text}")
                 if status in (400, 401, 403, 404, 413, 422) or 400 <= status < 500:
                     #       includes other 4xx (402 etc.) - provider verdicts, not
                     #       network blips; numeric code routes to the right penalty.
