@@ -475,6 +475,13 @@ async def _execute_one_call(
 
     max_tokens = stage.max_tokens or _ROLE_DEFAULT_MAX_TOKENS.get(stage.role, 8192)
 
+    #   ctx-aware routing: estimate how much context this call needs (prompt in + output
+    #   reserve) and only route to a host whose window can hold it. ~chars/3 for code-ish
+    #   prompts; +512 overhead for the chat envelope. Prevents 413s from small-ctx hosts
+    #   when a stage carries a big input (e.g. a whole-repo blob in repo_audit).
+    _user_msg = "Produce the requested output now."
+    min_ctx = (len(system_prompt) + len(_user_msg)) // 3 + max_tokens + 512
+
     # Up to 3 retries at the call layer (different slot each time via
     # scheduler bandit). Each retry adds the failed slot's provider to
     # the exclude set so we don't keep hitting the same one.
@@ -500,7 +507,7 @@ async def _execute_one_call(
       for attempt in range(STAGE_CALL_ATTEMPTS):
         try:
             slot = scheduler.pick_slot(
-                role=stage.role, exclude_providers=excluded_so_far,
+                role=stage.role, exclude_providers=excluded_so_far, min_ctx=min_ctx,
             )
         except SchedulerError as e:
             last_error = f"no slot available: {e!s}"

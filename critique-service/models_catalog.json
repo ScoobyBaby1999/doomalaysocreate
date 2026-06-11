@@ -62,12 +62,6 @@
       ]
     },
 
-    "qwen3-coder-480b": {
-      "family": "qwen3-coder",
-      "candidates": [
-        {"provider": "nvidia", "model": "qwen/qwen3-coder-480b-a35b-instruct", "ctx": 262144}
-      ]
-    },
     "llama-3.3-70b": {
       "family": "llama-3.3-70b",
       "candidates": [

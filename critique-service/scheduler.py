@@ -19,6 +19,11 @@ from oplog import log_event
 # instantly in the vendor playground. STREAM=0 to disable.
 STREAM_DEFAULT = os.environ.get("STREAM", "1").strip() not in ("0", "false", "no", "")
 
+#   fallback context window (tokens) for a slot whose ctx isn't in the catalog map.
+#   conservative: big enough for normal prompts, small enough that an UNKNOWN host is
+#   excluded from huge prompts (known small-ctx hosts are in the map, so still correct).
+ORCH_DEFAULT_CTX = int(os.environ.get("ORCH_DEFAULT_CTX", "32768"))
+
 
 # scheduler: picks slots by score + rotation + cooldown, paces calls per provider,
 # and translates provider responses into ProviderError codes the orchestrator can route.
@@ -93,8 +98,12 @@ def normalize_upstream_code(raw) -> str:
 class SlotScheduler:
     """pick slots using provider rotation + family score + cooldown."""
 
-    def __init__(self, slots: list[slot]) -> None:
+    def __init__(self, slots: list[slot], ctx_by_who: dict[str, int] | None = None) -> None:
         self.slots: list[slot] = list(slots)
+        #       per-slot context window (who -> tokens). passed by REFERENCE so Panel can
+        #       keep populating it as logical-model / panel slots register after boot.
+        #       used to skip routing a prompt to a host whose window can't hold it.
+        self.ctx_by_who: dict[str, int] = ctx_by_who if ctx_by_who is not None else {}
         self.slot_state: dict[str, SlotState] = {s.who: SlotState() for s in slots}
         families = {s.model_family for s in slots}
         self.family_state: dict[str, FamilyState] = {f: FamilyState() for f in families}
@@ -149,7 +158,11 @@ class SlotScheduler:
         base = (family_stats.successes + 1) / (family_stats.successes + family_stats.failures + 2)
         return base * self.recency_mult(family)
 
-    def is_eligible(self, candidate: slot, role: Roles, exclude: set[str], now: float) -> bool:
+    def slot_ctx(self, who: str) -> int:
+        return self.ctx_by_who.get(who, ORCH_DEFAULT_CTX)
+
+    def is_eligible(self, candidate: slot, role: Roles, exclude: set[str], now: float,
+                    min_ctx: int = 0) -> bool:
         if role not in candidate.roles:
             return False
         state = self.slot_state[candidate.who]
@@ -159,6 +172,8 @@ class SlotScheduler:
             return False
         if candidate.provider.name in exclude:
             return False
+        if min_ctx and self.slot_ctx(candidate.who) < min_ctx:
+            return False  # window too small to hold this prompt
         return True
 
     def rank_key(self, candidate: slot) -> tuple:
@@ -186,16 +201,18 @@ class SlotScheduler:
             return {exclude_providers}
         return set(exclude_providers)
 
-    def pick_slot(self, role: Roles, exclude_providers: set[str] | str | None = None) -> slot:
+    def pick_slot(self, role: Roles, exclude_providers: set[str] | str | None = None,
+                  min_ctx: int = 0) -> slot:
         exclude = self._as_exclude(exclude_providers)
         with self._lock:
             now = time.time()
-            eligible = [s for s in self.slots if self.is_eligible(s, role, exclude, now)]
+            eligible = [s for s in self.slots if self.is_eligible(s, role, exclude, now, min_ctx)]
 
             #       fallback: relax the exclude (rotation rule) - better to repeat a
-            #       provider than to fail the call entirely.
+            #       provider than to fail the call entirely. min_ctx is KEPT: never route
+            #       an oversized prompt to an undersized host.
             if not eligible and exclude:
-                relaxed = [s for s in self.slots if self.is_eligible(s, role, set(), now)]
+                relaxed = [s for s in self.slots if self.is_eligible(s, role, set(), now, min_ctx)]
                 if relaxed:
                     log_event("rotation_relaxed",
                               role=role.value, excluded=sorted(exclude),
@@ -205,10 +222,13 @@ class SlotScheduler:
             if not eligible:
                 cooling = sum(1 for s in self.slot_state.values() if s.cooldown_until > now)
                 blacklisted = sum(1 for s in self.slot_state.values() if s.blacklisted)
+                largest = max((self.slot_ctx(s.who) for s in self.slots), default=0)
+                ctx_note = (f", need >={min_ctx} ctx but largest host = {largest}"
+                            if min_ctx else "")
                 raise SchedulerError(
                     f"role={role.value}: no eligible carriers ("
                     f"{cooling} cooling, {blacklisted} blacklisted, "
-                    f"{len(self.slots)} total)"
+                    f"{len(self.slots)} total{ctx_note})"
                 )
             eligible.sort(key=self.rank_key)
             chosen = eligible[0]

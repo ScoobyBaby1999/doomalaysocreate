@@ -159,10 +159,13 @@ class Panel:
         self.max_parallel: int = cfg["max_parallel"]
         self.default_rubric: str = cfg["rubric"]
 
+        #   per-slot context windows (who -> tokens), shared with the scheduler BY
+        #   REFERENCE so ctx-aware routing sees every slot registered below.
+        self.ctx_by_who: dict[str, int] = {}
         #   one shared scheduler over EVERY known slot (base catalog + logical
         #   candidates + panel-named) drives rotation + cross-provider failover;
         #   one shared metrics store captures per-profile cost/throttle/latency.
-        self.scheduler = SlotScheduler(base_slots)
+        self.scheduler = SlotScheduler(base_slots, ctx_by_who=self.ctx_by_who)
         self.metrics = MetricStore()
         self.templates = orchestrate.TemplateStore()
         self.reasoning_catalog = load_reasoning_catalog()
@@ -171,8 +174,7 @@ class Panel:
 
         #   pre-register logical-model candidate slots + default-panel slots so they
         #   join rotation from boot. also index each candidate's context window for
-        #   repo-pack budget fitting.
-        self.ctx_by_who: dict[str, int] = {}
+        #   repo-pack budget fitting + ctx-aware orchestrator routing.
         for spec in self.logical_models.values():
             for cand in spec.get("candidates", []):
                 who = f"{cand['provider']}/{cand['model']}"

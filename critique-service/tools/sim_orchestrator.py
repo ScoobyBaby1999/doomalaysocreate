@@ -138,9 +138,46 @@ async def scenario_fanout_diversity():
           len(set(shard_provs)) >= 2, f"providers={shard_provs}")
 
 
+async def scenario_ctx_routing():
+    print("scenario: ctx-aware routing keeps oversized prompts off small-ctx hosts")
+    mock_provider.reset(None)
+    panel = cs.Panel()
+    sch = panel.scheduler
+    BIG, TINY = 500_000, 4_000
+    #   make ONE provider huge-ctx, everything else too small to hold the prompt.
+    for s in sch.slots:
+        sch.ctx_by_who[s.who] = BIG if s.provider.name == "nvidia" else TINY
+    big_prompt = "x" * 60_000  # ~20k tokens in -> needs a host bigger than TINY
+    schem = from_json_text(json.dumps({
+        "task_type": "freeform", "task": "ctx", "stages": [
+            {"name": "only", "role": "generator", "instructions": "Summarize the input.",
+             "inputs": ["prompt"], "max_tokens": 500}],
+        "output_rules": {"format": "markdown"},
+        "judge_config": {"rules": [], "plugins": [], "llm_judges": []}, "max_rounds": 1,
+    }))
+    async with httpx.AsyncClient() as client:
+        res = await execute(schem, sch, client, initial_context={"prompt": big_prompt},
+                            log=lambda *_: None, metrics=panel.metrics,
+                            profile="p_ctx", effort="med", nonce="")
+    st = [s for s in res.stages if s.name == "only"]
+    check("oversized stage completed", res.ok and st and st[0].ok, f"err={res.error}")
+    check("routed ONLY to a big-ctx host (nvidia)", bool(st) and st[0].provider == "nvidia",
+          f"prov={st[0].provider if st else None}")
+
+    #   now starve every host -> must fail fast with the ctx budget message, not 6x 413.
+    for s in sch.slots:
+        sch.ctx_by_who[s.who] = TINY
+    async with httpx.AsyncClient() as client:
+        res2 = await execute(schem, sch, client, initial_context={"prompt": big_prompt},
+                             log=lambda *_: None, metrics=panel.metrics,
+                             profile="p_ctx2", effort="med", nonce="")
+    check("no host fits -> run fails fast", not res2.ok)
+    check("failure names the ctx budget", "ctx" in (res2.error or "").lower(), f"err={res2.error}")
+
+
 async def main():
     for sc in (scenario_freeform, scenario_artifacts, scenario_judge_retry,
-               scenario_fanout_diversity):
+               scenario_fanout_diversity, scenario_ctx_routing):
         await sc()
     print()
     if FAILS:
