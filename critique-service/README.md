@@ -367,6 +367,9 @@ that, a **privacy router** keeps data off providers that train on / log it:
 
 Full per-provider opt-out steps and every off-switch: **[`PRIVACY.md`](PRIVACY.md)**.
 
+The complete system design — architecture, subsystems, guarantees, threat model, and
+evaluation — is in **[`docs/DESIGN.md`](docs/DESIGN.md)**.
+
 ## Security
 
 - The endpoint is **always token-guarded** — if `CRITIQUE_TOKEN` is unset the
