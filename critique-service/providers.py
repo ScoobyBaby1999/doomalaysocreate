@@ -53,6 +53,12 @@ class provider:
     privacy_optout_url: str = ""
     stability_tier: int = 0                             # 1=most stable host ... higher=flakier
 
+    def __repr__(self) -> str:
+        #   NEVER expose api_key via repr/str: oplog's JSON fallback reprs unknown
+        #   objects, so an accidental log_event(provider=...) must not leak the key.
+        return (f"provider(name={self.name!r}, models={len(self.models)}, "
+                f"api_key=***{'set' if self.api_key else 'unset'}***)")
+
 
 def slot_is_privacy_safe(s: "slot") -> bool:
     #   privacy-safe = the host is verified NOT to train on / retain submissions.
