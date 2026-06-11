@@ -8,6 +8,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import authtoken
 import orchestrate
 from content.roles import make_prompt
 from jobs import JobCapExceeded, JobRunner, finalize_judges, run_panel_slots
@@ -561,14 +562,28 @@ class _BadRequest(ValueError):
     """raised by request builders to signal a 400 with a client-safe message."""
 
 
+def _auth_configured() -> bool:
+    return bool(os.environ.get("CRITIQUE_TOKEN", "").strip()
+                or os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip())
+
+
 def _token_ok(header_value: str | None) -> bool:
-    expected = os.environ.get("CRITIQUE_TOKEN", "").strip()
-    if not expected:
-        return False  # never serve an open endpoint - require the secret to be set
+    static = os.environ.get("CRITIQUE_TOKEN", "").strip()
+    rotation_secret = os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip()
+    if not (static or rotation_secret):
+        return False  # never serve an open endpoint - require a secret to be set
     if not header_value or not header_value.startswith("Bearer "):
         return False
     presented = header_value[len("Bearer "):].strip()
-    return hmac.compare_digest(presented, expected)
+    #   accept a static token (back-compat) OR an auto-rotating windowed token derived
+    #   from the root secret (current + grace windows). evaluate BOTH paths (no early
+    #   exit) so a present/absent static token doesn't change timing.
+    ok = False
+    if static and hmac.compare_digest(presented, static):
+        ok = True
+    if rotation_secret and authtoken.token_matches(presented, rotation_secret):
+        ok = True
+    return ok
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -602,7 +617,13 @@ class Handler(BaseHTTPRequestHandler):
                 "service": "loom model panel",
                 "status": "ok",
                 "token_required": True,
-                "token_configured": bool(os.environ.get("CRITIQUE_TOKEN", "").strip()),
+                "token_configured": _auth_configured(),
+                #   auto-rotating windowed tokens (CRITIQUE_ROTATION_SECRET); no value exposed.
+                "token_rotation": (
+                    {"enabled": True, "window_s": authtoken.TOKEN_WINDOW_S,
+                     "seconds_until_rotation": authtoken.seconds_until_rotation()}
+                    if os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip()
+                    else {"enabled": False}),
                 "providers_configured": [p.name for p in panel.providers],
                 #   load/saturation: bounded HTTP workers + in-flight async jobs.
                 "workers": {"max": getattr(self.server, "max_workers", None),
@@ -703,8 +724,9 @@ class Handler(BaseHTTPRequestHandler):
         #   shared gate for POST routes: bearer auth + JSON body parse. on any
         #   failure it writes the error response and returns None.
         if not _token_ok(self.headers.get("Authorization")):
-            if not os.environ.get("CRITIQUE_TOKEN", "").strip():
-                self._send_json(503, {"error": "CRITIQUE_TOKEN not configured on server"})
+            if not _auth_configured():
+                self._send_json(503, {"error": "no auth secret configured on server "
+                                               "(set CRITIQUE_TOKEN or CRITIQUE_ROTATION_SECRET)"})
             else:
                 self._send_json(401, {"error": "missing or invalid bearer token"})
             return None
@@ -1033,7 +1055,8 @@ def main() -> int:
     log_event("startup", host=host, port=port,
               providers=[p.name for p in panel.providers],
               default_panel=panel.default_panel,
-              token_configured=bool(os.environ.get("CRITIQUE_TOKEN", "").strip()))
+              token_configured=_auth_configured(),
+              token_rotation=bool(os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip()))
     print(f"loom model panel listening on {host}:{port}  "
           f"(providers={[p.name for p in panel.providers]})", flush=True)
     try:

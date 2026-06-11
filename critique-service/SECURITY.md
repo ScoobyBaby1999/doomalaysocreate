@@ -28,6 +28,29 @@ This service holds two kinds of secrets, **both only ever as Hugging Face Space 
 and asserts no endpoint response contains them, and that `repr(provider)` is masked. Run
 it in CI to keep this invariant.
 
+## Auto-rotating bearer tokens (recommended)
+
+A static `CRITIQUE_TOKEN` is a standing liability: once it appears in a chat, log, or
+screenshot it is compromised forever. To make the wire token self-expire, set a
+**`CRITIQUE_ROTATION_SECRET`** instead (`authtoken.py`):
+
+- The root secret **never travels on the wire**. The actual bearer token is
+  `HMAC(secret, current_time_window)` and **rotates every `TOKEN_WINDOW_S`** (default 1h),
+  TOTP-style. A leaked token stops working once the window (plus a one-window grace for
+  clock skew / in-flight requests) passes.
+- No HF API writes, no restarts, no coordination — server and client each derive the
+  token from the shared secret and the clock.
+- Clients fetch the current token with `python tools/gen_token.py` (reads the secret from
+  `$CRITIQUE_ROTATION_SECRET`, a file path arg, or `./.rotation_secret` — gitignored).
+- `/health` reports `token_rotation.{enabled, window_s, seconds_until_rotation}` — never
+  the secret or any token.
+- **For maximum safety set ONLY `CRITIQUE_ROTATION_SECRET`** (leave `CRITIQUE_TOKEN`
+  unset) so no standing credential exists. Both may be set during a transition; a static
+  token, while present, remains a standing liability.
+
+`tools/sim_authtoken.py` proves window/grace math, tamper + stale-window rejection,
+end-to-end auth with a derived token, and static back-compat.
+
 ## Rotating a secret
 1. Generate a new value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`
    for the token; provider keys from each provider's dashboard).
