@@ -53,6 +53,20 @@ Posture as we classify it (verify against each provider's current policy before 
 - **Prompt cache** — your own results, local to your instance, to save repeat calls. Off-switch
   `CACHE_ENABLED=0`; TTL `CACHE_TTL_S`.
 
+## Availability & abuse-resistance (free multi-user)
+
+Privacy is by isolation, but a *shared* deployment also needs to resist one caller
+starving others. The server bounds concurrency on every axis:
+- **`MAX_WORKERS`** (default 48) caps simultaneous synchronous requests; over the cap the
+  server replies **503 + `Retry-After`** without spawning a thread.
+- **`REQUEST_TIMEOUT_S`** (default 30s) drops slow/slowloris connections so they can't pin
+  a worker.
+- **`MAX_INFLIGHT_JOBS`** (default 200) caps simultaneously-running async jobs; past it,
+  `/api/panel`/`/api/run` with `async:true` return **429 + `Retry-After`**.
+
+These backpressure responses carry **no prompt content** — they're pure status. `/health`
+exposes `workers{max,busy}` and `jobs_inflight` for monitoring.
+
 ## Every off-switch
 
 `PRIVACY_MODE` · `DEFAULT_PRIVACY` · `no_store` / `NO_STORE` · `CACHE_ENABLED` ·

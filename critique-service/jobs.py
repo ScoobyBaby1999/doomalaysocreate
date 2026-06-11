@@ -33,6 +33,14 @@ from scheduler import ProviderError, call_slot
 #                                        independently, with partial results.
 
 JOB_TTL_S = 6 * 3600.0   # keep finished jobs pollable for a while, then drop
+#   hard cap on simultaneously-incomplete jobs. the async path bypasses the HTTP worker
+#   cap (submit returns instantly), so without this a flood of {"async":true} calls would
+#   spawn unbounded judges + job files. over the cap -> JobCapExceeded -> 429 at the route.
+MAX_INFLIGHT_JOBS = int(os.environ.get("MAX_INFLIGHT_JOBS", "200"))
+
+
+class JobCapExceeded(Exception):
+    """raised by submit/submit_run when too many jobs are already in flight."""
 
 # Cross-provider failover owns retries now: instead of retrying the SAME slot,
 # route_judge BOUNCES a logical model to the next provider that hosts it. So the
@@ -375,6 +383,23 @@ class JobRunner:
             self.jobs.pop(jid, None)
             self.store.delete(jid)
 
+    def inflight_count(self) -> int:
+        with self.lock:
+            return self._inflight_count_locked()
+
+    def _inflight_count_locked(self) -> int:
+        #   jobs still doing work: panel jobs with an unsettled judge, runs not complete.
+        n = 0
+        for v in self.jobs.values():
+            if v.get("type") == "run":
+                if v.get("status") not in ("complete", "interrupted"):
+                    n += 1
+            else:
+                if any(j.get("status") not in ("done", "error")
+                       for j in (v.get("judges") or {}).values()):
+                    n += 1
+        return n
+
     def _reload_jobs(self) -> None:
         #   on boot: re-hydrate persisted jobs so a deploy / restart doesn't lose work.
         #   panel jobs reschedule any unfinished judge; run jobs that were mid-flight
@@ -471,6 +496,8 @@ class JobRunner:
         #   no_store: keep the job pollable in memory but never persist its content.
         with self.lock:
             self._prune_locked()
+            if self._inflight_count_locked() >= MAX_INFLIGHT_JOBS:
+                raise JobCapExceeded(f"{MAX_INFLIGHT_JOBS} jobs already in flight")
             self.jobs[job_id] = job
         if not no_store:
             self.store.save(job)
@@ -552,6 +579,8 @@ class JobRunner:
                "stage_log": []}
         with self.lock:
             self._prune_locked()
+            if self._inflight_count_locked() >= MAX_INFLIGHT_JOBS:
+                raise JobCapExceeded(f"{MAX_INFLIGHT_JOBS} jobs already in flight")
             self.jobs[job_id] = job
         self.store.save(job)
         asyncio.run_coroutine_threadsafe(

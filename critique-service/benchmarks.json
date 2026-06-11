@@ -6,7 +6,7 @@
   "//4": "'frontier': true marks a top-tier model for that guarantee. Update with sources.",
 
   "benchmarks": {
-    "qwen3.5-397b":      {"arena_elo": 1378, "aa_index": 67, "frontier": true,  "source": "qwen3.5 report MMLU-Pro 84.7 (approx)", "as_of": "2026-06"},
+    "qwen3.5-397b":      {"arena_elo": 1378, "aa_index": 67, "frontier": true,  "reliability": "flaky-free-tier (returned empty content on a 163k-token review 2026-06; demoted from default panel)", "source": "qwen3.5 report MMLU-Pro 84.7 (approx)", "as_of": "2026-06"},
     "deepseek-v4-flash": {"arena_elo": 1372, "aa_index": 65, "frontier": true,  "source": "v4 distill, probe-verified (approx)", "as_of": "2026-06"},
     "deepseek-v4-pro":   {"arena_elo": 1380, "aa_index": 68, "frontier": false, "source": "strong but DEMOTED (queue >1k)", "as_of": "2026-06"},
     "qwen3.5-122b":      {"arena_elo": 1342, "aa_index": 60, "frontier": true,  "source": "qwen3.5 report MMLU-Pro 80.4 (approx)", "as_of": "2026-06"},

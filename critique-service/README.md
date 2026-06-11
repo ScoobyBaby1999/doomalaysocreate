@@ -374,6 +374,9 @@ Full per-provider opt-out steps and every off-switch: **[`PRIVACY.md`](PRIVACY.m
 - **Never commit a real `.env`** (it's gitignored). All keys live in HF Secrets.
 - No chat endpoint, no unauthenticated routes. Job/cache state is written only to
   your instance's local disk + your **private** HF Dataset mirror.
+- **Bounded for multi-user**: `MAX_WORKERS` (sync request cap → 503+Retry-After),
+  `REQUEST_TIMEOUT_S` (slowloris drop), `MAX_INFLIGHT_JOBS` (async cap → 429+Retry-After).
+  Backpressure responses carry no prompt content; `/health` reports `workers` + `jobs_inflight`.
 
 ## Files
 

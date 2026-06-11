@@ -3,13 +3,14 @@ import asyncio
 import hmac
 import json
 import os
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import orchestrate
 from content.roles import make_prompt
-from jobs import JobRunner, finalize_judges, run_panel_slots
+from jobs import JobCapExceeded, JobRunner, finalize_judges, run_panel_slots
 from metrics import MetricStore
 from oplog import log_event
 from orchestrate import OrchestrateError
@@ -81,6 +82,10 @@ JUDGE_TIMEOUT_S = float(os.environ.get("JUDGE_TIMEOUT_S", "1800"))  # frontier r
 #   full critique-service source is ~0.5MB; leaves headroom for real projects).
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", str(8_000_000)))
 REPO_MAX_BYTES = int(os.environ.get("REPO_MAX_BYTES", str(50_000_000)))
+#   server concurrency bounds (free multi-user safety). MAX_WORKERS caps simultaneous
+#   sync requests; REQUEST_TIMEOUT_S kills slow/slowloris connections holding a worker.
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "48"))
+REQUEST_TIMEOUT_S = float(os.environ.get("REQUEST_TIMEOUT_S", "30"))
 DEFAULT_CTX_TOKENS = int(os.environ.get("DEFAULT_CTX_TOKENS", "131072"))
 #   reserved for the role/rubric scaffolding around the packed repo in the system prompt.
 PACK_SYSTEM_OVERHEAD_TOKENS = 2000
@@ -568,13 +573,19 @@ def _token_ok(header_value: str | None) -> bool:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "loom-panel/2.0"
+    #   socketserver enforces this on the request socket: a client that opens a
+    #   connection but sends its body slowly (slowloris) is dropped instead of pinning
+    #   a worker forever. HTTP/1.0 default => no keep-alive holding workers between calls.
+    timeout = REQUEST_TIMEOUT_S
     panel: Panel  # injected on the server instance
 
-    def _send_json(self, status: int, payload: dict) -> None:
+    def _send_json(self, status: int, payload: dict, *, headers: dict | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, str(v))
         self.end_headers()
         self.wfile.write(body)
 
@@ -593,6 +604,10 @@ class Handler(BaseHTTPRequestHandler):
                 "token_required": True,
                 "token_configured": bool(os.environ.get("CRITIQUE_TOKEN", "").strip()),
                 "providers_configured": [p.name for p in panel.providers],
+                #   load/saturation: bounded HTTP workers + in-flight async jobs.
+                "workers": {"max": getattr(self.server, "max_workers", None),
+                            "busy": self.server.busy() if hasattr(self.server, "busy") else None},
+                "jobs_inflight": self.server.jobs.inflight_count(),  # type: ignore[attr-defined]
                 #   the >=2-frontier guarantee, measured over privacy-safe routable hosts.
                 "frontier_ok": roster["frontier_ok"],
                 "frontier_privacy_safe_available": roster["frontier_privacy_safe_available"],
@@ -774,6 +789,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 result = asyncio.run(run_sync(panel, params))
                 self._send_json(200, result)
+        except JobCapExceeded as e:
+            self._send_json(429, {"error": f"too many jobs in flight: {e}"},
+                            headers={"Retry-After": "5"})
         except Exception as e:  # noqa: BLE001 - never leak a stack trace to the client
             log_event("request_error", route=route, error=repr(e)[:300])
             self._send_json(500, {"error": f"internal error: {type(e).__name__}"})
@@ -847,6 +865,9 @@ class Handler(BaseHTTPRequestHandler):
                     panel, schematic, prompt, profile=profile, effort=effort,
                     nonce=nonce, plan_mode=plan_mode))
                 self._send_json(200, result)
+        except JobCapExceeded as e:
+            self._send_json(429, {"error": f"too many jobs in flight: {e}"},
+                            headers={"Retry-After": "5"})
         except Exception as e:  # noqa: BLE001 - never leak a stack trace
             log_event("request_error", route="/api/run", error=repr(e)[:300])
             self._send_json(500, {"error": f"internal error: {type(e).__name__}"})
@@ -944,6 +965,59 @@ class Handler(BaseHTTPRequestHandler):
         return apply_effort(params, effort)
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a hard cap on concurrent worker threads.
+
+    Without a cap, a flood of concurrent connections spawns one thread each, exhausting
+    memory/FDs (a trivial DoS on a free multi-user deployment). We gate thread creation
+    with a BoundedSemaphore: when full, the connection gets an immediate 503 + Retry-After
+    and is closed - honest backpressure, no thread spawned. The permit is released in a
+    finally so a crashing handler can't leak capacity.
+    """
+
+    daemon_threads = True
+
+    def __init__(self, *args, max_workers: int = MAX_WORKERS, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._sem = threading.BoundedSemaphore(max(1, max_workers))
+        self.max_workers = max(1, max_workers)
+        self._busy = 0
+        self._busy_lock = threading.Lock()
+
+    def busy(self) -> int:
+        with self._busy_lock:
+            return self._busy
+
+    def process_request(self, request, client_address) -> None:
+        if not self._sem.acquire(blocking=False):
+            #   over capacity: reject without spawning a worker.
+            try:
+                body = b'{"error":"server at capacity, retry shortly"}'
+                request.sendall(
+                    b"HTTP/1.0 503 Service Unavailable\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Retry-After: 2\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                    b"Connection: close\r\n\r\n" + body)
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            log_event("server_at_capacity", max_workers=self.max_workers)
+            return
+        with self._busy_lock:
+            self._busy += 1
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._busy_lock:
+                self._busy -= 1
+            self._sem.release()
+
+
 def main() -> int:
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", os.environ.get("APP_PORT", "7860")))
@@ -952,7 +1026,7 @@ def main() -> int:
     if not panel.providers:
         log_event("startup_warning", msg="no providers have API keys - every judge will fail")
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = BoundedThreadingHTTPServer((host, port), Handler, max_workers=MAX_WORKERS)
     server.panel = panel  # type: ignore[attr-defined]
     server.jobs = JobRunner(panel, judge_timeout_s=JUDGE_TIMEOUT_S)  # type: ignore[attr-defined]
 
