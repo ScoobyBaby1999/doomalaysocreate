@@ -7,6 +7,7 @@ import urllib.parse
 import httpx
 
 from oplog import log_event
+from ssrfguard import BlockedAddress, assert_public_url
 
 # Provider-agnostic web tools for the research agent: web_search + web_fetch.
 # Search uses Tavily when TAVILY_API_KEY is set, else keyless DuckDuckGo HTML.
@@ -74,11 +75,27 @@ async def web_fetch(url: str, *, http_client: httpx.AsyncClient, max_chars: int 
     if MOCK:
         return f"[mock page text for {url}] Lorem ipsum content used for offline testing."
     try:
-        r = await http_client.get(url, headers=_UA, timeout=12.0, follow_redirects=True)
-        if r.status_code >= 400:
-            return f"web_fetch error: HTTP {r.status_code}"
-        text = _html_to_text(r.text)
-        return text[:max_chars] if text else "web_fetch: page had no extractable text"
+        #   SSRF guard: validate the host resolves to a PUBLIC address, and follow any
+        #   redirects MANUALLY (re-validating each hop) so a 302 can't slip to an internal
+        #   / cloud-metadata host. follow_redirects is off for exactly this reason.
+        current = url
+        for _hop in range(4):
+            assert_public_url(current)
+            r = await http_client.get(current, headers=_UA, timeout=12.0, follow_redirects=False)
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("location")
+                if not loc:
+                    return "web_fetch error: redirect without location"
+                current = str(httpx.URL(r.url).join(loc))
+                continue
+            if r.status_code >= 400:
+                return f"web_fetch error: HTTP {r.status_code}"
+            text = _html_to_text(r.text)
+            return text[:max_chars] if text else "web_fetch: page had no extractable text"
+        return "web_fetch error: too many redirects"
+    except BlockedAddress as e:
+        log_event("web_fetch_blocked", url=url[:120], reason=str(e)[:160])
+        return "web_fetch error: blocked address (non-public host)"
     except Exception as e:  # noqa: BLE001
         log_event("web_fetch_error", url=url[:120], error=repr(e)[:160])
         return f"web_fetch error: {type(e).__name__}"

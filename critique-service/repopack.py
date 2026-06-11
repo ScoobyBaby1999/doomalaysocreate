@@ -1,8 +1,11 @@
 from __future__ import annotations
 import io
 import tarfile
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+
+from ssrfguard import BlockedAddress, assert_public_url
 
 # Codebase ingestion: turn a {path: content} mapping (or a fetched repo tarball) into
 # ONE annotated text blob a judge can reason over in a single pass. Validated live
@@ -149,21 +152,40 @@ def _codeload_url(repo_url: str, ref: str) -> str:
     return f"https://codeload.github.com/{parts[1]}/tar.gz/{ref}"
 
 
+class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    #   SSRF guard: validate every redirect target resolves to a PUBLIC address before
+    #   following it (codeload legitimately redirects to a CDN, but a malicious redirect
+    #   could point at an internal / cloud-metadata host).
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        assert_public_url(newurl)  # raises BlockedAddress -> aborts the fetch
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def fetch_repo_files(repo_url: str, *, ref: str = "HEAD", token: str = "",
                      max_bytes: int) -> dict[str, str]:
     #   fetch a repo tarball over HTTPS (stdlib only) and return {path: content} for
     #   its text files. token (optional) is forwarded as the auth header for private
     #   repos and is NEVER logged or persisted. size-capped before extraction.
     url = _codeload_url(repo_url, ref)
+    try:
+        assert_public_url(url)  # the initial host (defense-in-depth + DNS-trick catch)
+    except BlockedAddress as e:
+        raise RepoFetchError(f"repo fetch blocked: {e}") from e
     req = urllib.request.Request(url, headers={"User-Agent": "loom-panel"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
+    opener = urllib.request.build_opener(_GuardedRedirectHandler())
     try:
-        with urllib.request.urlopen(req, timeout=REPO_FETCH_TIMEOUT_S) as resp:
+        with opener.open(req, timeout=REPO_FETCH_TIMEOUT_S) as resp:
             raw = resp.read(max_bytes + 1)
+    except BlockedAddress as e:
+        raise RepoFetchError(f"repo fetch blocked: redirect to non-public host ({e})") from e
     except urllib.error.HTTPError as e:
         raise RepoFetchError(f"repo fetch failed: HTTP {e.code} (check url/ref/token)") from e
     except (urllib.error.URLError, OSError, TimeoutError) as e:
+        #   a BlockedAddress raised inside the redirect handler surfaces wrapped in URLError.
+        if isinstance(getattr(e, "reason", None), BlockedAddress):
+            raise RepoFetchError(f"repo fetch blocked: {e.reason}") from e
         raise RepoFetchError(f"repo fetch failed: {type(e).__name__}") from e
     if len(raw) > max_bytes:
         raise RepoFetchError(f"repo tarball exceeds REPO_MAX_BYTES={max_bytes}")

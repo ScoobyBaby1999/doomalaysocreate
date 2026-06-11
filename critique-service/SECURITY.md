@@ -61,6 +61,22 @@ end-to-end auth with a derived token, and static back-compat.
 **If a `CRITIQUE_TOKEN` is ever shared in chat/logs/screenshots, treat it as compromised
 and rotate it.** Provider keys that were only ever Space secrets were never exposed.
 
+## SSRF protection (outbound fetches)
+
+The gateway makes outbound HTTP on a caller's behalf in two places, both guarded by
+`ssrfguard.assert_public_url` (resolve the host, reject any private / loopback /
+link-local / reserved / multicast / unspecified address — including cloud metadata
+`169.254.169.254` and IPv4-mapped IPv6):
+- **`web_tools.web_fetch`** (a URL the research agent's model chose) — redirects are
+  followed manually with the guard re-checked on every hop (no `follow_redirects`).
+- **`repopack.fetch_repo_files`** (`repo_url` tarball) — a redirect-validating opener
+  re-checks every hop, so a 302 off `codeload.github.com` can't reach an internal host.
+
+Escape hatch `SSRF_ALLOW_PRIVATE=1` (local dev only). **Residual:** DNS rebinding
+(resolve-public-then-connect-private) is not fully closed — that needs pinning the
+resolved IP through the connection. The guard blocks the realistic metadata/internal
+vectors. Verified by `tools/sim_ssrf.py` (network-free).
+
 ## Availability hardening (free multi-user)
 See `PRIVACY.md` → "Availability & abuse-resistance": bounded HTTP workers
 (`MAX_WORKERS` → 503), request timeout (`REQUEST_TIMEOUT_S`, slowloris), and an async
