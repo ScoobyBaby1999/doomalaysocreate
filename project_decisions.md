@@ -345,6 +345,97 @@ variants. Next file: `hypothesis/smells.py` (deterministic smell detector).
 
 ---
 
+### [0015] `hypothesis/smells.py`
+
+**What it is:** Deterministic requirements smell detector. Scans text, returns
+`list[Smell]` in document order. No model calls, no API key, stdlib `re` only.
+
+**Why it exists:** Second deterministic gate alongside `ears.py`. Implements the
+`SmellSource.INPUT` vs `SmellSource.GENERATED` distinction — letting the engine measure
+whether its own generation introduced new defects vs. inherited them from the prompt.
+Feeds `QualityReport.inherited_smell_count` / `introduced_smell_count` (already defined
+in `models.py`).
+
+**Plan provenance:** The design went through two adversarial critique rounds before
+implementation. Round 1: manual multi-agent review (8 findings P1–P8, all accepted).
+Round 2: live hosted panel — kimi-k2.6, deepseek-v4-flash, nemotron-ultra, 3/3 judges OK
+via the critique service — 12 triaged findings R1–R12: 8 accepted, 2 rejected as false
+positives (with reasoning recorded in the plan), 2 deferred. Plus a code-review pass that
+caught a CRITICAL `_extract_clause` boundary-initialization bug before any code was written.
+
+**Key choices baked in:**
+- Registry pattern (`_SmellRule` + `_RULES` list) — each detector independently testable;
+  adding a smell type = append one entry. Coupling via data, not code (same idea as
+  `CLAUSE_SLOTS` in ears.py).
+- `_LexEntry` + `_build_lexicon_fn()` factory builds all four Tier-1 lexical detectors;
+  patterns compile once at module load. Word boundary is `(?<!\w)..(?!\w)` lookaround,
+  not `\b` (which misfires on hyphenated compounds like "user-friendly").
+- Tiering: 1 lexical (VAGUE_TERM, SUBJECTIVE_LANGUAGE, UNIVERSAL_QUANTIFIER, LOOPHOLE),
+  2 syntactic regex (PASSIVE_VOICE, MISSING_ACTOR), 3 heuristic (AMBIGUOUS_PRONOUN,
+  UNVERIFIABLE), 4 deferred to LLM (MISSING_CONDITION — enum value exists, no detector;
+  the critique loop emits it through the same merge path).
+- `_iter_passive()` is the single source of truth for passive spans, shared by BOTH
+  `_detect_passive` and `_detect_missing_actor` so the two can never drift. Runs the
+  regular (-ed/-en) and irregular-participle passes; keeps the longest match per start
+  offset. Adverb slots are non-capturing `(?:\s+\w+){0,2}` (panel P1: backtracking).
+- MISSING_ACTOR searches the whole enclosing sentence via `_extract_clause()` (panel P2:
+  a forward-only window misses "By X, the Y shall be Z"). `left` initializes to 0, not
+  `match_start` — the CRITICAL pre-implementation catch (F1): without it, first-sentence
+  "by"-before-verb clauses were cut off and MISSING_ACTOR false-fired.
+- AMBIGUOUS_PRONOUN copula exclusion covers modal forms (`it shall be`, `this will be`…)
+  — EARS text is "shall be"-dominated, so present/past-only exclusion would flag most
+  legitimate definitional pronouns (panel R1, the headline Round-2 catch).
+- UNVERIFIABLE is a compound heuristic (≥2 of: no digits / quality-ness noun / bare
+  comparative). "performance", "security", "quality" are deliberately NOT quality nouns
+  (panel P5: compound-noun false positives without POS tagging). Helpers return the regex
+  match, not bool, so the emitted span carries a real position.
+- Lexicon corrections from the panel: "rarely" excluded from VAGUE_TERM (defined direction
+  quantifier, P4); "somewhat" added; British -t participles (burnt/learnt/spoilt/dreamt/
+  spelt/smelt) added; LOOPHOLE "as required"/"as necessary" keep firing but the suggestion
+  directs users to cite the external standard explicitly (P6 — regulatory text).
+- Two-level deduplication, intentionally asymmetric: `detect()` dedups on
+  `(type, start_pos)` — same word at two positions = two smells; two rules at one position
+  (regular + irregular passive) = one. `scan_requirement()` merge dedups on
+  `(type, span, source)` — position isn't stable across pipeline stages, and INPUT vs
+  GENERATED on the same span are distinct events that must coexist (P3).
+- `scan_requirement()` uses `model_validate` (not `model_copy`) for the same reason as
+  `ears.apply()`: all validators re-run. Default `source=GENERATED` is a documented
+  footgun — callers scanning user text must pass `source=INPUT` explicitly (P8/R5;
+  regression-tested).
+- `detect()` early-returns `[]` on empty/whitespace-only text (guards the UNVERIFIABLE
+  no-digits indicator from firing on nothing).
+
+**Known accepted limitations (Phase 0):**
+- Passive-voice F1 ~70%: perfect tense and adjectival participles ("the broken link")
+  false-positive; `-en` suffix admits non-participles ("open", "golden"). LLM critique
+  layer filters before human review.
+- `_extract_clause` boundary class `[.!?;]` fires on periods inside abbreviations
+  (e.g./i.e.), occasionally truncating the clause window (R2).
+- UNVERIFIABLE misses adjective-form unverifiables ("durable and reliable") — quality
+  nouns only; ≥1 threshold was considered and rejected as FP blow-up (R3).
+- "any" realistically ~80% precision, not the ~95% of the absolute universals (R4).
+- Tier-3 messages say "verify…" — they are flags for review, not verdicts.
+
+**Test notes:** 67 tests, all green first run; full suite 99 (32 ears + 67 smells), zero
+regressions. Regression tests pin every panel finding that changed behavior: F1 (by-clause
+before passive), R1 (modal copula), P4 (rarely), P5 (performance), P8/R5 (source override),
+dedup overlap (tech-verb single smell), per-sentence actor scoping, different-source
+coexistence.
+
+**Follow-up items:**
+- Lexicons are Python constants for Phase 0; externalize to `hypothesis/data/*.json` for
+  per-domain customization (regulated industries need broader loophole lexicons).
+- Permissive-modal smell ("may/might" as requirement language) is a real gap but a NEW
+  smell category — deferred (R11).
+- Abbreviation-aware sentence segmentation for `_extract_clause` (R2).
+- MISSING_CONDITION goes active when the critique loop is wired (next milestone).
+
+**Anticipates / will be replaced by:** Phase 1 per-domain lexicons and possible POS tagging
+if passive-voice F1 proves too low in practice. The critique loop consumes the same `Smell`
+contract, so its findings merge through `scan_requirement()` unchanged.
+
+---
+
 ## Entry template (copy for each new file)
 
 ```
