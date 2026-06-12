@@ -898,7 +898,7 @@ class Handler(BaseHTTPRequestHandler):
         params = urlencode({
             "client_id": os.environ["OAUTH_CLIENT_ID"],
             "redirect_uri": redirect_uri,
-            "scope": "openid profile read-repos write-repos",
+            "scope": "openid profile manage-repos",
             "response_type": "code",
             "state": state,
         })
@@ -958,36 +958,64 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect(f"https://{host}/#provision-error=whoami_failed")
             return
 
+        from urllib.parse import quote as _q
         target_repo = f"{username}/loom"
         rotation_secret = secrets.token_urlsafe(32)
+        existing = False
 
-        # 3. Duplicate template Space (409 = already exists — that's fine)
+        # 3. Returning user? Repo ids are unique case-insensitively but API lookups
+        #    are exact-case — find the canonical id of any existing "loom" Space
+        #    (e.g. "<user>/Loom") instead of blindly assuming lowercase.
         try:
-            _hf_api(f"https://huggingface.co/api/spaces/{TEMPLATE_SPACE_ID}/duplicate",
-                    method="POST", token=user_token,
-                    body={"repository": target_repo, "private": False})
-        except RuntimeError as exc:
-            if "409" not in str(exc):
-                log_event("oauth_duplicate_error", user=username, error=str(exc)[:200])
-                # non-fatal: Space may already exist; continue to set secret
+            spaces = _hf_api(
+                f"https://huggingface.co/api/spaces?author={_q(username)}&limit=100",
+                token=user_token)
+            for sp in (spaces if isinstance(spaces, list) else []):
+                sid = str(sp.get("id", ""))
+                if sid.lower() == target_repo.lower():
+                    target_repo = sid          # canonical casing
+                    existing = True
+                    break
+        except Exception as exc:
+            log_event("oauth_space_list_error", user=username, error=str(exc)[:200])
+            # non-fatal: fall through to duplicate; a 409 there also means "exists"
 
-        # 4. Set CRITIQUE_ROTATION_SECRET on the user's Space
+        # 4. First sign-in: duplicate the template Space into their account
+        if not existing:
+            try:
+                _hf_api(f"https://huggingface.co/api/spaces/{TEMPLATE_SPACE_ID}/duplicate",
+                        method="POST", token=user_token,
+                        body={"repository": target_repo, "private": False})
+            except RuntimeError as exc:
+                if "409" in str(exc):
+                    existing = True            # raced / listing missed it — it's there
+                else:
+                    log_event("oauth_duplicate_error", user=username, error=str(exc)[:200])
+                    self._redirect(f"https://{host}/#provision-error=duplicate_failed"
+                                   f"&provision-detail={_q(str(exc)[:160])}")
+                    return
+
+        # 5. Set (first run) or rotate (re-login) CRITIQUE_ROTATION_SECRET.
+        #    HF restarts the Space on secret change, so the new secret goes live.
         try:
             _hf_api(f"https://huggingface.co/api/spaces/{target_repo}/secrets",
                     method="POST", token=user_token,
                     body={"key": "CRITIQUE_ROTATION_SECRET", "value": rotation_secret})
         except Exception as exc:
             log_event("oauth_set_secret_error", user=username, error=str(exc)[:200])
-            self._redirect(f"https://{host}/#provision-error=set_secret_failed")
+            self._redirect(f"https://{host}/#provision-error=set_secret_failed"
+                           f"&provision-detail={_q(str(exc)[:160])}")
             return
 
-        space_url = f"https://{username.lower()}-loom.hf.space"
+        space_name = target_repo.split("/", 1)[1].lower()
+        space_url = f"https://{username.lower()}-{space_name}.hf.space"
         result = {
             "space_url": space_url,
             "space_repo": target_repo,
             "rotation_secret": rotation_secret,
             "username": username,
             "oauth_token": user_token,
+            "existing": existing,
         }
         provision_token = _store_provision_result(result)
         log_event("oauth_provision_ok", user=username, space=target_repo)
