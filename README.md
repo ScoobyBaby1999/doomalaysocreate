@@ -45,3 +45,8 @@ npm run build    # type-check + production build (dist/)
 - **F1** richer chat (merged view, templates, `/api/run` orchestrator, artifacts).
 - **F2** agent + per-user sandbox + tool-action streaming.
 - Tauri wrap (`src-tauri/`) for mobile/desktop; lazy-load highlight.js languages.
+
+---
+
+Backend lives on the `c` branch of the same repo (deployed as a Hugging Face Space).
+This frontend talks to it only over HTTP — see [API-CONTRACT.md](API-CONTRACT.md).
