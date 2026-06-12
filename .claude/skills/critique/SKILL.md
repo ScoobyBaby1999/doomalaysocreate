@@ -19,13 +19,21 @@ or down never fails the request.
 
 ## Inputs you need
 
-Two environment variables identify and authorize the endpoint:
+Environment variables identify and authorize the endpoint:
 
 - `CRITIQUE_URL`   — base URL of the service, e.g. `https://<user>-<space>.hf.space`
-- `CRITIQUE_TOKEN` — the bearer token (an HF Space secret)
+- `CRITIQUE_ROTATION_SECRET` — **preferred.** A long-lived root secret that NEVER
+  travels on the wire; you derive the current bearer token from it on every call
+  (TOTP-style — see "How to call it"). A leaked wire token self-expires once its
+  time window passes, so this is the safe default for shared/exposed use.
+- `CRITIQUE_TOKEN` — a static bearer token. Still supported as a fallback when no
+  rotation secret is set.
 
-If either is missing, tell the user to set them (they're configured once per
-environment / Space) and stop — do not invent a URL or token.
+Resolution order: if `CRITIQUE_ROTATION_SECRET` is set, derive a fresh token from it
+each call; otherwise use the static `CRITIQUE_TOKEN`. You need `CRITIQUE_URL` plus at
+least one of the two. If `CRITIQUE_URL` is missing, or neither token source is set,
+tell the user to configure them (once per environment / Space) and stop — do not
+invent a URL, token, or secret.
 
 ## Installing this skill so `/critique` works in ANY chat
 
@@ -39,12 +47,13 @@ mkdir -p ~/.claude/skills
 cp -r .claude/skills/critique ~/.claude/skills/critique
 ```
 
-Then set the two env vars in that environment (shell profile, or the Claude Code
-environment settings used by web/mobile):
+Then set the env vars in that environment (shell profile, or the Claude Code
+environment settings used by web/mobile). Prefer the rotation secret:
 
 ```bash
 export CRITIQUE_URL=https://<your-space>.hf.space
-export CRITIQUE_TOKEN=<your CRITIQUE_TOKEN>
+export CRITIQUE_ROTATION_SECRET=<your CRITIQUE_ROTATION_SECRET>   # preferred
+# export CRITIQUE_TOKEN=<your CRITIQUE_TOKEN>                     # static fallback
 ```
 
 Now `/critique` (and "critique this plan" / "run my judge panel") work in every session.
@@ -66,8 +75,32 @@ rubric. Only set `format` explicitly if the user asks.
 
 ## How to call it
 
-Write the plan to a temp file first (avoids shell-quoting/escaping bugs with long
-or multi-line plans), then build the JSON body with a tool that escapes properly:
+**First, resolve the bearer token.** If `CRITIQUE_ROTATION_SECRET` is set, derive the
+current wire token from it (it rotates every `TOKEN_WINDOW_S`, default 1h; the server
+also accepts the previous window, so clock skew is fine). Otherwise fall back to the
+static `CRITIQUE_TOKEN`. Recompute this at the start of every call — never cache or
+echo the token, and never print the secret:
+
+```bash
+if [ -n "$CRITIQUE_ROTATION_SECRET" ]; then
+  # TOTP-style derivation — must match the server's authtoken.py exactly.
+  TOK=$(python3 - <<'PY'
+import base64, hmac, hashlib, os, time
+secret = os.environ["CRITIQUE_ROTATION_SECRET"].encode("utf-8")
+window = int(time.time() // int(os.environ.get("TOKEN_WINDOW_S", "3600")))
+mac = hmac.new(secret, str(window).encode("ascii"), hashlib.sha256).digest()
+print(base64.urlsafe_b64encode(mac[:18]).decode("ascii"))
+PY
+)
+else
+  TOK="$CRITIQUE_TOKEN"
+fi
+# If this repo is checked out you can equivalently run:
+#   TOK=$(CRITIQUE_ROTATION_SECRET=$CRITIQUE_ROTATION_SECRET python critique-service/tools/gen_token.py)
+```
+
+Then write the plan to a temp file first (avoids shell-quoting/escaping bugs with long
+or multi-line plans), and build the JSON body with a tool that escapes properly:
 
 ```bash
 # $PLAN_FILE holds the raw plan text
@@ -75,10 +108,13 @@ jq -Rs --arg fmt auto '{plan: ., format: $fmt}' "$PLAN_FILE" > /tmp/critique_bod
 
 curl -sS --max-time 300 \
   -X POST "$CRITIQUE_URL/api/critique" \
-  -H "Authorization: Bearer $CRITIQUE_TOKEN" \
+  -H "Authorization: Bearer $TOK" \
   -H "Content-Type: application/json" \
   --data @/tmp/critique_body.json
 ```
+
+All other routes below take the same `-H "Authorization: Bearer $TOK"`; reuse the `$TOK`
+you derived above (re-derive if a call returns 401 after a long gap — the window rolled).
 
 Optional body fields:
 - `"panel": ["provider/model", ...]` — override the default judges for this one call.
@@ -128,10 +164,10 @@ can take minutes. For these, **add `"async": true`** to the POST and you get a
 `job_id` immediately, then poll:
 
 ```bash
-JID=$(curl -sS -X POST "$CRITIQUE_URL/api/panel" -H "Authorization: Bearer $CRITIQUE_TOKEN" \
+JID=$(curl -sS -X POST "$CRITIQUE_URL/api/panel" -H "Authorization: Bearer $TOK" \
   -H "Content-Type: application/json" --data @body.json | jq -r .job_id)
 # poll every ~15s until .meta.complete == true; show partial results meanwhile
-curl -sS "$CRITIQUE_URL/api/jobs/$JID" -H "Authorization: Bearer $CRITIQUE_TOKEN" | jq
+curl -sS "$CRITIQUE_URL/api/jobs/$JID" -H "Authorization: Bearer $TOK" | jq
 ```
 
 Each judge is independent: report the ones that have `status:"done"` as they land,
