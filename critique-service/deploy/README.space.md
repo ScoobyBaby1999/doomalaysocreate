@@ -7,8 +7,6 @@ sdk: docker
 app_port: 7860
 hf_oauth: true
 hf_oauth_scopes:
-  - openid
-  - profile
   - read-repos
   - write-repos
 pinned: false
