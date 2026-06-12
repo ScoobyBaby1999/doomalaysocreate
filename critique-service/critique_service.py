@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import mimetypes
 import os
 import threading
 import time
@@ -49,6 +50,9 @@ from scheduler import SlotScheduler
 
 HERE = Path(__file__).resolve().parent
 PANEL_PATH = Path(os.environ.get("PANEL_PATH", HERE / "panel.json"))
+#   the built web app (Docker build drops the frontend's dist/ here). when present the
+#   gateway serves it at /, making one Space the whole product; absent => API-only.
+STATIC_DIR = Path(os.environ.get("STATIC_DIR", HERE / "static"))
 
 # per-judge directives spliced into the rubric's {{INSTRUCTIONS}} slot. the
 # universal checks live in the .md rubrics; these focus the judge on a *plan*.
@@ -601,10 +605,63 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        #   CORS: the web app may be served from a different origin (separate static
+        #   host, or local dev without the proxy). auth is a bearer header - no cookies -
+        #   so a wildcard origin grants nothing by itself; requests still need the token.
+        self.send_header("Access-Control-Allow-Origin", "*")
         for k, v in (headers or {}).items():
             self.send_header(k, str(v))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self) -> None:
+        #   CORS preflight for cross-origin POSTs with Authorization/Content-Type.
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _serve_static(self, raw_path: str) -> bool:
+        #   serve the bundled web app from STATIC_DIR. returns False when there is no
+        #   bundle (API-only deployment) or the path resolves outside it, so callers
+        #   fall through to the JSON behavior. extension-less unknown paths get
+        #   index.html (SPA routing); missing real assets still 404.
+        if not STATIC_DIR.is_dir():
+            return False
+        rel = raw_path.split("?", 1)[0].lstrip("/")
+        root = STATIC_DIR.resolve()
+        try:
+            target = (root / rel).resolve() if rel else root / "index.html"
+            if not target.is_relative_to(root):
+                return False
+        except OSError:
+            return False
+        if target.is_dir():
+            target = target / "index.html"
+        if not target.is_file():
+            if "." in Path(rel).name:
+                return False
+            target = root / "index.html"
+            if not target.is_file():
+                return False
+        body = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type",
+                         mimetypes.guess_type(str(target))[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        #   vite emits content-hashed filenames under assets/ -> cache forever;
+        #   index.html must revalidate so a redeploy shows up on next load.
+        if rel.startswith("assets/"):
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+        return True
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 - quiet default logging
         return  # telemetry goes through oplog; suppress the stderr access log spam
@@ -612,12 +669,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
+        if route == "" and self._serve_static("/"):
+            return  # bundled web app owns the root; the JSON overview stays on /health
         if route in ("", "/health"):
             panel: Panel = self.server.panel  # type: ignore[attr-defined]
             roster = panel.roster()
             self._send_json(200, {
                 "service": "loom model panel",
                 "status": "ok",
+                "web_app": STATIC_DIR.is_dir(),  # bundled frontend served at / ?
                 "token_required": True,
                 "token_configured": _auth_configured(),
                 #   auto-rotating windowed tokens (CRITIQUE_ROTATION_SECRET); no value exposed.
@@ -719,6 +779,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "no such job (unknown id or expired)"})
                 return
             self._send_json(200, snap)
+            return
+        if not route.startswith("/api") and self._serve_static(urlsplit(self.path).path):
             return
         self._send_json(404, {"error": "not found"})
 
