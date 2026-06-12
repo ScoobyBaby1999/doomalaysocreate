@@ -5,3 +5,4 @@ reference/timemanager/backend/outputs/
 
 # runtime job/metrics state (never commit)
 critique-service/data/
+app/
