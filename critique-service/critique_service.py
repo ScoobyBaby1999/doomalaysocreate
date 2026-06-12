@@ -898,7 +898,7 @@ class Handler(BaseHTTPRequestHandler):
         params = urlencode({
             "client_id": os.environ["OAUTH_CLIENT_ID"],
             "redirect_uri": redirect_uri,
-            "scope": "read-repos write-repos",
+            "scope": "openid profile read-repos write-repos",
             "response_type": "code",
             "state": state,
         })
