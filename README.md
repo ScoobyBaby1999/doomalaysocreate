@@ -1,6 +1,14 @@
 # doomalays-Create
 AI 10x Productivity Loop Forward Deployed Engineer Prompt Orchestration Agentic Vibe Coder
 
+## Repo layout — backend here, frontend on its own branch
+
+- **`c` branch (this one)** — the backend: `critique-service/` (the judge-panel gateway).
+- **`frontend` branch** — the mobile-first client app (own root, own `package.json`).
+  `git checkout frontend`. The two are connected **only** by the HTTP API; the frontend's
+  `API-CONTRACT.md` documents exactly what it calls. Full usage playbook:
+  `critique-service/docs/USAGE.md`.
+
 ## `critique-service/` — loom's judge panel, as a hosted endpoint
 
 A slim, token-guarded `POST /api/critique` service ported from **loom**. It fans a

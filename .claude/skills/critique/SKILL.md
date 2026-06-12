@@ -27,6 +27,32 @@ Two environment variables identify and authorize the endpoint:
 If either is missing, tell the user to set them (they're configured once per
 environment / Space) and stop — do not invent a URL or token.
 
+## Installing this skill so `/critique` works in ANY chat
+
+This skill is **project-scoped** (it lives in this repo's `.claude/skills/`), so by
+default `/critique` only appears in sessions opened inside this repo. To use it from a
+fresh chat anywhere — another repo, the desktop app, or mobile — install it at **user
+scope** once:
+
+```bash
+mkdir -p ~/.claude/skills
+cp -r .claude/skills/critique ~/.claude/skills/critique
+```
+
+Then set the two env vars in that environment (shell profile, or the Claude Code
+environment settings used by web/mobile):
+
+```bash
+export CRITIQUE_URL=https://<your-space>.hf.space
+export CRITIQUE_TOKEN=<your CRITIQUE_TOKEN>
+```
+
+Now `/critique` (and "critique this plan" / "run my judge panel") work in every session.
+Nothing else from this repo is needed — the skill is a self-contained HTTPS client.
+
+For the full panel/template/repo-budgeting playbook, see the backend's
+`critique-service/docs/USAGE.md`.
+
 ## What counts as "the plan"
 
 Whatever the user wants critiqued, as a single string:
