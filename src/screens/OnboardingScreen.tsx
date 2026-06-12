@@ -6,7 +6,6 @@ type Phase =
   | "landing"        // no credentials, show sign-in button
   | "exchanging"     // fetching /oauth/result/<token>
   | "wizard"         // provision done, adding provider keys
-  | "building"       // waiting for the user's Space to go live
   | "error";         // something went wrong
 
 interface ProvisionResult {
@@ -15,12 +14,25 @@ interface ProvisionResult {
   rotation_secret: string;
   username: string;
   oauth_token: string;
+  existing?: boolean;
 }
+
+// Map raw error codes from the OAuth callback redirect to messages a human
+// can act on. Every error path must leave the user a way forward.
+const ERROR_MESSAGES: Record<string, string> = {
+  invalid_state: "The sign-in link expired (they're valid for 10 minutes). Please sign in again.",
+  token_exchange_failed: "Hugging Face didn't accept the sign-in. This is usually temporary — try again.",
+  whoami_failed: "Signed in, but we couldn't read your username from Hugging Face. Try again.",
+  duplicate_failed: "We couldn't create your Space. Check that your HF account is verified, then retry.",
+  set_secret_failed: "Your Space exists, but we couldn't store its access secret. Sign in again to retry — or configure manually.",
+  access_denied: "You cancelled the sign-in. No problem — try again whenever you're ready.",
+};
 
 export function OnboardingScreen({ onComplete }: { onComplete: (s: Partial<Settings>) => void }) {
   const [phase, setPhase] = useState<Phase>("landing");
   const [provision, setProvision] = useState<ProvisionResult | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [errorDetail, setErrorDetail] = useState("");
 
   // On mount: check URL hash for OAuth callback results
   useEffect(() => {
@@ -30,20 +42,26 @@ export function OnboardingScreen({ onComplete }: { onComplete: (s: Partial<Setti
 
     const token = params.get("provision-token");
     const error = params.get("provision-error");
+    const detail = params.get("provision-detail");
+    const setup = params.get("setup");
 
     // Clear the hash immediately so it doesn't persist in browser history
     history.replaceState(null, "", window.location.pathname + window.location.search);
 
     if (error) {
-      setErrorMsg(decodeURIComponent(error).replace(/_/g, " "));
+      setErrorMsg(ERROR_MESSAGES[error] ?? `Unexpected error: ${error.replace(/_/g, " ")}`);
+      if (detail) setErrorDetail(decodeURIComponent(detail));
       setPhase("error");
       return;
     }
+
     if (token) {
       setPhase("exchanging");
       fetch(`/oauth/result/${token}`)
         .then((r) => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          if (!r.ok) throw new Error(r.status === 404
+            ? "This sign-in link was already used or expired. Please sign in again."
+            : `HTTP ${r.status}`);
           return r.json() as Promise<ProvisionResult>;
         })
         .then((result) => {
@@ -51,13 +69,14 @@ export function OnboardingScreen({ onComplete }: { onComplete: (s: Partial<Setti
           setPhase("wizard");
         })
         .catch((e) => {
-          setErrorMsg(`Provision token exchange failed: ${e.message}`);
+          setErrorMsg((e as Error).message);
           setPhase("error");
         });
+      return;
     }
 
-    // Handle #setup=<base64json> — written by the original Space when redirecting here
-    const setup = params.get("setup");
+    // #setup=<base64json> — written by the gateway when redirecting to this
+    // (the user's own) Space. Saves the rotation secret and enters the app.
     if (setup) {
       try {
         const decoded = JSON.parse(atob(setup));
@@ -71,18 +90,28 @@ export function OnboardingScreen({ onComplete }: { onComplete: (s: Partial<Setti
   }, []);
 
   if (phase === "exchanging") {
-    return <CenteredMessage>Setting up your Space…</CenteredMessage>;
+    return <CenteredMessage>Linking your Space…</CenteredMessage>;
   }
 
   if (phase === "error") {
     return (
-      <div className="p-6 space-y-4 max-w-sm mx-auto text-center">
-        <p className="text-red-400 text-sm">Setup failed: {errorMsg}</p>
-        <button
-          onClick={() => setPhase("landing")}
-          className="px-4 py-2 rounded-xl bg-surface border border-border text-sm"
+      <div className="flex flex-col items-center justify-center h-full p-6 space-y-5 text-center">
+        <div className="space-y-2 max-w-sm">
+          <p className="text-sm font-medium">Sign-in didn't finish</p>
+          <p className="text-sm text-muted">{errorMsg}</p>
+          {errorDetail && (
+            <p className="text-[10px] text-muted/70 break-all">({errorDetail})</p>
+          )}
+        </div>
+        <a
+          href="/oauth/login"
+          className="flex items-center gap-2 px-5 py-3 rounded-xl bg-accent text-white font-medium text-sm"
         >
-          Try again
+          <HFIcon />
+          Try signing in again
+        </a>
+        <button onClick={() => onComplete({})} className="text-xs text-accent underline">
+          Configure manually instead
         </button>
       </div>
     );
@@ -93,7 +122,6 @@ export function OnboardingScreen({ onComplete }: { onComplete: (s: Partial<Setti
       <ProviderKeyWizard
         provision={provision}
         onDone={() => {
-          // Build the #setup hash and redirect to the user's Space
           const setup = btoa(JSON.stringify({ rotationSecret: provision.rotation_secret }));
           window.location.href = `${provision.space_url}/#setup=${setup}`;
         }}
@@ -101,11 +129,7 @@ export function OnboardingScreen({ onComplete }: { onComplete: (s: Partial<Setti
     );
   }
 
-  if (phase === "building") {
-    return <CenteredMessage>Your Space is building — this takes about 2 minutes.</CenteredMessage>;
-  }
-
-  // Landing
+  // Landing — this IS the front door, for new and returning users alike.
   return (
     <div className="flex flex-col items-center justify-center h-full p-6 space-y-6 text-center">
       <div className="space-y-2">
@@ -125,16 +149,13 @@ export function OnboardingScreen({ onComplete }: { onComplete: (s: Partial<Setti
       </a>
 
       <p className="text-[11px] text-muted max-w-xs">
-        We'll create a free private Space for you and set up your credentials
-        automatically. You keep full ownership — we never see your keys.
+        New here? We'll create a free private Space for you automatically.
+        Already have one? The same button re-links it — your keys and data stay put.
       </p>
 
       <div className="pt-4 border-t border-border w-full max-w-xs">
-        <p className="text-[11px] text-muted mb-2">Already have a Space?</p>
-        <button
-          onClick={() => onComplete({})}
-          className="text-xs text-accent underline"
-        >
+        <p className="text-[11px] text-muted mb-2">Prefer to paste credentials yourself?</p>
+        <button onClick={() => onComplete({})} className="text-xs text-accent underline">
           Configure manually
         </button>
       </div>

@@ -10,9 +10,12 @@ type Tab = "chat" | "settings";
 export default function App() {
   const [settings, setSettings] = useSettings();
   const hasCredentials = !!(settings.token || settings.rotationSecret);
+  // "Configure manually" escape hatch: returning users with no saved credentials
+  // on this device land in Settings instead of being trapped on the login screen.
+  const [manualSetup, setManualSetup] = useState(false);
   const [tab, setTab] = useState<Tab>(hasCredentials ? "chat" : "settings");
 
-  if (!hasCredentials) {
+  if (!hasCredentials && !manualSetup) {
     return (
       <div className="flex flex-col h-full">
         <header className="flex items-center px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content">
@@ -22,8 +25,13 @@ export default function App() {
         <main className="flex-1 min-h-0">
           <OnboardingScreen
             onComplete={(partial: Partial<Settings>) => {
-              const next = { ...settings, ...partial };
-              setSettings(next);
+              if (partial.rotationSecret || partial.token) {
+                setSettings({ ...settings, ...partial });
+                setTab("chat");
+              } else {
+                setManualSetup(true); // no credentials handed over → open Settings
+                setTab("settings");
+              }
             }}
           />
         </main>

@@ -6,6 +6,7 @@ interface ProvisionResult {
   rotation_secret: string;
   username: string;
   oauth_token: string;
+  existing?: boolean;
 }
 
 interface Provider {
@@ -94,6 +95,9 @@ export function ProviderKeyWizard({
   }
 
   const anyOk = Object.values(statuses).some((s) => s === "ok");
+  // Returning users already configured their keys on a previous visit —
+  // never block them behind a step they've completed before.
+  const canContinue = anyOk || !!provision.existing;
 
   const field =
     "flex-1 bg-surface border border-border rounded-xl px-3 py-2 text-[13px] outline-none focus:border-accent min-w-0";
@@ -101,11 +105,23 @@ export function ProviderKeyWizard({
   return (
     <div className="p-4 space-y-5 max-w-xl mx-auto overflow-y-auto">
       <div>
-        <h2 className="text-lg font-semibold">Add a provider key</h2>
+        <h2 className="text-lg font-semibold">
+          {provision.existing ? `Welcome back, ${provision.username}` : "Add a provider key"}
+        </h2>
         <p className="text-sm text-muted mt-1">
-          Your Space is provisioned at{" "}
-          <span className="text-accent">{provision.space_url}</span>. Add at
-          least one free API key so the judges have models to call.
+          {provision.existing ? (
+            <>
+              Your Space at <span className="text-accent">{provision.space_url}</span>{" "}
+              has been re-linked with a fresh secret (it restarts briefly). Your
+              existing provider keys are untouched — add more below, or continue.
+            </>
+          ) : (
+            <>
+              Your Space is provisioned at{" "}
+              <span className="text-accent">{provision.space_url}</span>. Add at
+              least one free API key so the judges have models to call.
+            </>
+          )}
         </p>
       </div>
 
@@ -155,12 +171,12 @@ export function ProviderKeyWizard({
       <div className="pt-2 border-t border-border">
         <button
           onClick={onDone}
-          disabled={!anyOk}
+          disabled={!canContinue}
           className="w-full py-3 rounded-xl bg-accent text-white font-medium disabled:opacity-40"
         >
           Open my Space →
         </button>
-        {!anyOk && (
+        {!canContinue && (
           <p className="text-[11px] text-muted text-center mt-1">
             Add at least one key above to continue.
           </p>
