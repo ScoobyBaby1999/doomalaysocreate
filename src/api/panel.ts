@@ -3,9 +3,12 @@
 // Async-first: submit a job, then poll the snapshot for per-judge streaming progress
 // (the gateway exposes content_chars / reasoning_chars / tail per running judge).
 
+import { deriveToken } from "./token";
+
 export interface Settings {
-  baseUrl: string; // e.g. "/backend" in dev (proxied), or "https://<space>.hf.space"
-  token: string; // CRITIQUE_TOKEN, or a gen_token.py windowed token
+  baseUrl: string; // "" when served by the gateway itself, "/backend" in dev (proxied), or "https://<space>.hf.space"
+  token: string; // static CRITIQUE_TOKEN, or a gen_token.py windowed token
+  rotationSecret: string; // CRITIQUE_ROTATION_SECRET; preferred - wire token derived per call
 }
 
 export interface JudgeProgress {
@@ -91,15 +94,31 @@ export class ApiError extends Error {
 export class PanelClient {
   constructor(private settings: Settings) {}
 
-  private async req<T>(path: string, init?: RequestInit): Promise<T> {
-    const r = await fetch(this.settings.baseUrl + path, {
+  /** The bearer for this call: derived fresh from the rotation secret when set
+   *  (so it auto-rotates), else the static token. */
+  private async bearer(windowsBack = 0): Promise<string> {
+    if (this.settings.rotationSecret) return deriveToken(this.settings.rotationSecret, windowsBack);
+    return this.settings.token;
+  }
+
+  private fetchWith(token: string, path: string, init?: RequestInit): Promise<Response> {
+    return fetch(this.settings.baseUrl + path, {
       ...init,
       headers: {
         "Content-Type": "application/json",
-        ...(this.settings.token ? { Authorization: `Bearer ${this.settings.token}` } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(init?.headers || {}),
       },
     });
+  }
+
+  private async req<T>(path: string, init?: RequestInit): Promise<T> {
+    let r = await this.fetchWith(await this.bearer(), path, init);
+    if (r.status === 401 && this.settings.rotationSecret) {
+      // window-boundary / clock-skew insurance: the server still accepts the
+      // previous window's token, so retry once with it before surfacing a 401.
+      r = await this.fetchWith(await this.bearer(1), path, init);
+    }
     if (!r.ok) {
       let msg = `HTTP ${r.status}`;
       try {

@@ -39,7 +39,9 @@ export function SettingsScreen({
     <div className="p-4 space-y-5 max-w-xl mx-auto">
       <div>
         <h2 className="text-lg font-semibold mb-1">Connection</h2>
-        <p className="text-sm text-muted">Point the app at your panel space and paste a token.</p>
+        <p className="text-sm text-muted">
+          Point the app at your panel space and paste your rotation secret (or a token).
+        </p>
       </div>
       <label className="block space-y-1">
         <span className="text-sm text-muted">Gateway URL</span>
@@ -47,13 +49,32 @@ export function SettingsScreen({
           className={field}
           value={draft.baseUrl}
           onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
-          placeholder="https://<your-space>.hf.space"
+          placeholder="empty = this Space · or https://<your-space>.hf.space"
           autoCapitalize="none"
           autoCorrect="off"
         />
+        <span className="text-[11px] text-muted">
+          Leave empty when the app is served by your Space itself.
+        </span>
       </label>
       <label className="block space-y-1">
-        <span className="text-sm text-muted">Bearer token</span>
+        <span className="text-sm text-muted">Rotation secret (recommended)</span>
+        <input
+          className={field}
+          type="password"
+          value={draft.rotationSecret}
+          onChange={(e) => setDraft({ ...draft, rotationSecret: e.target.value })}
+          placeholder="CRITIQUE_ROTATION_SECRET"
+          autoCapitalize="none"
+          autoCorrect="off"
+        />
+        <span className="text-[11px] text-muted">
+          Stored only on this device; the hourly wire token is derived from it per call,
+          so it never travels and nothing expires on you.
+        </span>
+      </label>
+      <label className="block space-y-1">
+        <span className="text-sm text-muted">Static bearer token (fallback)</span>
         <input
           className={field}
           type="password"
@@ -64,7 +85,7 @@ export function SettingsScreen({
           autoCorrect="off"
         />
         <span className="text-[11px] text-muted">
-          Stored only on this device. Prefer a short-lived token from <code>tools/gen_token.py</code>.
+          Only used when no rotation secret is set.
         </span>
       </label>
       <button onClick={test} className="px-4 py-2 rounded-xl bg-accent text-white font-medium">

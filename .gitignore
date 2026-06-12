@@ -7,3 +7,4 @@ dist-ssr
 !.env.example
 .DS_Store
 src-tauri/target
+tsconfig.tsbuildinfo

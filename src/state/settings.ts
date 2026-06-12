@@ -3,11 +3,13 @@ import type { Settings } from "../api/panel";
 
 const KEY = "loom.settings.v1";
 
-// In dev (browser) default to the Vite proxy at /backend. In a Tauri build, the user
-// sets the real gateway URL in Settings (and the WebView can call it cross-origin).
+// In dev (browser) default to the Vite proxy at /backend. A production build is
+// served by the gateway itself (same origin), so relative paths just work; a
+// separately-hosted build (or Tauri WebView) sets the real URL in Settings.
 const DEFAULTS: Settings = {
-  baseUrl: "/backend",
+  baseUrl: import.meta.env.DEV ? "/backend" : "",
   token: "",
+  rotationSecret: "",
 };
 
 export function loadSettings(): Settings {

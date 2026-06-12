@@ -9,7 +9,7 @@ type Tab = "chat" | "settings";
 // coder + sandbox surfaces (F2) become additional tabs/panes later.
 export default function App() {
   const [settings, setSettings] = useSettings();
-  const [tab, setTab] = useState<Tab>(settings.token ? "chat" : "settings");
+  const [tab, setTab] = useState<Tab>(settings.token || settings.rotationSecret ? "chat" : "settings");
 
   return (
     <div className="flex flex-col h-full">

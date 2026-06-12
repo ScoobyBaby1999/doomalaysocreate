@@ -1,0 +1,72 @@
+# Deploys the full product (backend `c` + frontend `socreate`) to a Hugging Face
+# Space - the phone-only release path: tap "Run workflow" in the Actions tab.
+#
+# One-time setup (repo Settings -> Secrets and variables -> Actions):
+#   secret   HF_TOKEN  - a Hugging Face WRITE token (hf.co/settings/tokens)
+#   variable HF_SPACE  - the target space id, e.g. ScoobyBaby1999/loom
+#
+# Pushes to c or socreate auto-deploy once those are configured; until then the
+# job skips silently (manual runs fail loudly with instructions instead).
+name: Deploy to Hugging Face Space
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [c, socreate]
+
+concurrency:
+  group: deploy-space
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: vars.HF_SPACE != '' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Verify configuration
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          ok=1
+          [ -z "$HF_TOKEN" ] && { echo "::error::Missing HF_TOKEN repo secret (create a WRITE token at hf.co/settings/tokens)"; ok=0; }
+          [ -z "$HF_SPACE" ] && { echo "::error::Missing HF_SPACE repo variable (e.g. ScoobyBaby1999/loom)"; ok=0; }
+          [ "$ok" = "1" ]
+
+      - name: Checkout backend (c)
+        uses: actions/checkout@v4
+        with:
+          ref: c
+          path: backend
+
+      - name: Checkout frontend (socreate)
+        uses: actions/checkout@v4
+        with:
+          ref: socreate
+          path: frontend
+
+      - name: Assemble Space tree
+        run: |
+          mkdir space
+          cp -r backend/critique-service/. space/
+          mkdir space/app
+          cp -r frontend/. space/app/
+          rm -rf space/app/.git space/app/node_modules space/app/dist
+          # the multi-stage Dockerfile + Space README replace the API-only ones
+          cp backend/critique-service/deploy/Dockerfile space/Dockerfile
+          cp backend/critique-service/deploy/README.space.md space/README.md
+          ls space
+
+      - name: Push to Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          cd space
+          git init -b main
+          git config user.email "actions@github.com"
+          git config user.name "deploy-space action"
+          git add -A
+          git commit -q -m "deploy ${GITHUB_SHA::7} (${GITHUB_REF_NAME})"
+          git push --force "https://${HF_SPACE%%/*}:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" main
+          echo "Deployed to https://huggingface.co/spaces/${HF_SPACE} - the Space now rebuilds (a few minutes)."
