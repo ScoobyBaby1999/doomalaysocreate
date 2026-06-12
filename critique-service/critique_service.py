@@ -1,9 +1,11 @@
 from __future__ import annotations
 import asyncio
+import hashlib
 import hmac
 import json
 import mimetypes
 import os
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -53,6 +55,12 @@ PANEL_PATH = Path(os.environ.get("PANEL_PATH", HERE / "panel.json"))
 #   the built web app (Docker build drops the frontend's dist/ here). when present the
 #   gateway serves it at /, making one Space the whole product; absent => API-only.
 STATIC_DIR = Path(os.environ.get("STATIC_DIR", HERE / "static"))
+
+#   OAuth onboarding: the template Space users get duplicated to their own account.
+TEMPLATE_SPACE_ID = os.environ.get("TEMPLATE_SPACE_ID", "ScoobyBaby1999/Loom")
+#   in-memory one-time provision results (token → (timestamp, result)), expires in 5 min.
+_provision_results: dict[str, tuple[float, dict]] = {}
+_provision_lock = threading.Lock()
 
 # per-judge directives spliced into the rubric's {{INSTRUCTIONS}} slot. the
 # universal checks live in the .md rubrics; these focus the judge on a *plan*.
@@ -592,6 +600,75 @@ def _token_ok(header_value: str | None) -> bool:
     return ok
 
 
+# ---------------------------------------------------------------------------
+# OAuth / onboarding helpers
+# ---------------------------------------------------------------------------
+
+def _oauth_configured() -> bool:
+    return bool(os.environ.get("OAUTH_CLIENT_ID", "").strip())
+
+
+def _make_oauth_state(nonce: str) -> str:
+    """HMAC-signed state token: nonce.timestamp.sig — verifiable without server storage."""
+    secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
+    ts = str(int(time.time()))
+    data = f"{nonce}.{ts}"
+    sig = hmac.new(secret, data.encode(), hashlib.sha256).hexdigest()[:16]
+    return f"{data}.{sig}"
+
+
+def _verify_oauth_state(state: str) -> bool:
+    try:
+        nonce, ts, sig = state.rsplit(".", 2)
+        if abs(time.time() - float(ts)) > 600:  # 10-minute window
+            return False
+        secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
+        data = f"{nonce}.{ts}"
+        expected = hmac.new(secret, data.encode(), hashlib.sha256).hexdigest()[:16]
+        return hmac.compare_digest(expected, sig)
+    except Exception:
+        return False
+
+
+def _hf_api(url: str, *, method: str = "GET", token: str = "",
+            body: dict | None = None) -> dict:
+    """Sync HF Hub API call via stdlib urllib — no extra deps."""
+    import urllib.error
+    import urllib.request
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:400]
+        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+
+
+def _store_provision_result(result: dict) -> str:
+    token = secrets.token_urlsafe(24)
+    with _provision_lock:
+        now = time.time()
+        stale = [k for k, (ts, _) in _provision_results.items() if now - ts > 300]
+        for k in stale:
+            del _provision_results[k]
+        _provision_results[token] = (now, result)
+    return token
+
+
+def _pop_provision_result(token: str) -> dict | None:
+    with _provision_lock:
+        entry = _provision_results.pop(token, None)
+    if entry is None:
+        return None
+    ts, result = entry
+    return result if time.time() - ts <= 300 else None
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "loom-panel/2.0"
     #   socketserver enforces this on the request socket: a client that opens a
@@ -712,7 +789,12 @@ class Handler(BaseHTTPRequestHandler):
                     "GET /api/stats": "live rotation/health per provider + slot",
                     "GET /api/metrics?profile=<id>": "per-profile cost/throttle/latency aggregates",
                     "GET /api/roster": "per-model benchmark + hosts + privacy-safe routability + frontier guarantee",
+                    "GET /oauth/login": "start HF OAuth flow (redirects to HF authorize)",
+                    "GET /oauth/callback": "HF OAuth callback — provisions user Space",
+                    "GET /oauth/result/<token>": "exchange one-time token for provision result",
+                    "POST /oauth/set-provider-key": "set a provider API key on the user's Space via HF API",
                 },
+                "oauth_configured": _oauth_configured(),
                 "repo_review": "POST /api/panel or /api/critique with 'files': {path: content} "
                                "or 'repo_url' (+'repo_ref', 'repo_token', 'diff_mode': {base_ref, head_ref}) "
                                "instead of input/plan; each judge gets a pack fitted to its context "
@@ -780,9 +862,143 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, snap)
             return
+        if route == "/oauth/login":
+            self._handle_oauth_login()
+            return
+        if route == "/oauth/callback":
+            self._handle_oauth_callback()
+            return
+        if route.startswith("/oauth/result/"):
+            self._handle_oauth_result(route[len("/oauth/result/"):])
+            return
         if not route.startswith("/api") and self._serve_static(urlsplit(self.path).path):
             return
         self._send_json(404, {"error": "not found"})
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _space_host(self) -> str:
+        return os.environ.get("SPACE_HOST", self.headers.get("Host", ""))
+
+    def _handle_oauth_login(self) -> None:
+        if not _oauth_configured():
+            self._send_json(503, {"error": "OAuth not configured on this Space "
+                                           "(OAUTH_CLIENT_ID missing — set hf_oauth:true in README)"})
+            return
+        from urllib.parse import urlencode
+        nonce = secrets.token_urlsafe(16)
+        state = _make_oauth_state(nonce)
+        host = self._space_host()
+        redirect_uri = f"https://{host}/oauth/callback"
+        params = urlencode({
+            "client_id": os.environ["OAUTH_CLIENT_ID"],
+            "redirect_uri": redirect_uri,
+            "scope": "read-repos write-repos",
+            "response_type": "code",
+            "state": state,
+        })
+        self._redirect(f"https://huggingface.co/oauth/authorize?{params}")
+
+    def _handle_oauth_callback(self) -> None:
+        from urllib.parse import parse_qs, urlencode, urlsplit
+        import base64 as _b64
+        qs = parse_qs(urlsplit(self.path).query)
+        code = (qs.get("code", [""])[0] or "").strip()
+        state = (qs.get("state", [""])[0] or "").strip()
+        error_param = (qs.get("error", [""])[0] or "").strip()
+        host = self._space_host()
+
+        if error_param:
+            self._redirect(f"https://{host}/#provision-error={error_param}")
+            return
+        if not code or not state or not _verify_oauth_state(state):
+            self._redirect(f"https://{host}/#provision-error=invalid_state")
+            return
+
+        client_id = os.environ.get("OAUTH_CLIENT_ID", "").strip()
+        client_secret = os.environ.get("OAUTH_CLIENT_SECRET", "").strip()
+        redirect_uri = f"https://{host}/oauth/callback"
+
+        # 1. Exchange code for user token
+        try:
+            import urllib.request as _ureq
+            body_data = urlencode({
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+            }).encode()
+            creds = _b64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+            req = _ureq.Request("https://huggingface.co/oauth/token",
+                                data=body_data, method="POST")
+            req.add_header("Authorization", f"Basic {creds}")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            with _ureq.urlopen(req, timeout=30) as resp:
+                token_data = json.loads(resp.read().decode())
+            user_token = token_data.get("access_token", "").strip()
+            if not user_token:
+                raise ValueError("no access_token in token response")
+        except Exception as exc:
+            log_event("oauth_token_exchange_error", error=str(exc)[:200])
+            self._redirect(f"https://{host}/#provision-error=token_exchange_failed")
+            return
+
+        # 2. Get HF username
+        try:
+            whoami = _hf_api("https://huggingface.co/api/whoami-v2", token=user_token)
+            username = whoami.get("name", "").strip()
+            if not username:
+                raise ValueError("empty username")
+        except Exception as exc:
+            log_event("oauth_whoami_error", error=str(exc)[:200])
+            self._redirect(f"https://{host}/#provision-error=whoami_failed")
+            return
+
+        target_repo = f"{username}/loom"
+        rotation_secret = secrets.token_urlsafe(32)
+
+        # 3. Duplicate template Space (409 = already exists — that's fine)
+        try:
+            _hf_api(f"https://huggingface.co/api/spaces/{TEMPLATE_SPACE_ID}/duplicate",
+                    method="POST", token=user_token,
+                    body={"repository": target_repo, "private": False})
+        except RuntimeError as exc:
+            if "409" not in str(exc):
+                log_event("oauth_duplicate_error", user=username, error=str(exc)[:200])
+                # non-fatal: Space may already exist; continue to set secret
+
+        # 4. Set CRITIQUE_ROTATION_SECRET on the user's Space
+        try:
+            _hf_api(f"https://huggingface.co/api/spaces/{target_repo}/secrets",
+                    method="POST", token=user_token,
+                    body={"key": "CRITIQUE_ROTATION_SECRET", "value": rotation_secret})
+        except Exception as exc:
+            log_event("oauth_set_secret_error", user=username, error=str(exc)[:200])
+            self._redirect(f"https://{host}/#provision-error=set_secret_failed")
+            return
+
+        space_url = f"https://{username.lower()}-loom.hf.space"
+        result = {
+            "space_url": space_url,
+            "space_repo": target_repo,
+            "rotation_secret": rotation_secret,
+            "username": username,
+            "oauth_token": user_token,
+        }
+        provision_token = _store_provision_result(result)
+        log_event("oauth_provision_ok", user=username, space=target_repo)
+        self._redirect(f"https://{host}/#provision-token={provision_token}")
+
+    def _handle_oauth_result(self, token: str) -> None:
+        result = _pop_provision_result(token.strip())
+        if result is None:
+            self._send_json(404, {"error": "provision token not found or expired (max 5 min)"})
+            return
+        self._send_json(200, result)
 
     def _auth_and_body(self) -> dict | None:
         #   shared gate for POST routes: bearer auth + JSON body parse. on any
@@ -841,8 +1057,60 @@ class Handler(BaseHTTPRequestHandler):
             os.environ.get("NO_STORE", "").strip().lower() in ("1", "true", "on")
         return privacy, no_store
 
+    def _handle_set_provider_key(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if not 1 <= length <= 4096:
+            self._send_json(400, {"error": "body required (1–4096 bytes)"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:
+            self._send_json(400, {"error": "invalid JSON body"})
+            return
+        oauth_token = str(payload.get("oauth_token", "")).strip()
+        repo = str(payload.get("repo", "")).strip()
+        key_name = str(payload.get("key_name", "")).strip()
+        key_value = str(payload.get("key_value", "")).strip()
+        if not all([oauth_token, repo, key_name, key_value]):
+            self._send_json(400, {"error": "oauth_token, repo, key_name, key_value all required"})
+            return
+        # allowlist of safe provider keys (never allow setting auth secrets on the gateway)
+        _ALLOWED = {
+            "NVIDIA_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
+            "OPENROUTER_API_KEY", "CEREBRAS_API_KEY", "GITHUB_TOKEN",
+            "CF_API_TOKEN", "CF_ACCOUNT_ID", "ZAI_API_KEY", "MOONSHOT_API_KEY",
+            "TAVILY_API_KEY",
+        }
+        if key_name not in _ALLOWED:
+            self._send_json(400, {"error": f"key_name not allowed (must be one of {sorted(_ALLOWED)})"})
+            return
+        # verify the oauth token belongs to the repo owner
+        try:
+            whoami = _hf_api("https://huggingface.co/api/whoami-v2", token=oauth_token)
+            username = whoami.get("name", "").strip()
+            if not repo.lower().startswith(username.lower() + "/"):
+                self._send_json(403, {"error": "repo does not belong to authenticated user"})
+                return
+        except Exception as exc:
+            self._send_json(401, {"error": f"oauth_token invalid: {exc}"})
+            return
+        try:
+            _hf_api(f"https://huggingface.co/api/spaces/{repo}/secrets",
+                    method="POST", token=oauth_token,
+                    body={"key": key_name, "value": key_value})
+        except Exception as exc:
+            self._send_json(502, {"error": f"HF API error: {exc}"})
+            return
+        self._send_json(200, {"ok": True, "set": key_name, "repo": repo})
+
     def do_POST(self) -> None:
         route = self.path.rstrip("/")
+        if route == "/oauth/set-provider-key":
+            self._handle_set_provider_key()
+            return
         if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates"):
             self._send_json(404, {"error": "not found"})
             return
