@@ -67,8 +67,8 @@ _OPEN_LLMS: list[tuple[str, str, str, str | None]] = [
      "https://api.z.ai/api/paas/v4"),
     ("GEMINI_API_KEY",     "Gemini 2.5 Flash",  "gemini/gemini-2.5-flash",       None),
     ("GOOGLE_API_KEY",     "Gemini 2.5 Flash",  "gemini/gemini-2.5-flash",       None),
-    ("NVIDIA_API_KEY",     "Kimi (NVIDIA)",     "openai/moonshotai/kimi-k2-instruct",
-     "https://integrate.api.nvidia.com/v1"),
+    ("NVIDIA_API_KEY", "Kimi K2.6 (NVIDIA)", "openai/moonshotai/kimi-k2.6",
+      "https://integrate.api.nvidia.com/v1"),
 ]
 
 
