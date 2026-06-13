@@ -6,13 +6,13 @@ which SDK is actually installed:
   * "claude" — the official Claude Agent SDK (``claude-agent-sdk`` pip package,
     which bundles the Claude Code CLI inside the wheel — no Node needed).
     Active when ANTHROPIC_API_KEY is set and the SDK is importable.
-  * "open"   — the OpenHands Agent SDK (``openhands-sdk`` + ``openhands-tools``),
-    the open-source analog: terminal + file-editor tools, any OpenAI-compatible
-    provider via LiteLLM. Active when a free-tier provider key is set and the
-    SDK is importable. (Currently ships disabled — see the Dockerfile note —
-    because OpenHands 1.28.x has an unresolvable opentelemetry/lmnr dependency
-    conflict; this code activates automatically once a resolvable pair is added
-    to requirements.txt. No code change needed.)
+  * "open"   — the Strands Agents SDK (``strands-agents`` + ``strands-agents-tools``,
+    AWS, Apache-2.0): native swarm/graph multi-agent + a deep built-in tool suite
+    (shell, file edit, python, http), provider-agnostic via LiteLLM so one adapter
+    drives every OpenAI-compatible model (Kimi, GLM, MiniMax, DeepSeek, Groq, …).
+    Active when a provider key is set and the SDK is importable. (Chosen over
+    OpenHands, which has an unresolvable opentelemetry/lmnr dependency conflict in
+    its current 1.28.x line and is Python-3.12-only.)
 
 Sessions mirror the service's existing job pattern: POST starts/continues a
 session, the client polls for an append-only event transcript. One daemon
@@ -96,8 +96,8 @@ def _pick_open_llm() -> tuple[str, str, str | None] | None:
 
 
 def _open_sdk_installed() -> bool:
-    """True if any supported open-tier agent SDK is importable."""
-    return _installed("openhands.sdk") or _installed("strands")
+    """True if the open-tier agent SDK (Strands) is importable."""
+    return _installed("strands")
 
 
 _CLAUDE_MODELS = [
@@ -157,7 +157,7 @@ def agent_tier() -> str | None:
         return forced
     if os.environ.get("ANTHROPIC_API_KEY", "").strip() and _installed("claude_agent_sdk"):
         return "claude"
-    if _pick_open_llm() is not None and _installed("openhands.sdk"):
+    if _pick_open_llm() is not None and _open_sdk_installed():
         return "open"
     return None
 
@@ -290,132 +290,114 @@ class ClaudeAdapter(BaseAdapter):
             self.loop.close()
 
 
-class OpenHandsAdapter(BaseAdapter):
-    """OpenHands Agent SDK (free tier) — synchronous Conversation.run()."""
+class StrandsAdapter(BaseAdapter):
+    """Open tier — Strands Agents SDK (AWS, Apache-2.0). Provider-agnostic via
+    LiteLLM, so one adapter drives every OpenAI-compatible model (Kimi, GLM,
+    MiniMax, DeepSeek, Groq, …). Native swarm/graph multi-agent + a deep built-in
+    tool suite (shell, file edit, python, http). Runs synchronously in the worker
+    thread; the structured message log is walked after each turn to build the
+    transcript in order.
+    """
 
     def __init__(self, workspace: Path, model: str | None = None):
         super().__init__(workspace)
         self.model = model
-        self.convo = None
-        self._emit = None
+        self.agent = None
 
     def open(self) -> None:
-        from openhands.sdk import LLM, Agent, Conversation, Tool
+        import os as _os
+        from strands import Agent
+        from strands.models.litellm import LiteLLMModel
 
         if self.model:
             model = self.model
-            key_env = _model_key_env(model) or os.environ.get("AGENT_OPEN_KEY_ENV", "")
+            key_env = _model_key_env(model) or _os.environ.get("AGENT_OPEN_KEY_ENV", "")
             base_url = _model_base_url(model)
-            if not key_env or not os.environ.get(key_env, "").strip():
+            if not key_env or not _os.environ.get(key_env, "").strip():
                 raise RuntimeError(f"no API key for model {model}")
         else:
             picked = _pick_open_llm()
             if picked is None:
-                raise RuntimeError("no free-tier provider key available")
+                raise RuntimeError("no open-tier provider key available")
             key_env, model, base_url = picked
-        llm_kwargs: dict = {"model": model, "api_key": os.environ[key_env]}
+
+        # client_args pass straight to litellm.completion (api_base = custom
+        # OpenAI-compatible endpoint, e.g. Z.ai for GLM, NVIDIA for Kimi).
+        client_args: dict = {"model": model, "api_key": _os.environ[key_env]}
         if base_url:
-            llm_kwargs["base_url"] = base_url
-        llm = LLM(**llm_kwargs)
+            client_args["api_base"] = base_url
+        llm = LiteLLMModel(client_args=client_args)
 
-        #   tool registration: import paths have churned across 1.x releases —
-        #   prefer the names re-exported from openhands.tools, then fall back to
-        #   submodule paths. Register whatever this install actually provides.
-        import importlib
+        # the agent works in its session workspace; tools are imported defensively
+        # so a renamed/missing tool never blocks startup.
         tools = []
-        seen: set[str] = set()
-        try:
-            import openhands.tools as ohtools
-            for attr in ("TerminalTool", "BashTool", "FileEditorTool", "TaskTrackerTool"):
-                cls = getattr(ohtools, attr, None)
-                if cls is not None:
-                    name = getattr(cls, "name", attr)
-                    if name not in seen:
-                        seen.add(name)
-                        tools.append(Tool(name=name))
-        except Exception:
-            pass
-        if not tools:
-            for mod_name, cls_name in [
-                ("openhands.tools.terminal", "TerminalTool"),
-                ("openhands.tools.execute_bash", "BashTool"),
-                ("openhands.tools.file_editor", "FileEditorTool"),
-                ("openhands.tools.task_tracker", "TaskTrackerTool"),
-            ]:
-                try:
-                    mod = importlib.import_module(mod_name)
-                    cls = getattr(mod, cls_name)
-                    name = getattr(cls, "name", cls_name)
-                    if name not in seen:
-                        seen.add(name)
-                        tools.append(Tool(name=name))
-                except Exception:
-                    continue
-        if not tools:
-            raise RuntimeError("no OpenHands tools could be registered "
-                               "(openhands-tools missing or incompatible)")
+        for mod_name in ("shell", "file_read", "file_write", "editor",
+                         "python_repl", "http_request"):
+            try:
+                import importlib
+                tools.append(importlib.import_module(f"strands_tools.{mod_name}"))
+            except Exception:
+                continue
 
-        agent = Agent(llm=llm, tools=tools)
-        self.convo = Conversation(agent=agent, workspace=str(self.workspace),
-                                  callbacks=[self._on_event])
-
-    def _on_event(self, event) -> None:
-        if self._emit is None:
-            return
-        emit = self._emit
-        cls = type(event).__name__
+        prev = _os.getcwd()
         try:
-            if cls == "MessageEvent":
-                if getattr(event, "source", "") != "agent":
-                    return  # the user echo; the session loop already emitted it
-                msg = getattr(event, "llm_message", None)
-                text = ""
-                content = getattr(msg, "content", None)
-                if isinstance(content, str):
-                    text = content
-                elif isinstance(content, list):
-                    text = "\n".join(getattr(c, "text", "") or str(c) for c in content)
-                if text.strip():
-                    emit({"type": "assistant", "text": _clip(text)})
-            elif cls == "ActionEvent":
-                action = getattr(event, "action", None)
-                name = type(action).__name__ if action is not None else "Action"
-                emit({"type": "tool_use", "name": name,
-                      "summary": _clip(action, 200) if action is not None else ""})
-            elif cls == "ObservationEvent":
-                obs = getattr(event, "observation", None)
-                emit({"type": "tool_result", "text": _clip(obs if obs is not None else event),
-                      "is_error": False})
-            elif cls == "AgentErrorEvent":
-                emit({"type": "tool_result", "text": _clip(getattr(event, "error", event)),
-                      "is_error": True})
-        except Exception:
-            pass  # transcript mapping must never kill the agent loop
+            _os.chdir(self.workspace)   # tools operate relative to the workspace
+            self.agent = Agent(model=llm, tools=tools, system_prompt=AGENT_SYSTEM_PROMPT,
+                               callback_handler=None)
+        finally:
+            _os.chdir(prev)
+        self._msg_cursor = 0
 
     def turn(self, user_msg: str, emit) -> None:
-        self._emit = emit
+        import os as _os
+        prev = _os.getcwd()
         try:
-            self.convo.send_message(user_msg)
-            self.convo.run()
+            _os.chdir(self.workspace)
+            self.agent(user_msg)
         finally:
-            self._emit = None
+            _os.chdir(prev)
+        # walk newly-appended messages and map Bedrock-style content blocks
+        msgs = getattr(self.agent, "messages", []) or []
+        for m in msgs[self._msg_cursor:]:
+            role = m.get("role")
+            for block in (m.get("content") or []):
+                if "toolUse" in block:
+                    tu = block["toolUse"] or {}
+                    emit({"type": "tool_use", "name": tu.get("name", "tool"),
+                          "summary": _summarize_tool_input(tu.get("name", ""),
+                                                            tu.get("input", {}))})
+                elif "toolResult" in block:
+                    tr = block["toolResult"] or {}
+                    parts = []
+                    for c in (tr.get("content") or []):
+                        if isinstance(c, dict) and "text" in c:
+                            parts.append(c["text"])
+                    emit({"type": "tool_result", "text": _clip("\n".join(parts) or tr),
+                          "is_error": tr.get("status") == "error"})
+                elif "reasoningContent" in block:
+                    rc = block["reasoningContent"] or {}
+                    txt = (rc.get("reasoningText") or {}).get("text") if isinstance(
+                        rc.get("reasoningText"), dict) else rc.get("reasoningText")
+                    if txt:
+                        emit({"type": "thinking", "text": _clip(txt)})
+                elif "text" in block and role == "assistant":
+                    if block["text"].strip():
+                        emit({"type": "assistant", "text": block["text"]})
+        self._msg_cursor = len(msgs)
 
     def interrupt(self) -> None:
-        #   best-effort across OpenHands 1.x API variants (pause/stop/cancel).
-        for name in ("pause", "stop", "cancel", "interrupt"):
-            fn = getattr(self.convo, name, None)
-            if callable(fn):
-                try:
-                    fn()
-                    return
-                except Exception:
-                    continue
+        canceler = getattr(self.agent, "cancel", None)
+        if callable(canceler):
+            try:
+                canceler()
+            except Exception:
+                pass
 
     def close(self) -> None:
-        closer = getattr(self.convo, "close", None)
-        if callable(closer):
+        cleanup = getattr(self.agent, "cleanup", None)
+        if callable(cleanup):
             try:
-                closer()
+                cleanup()
             except Exception:
                 pass
 
@@ -424,7 +406,7 @@ def _make_adapter(tier: str, workspace: Path, model: str | None = None) -> BaseA
     if tier == "claude":
         return ClaudeAdapter(workspace, model)
     if tier == "open":
-        return OpenHandsAdapter(workspace, model)
+        return StrandsAdapter(workspace, model)
     return MockAdapter(workspace)
 
 

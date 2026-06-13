@@ -9,13 +9,11 @@ huggingface_hub>=0.23
 # Python 3.10+. The "agent" tab uses it when ANTHROPIC_API_KEY is set.
 claude-agent-sdk>=0.2
 
-# --- agent orchestrator: free/open tier (OpenHands) — currently DEFERRED ---
-# openhands-sdk 1.28.x has an unresolvable transitive dependency conflict
-# (lmnr 0.7.47 pins opentelemetry-semantic-conventions==0.60b1, which no
-# opentelemetry-instrumentation release matches). The OpenHands adapter is
-# already wired in agent_sessions.py and activates automatically once a
-# resolvable pair is uncommented here — no code change needed. Re-enable with
-# a matched, resolvable pair, e.g.:
-#   openhands-sdk==<v>
-#   openhands-tools==<v>
-# (and bump the Dockerfile base image to python:3.12-slim — OpenHands needs 3.12).
+# --- agent orchestrator: open tier (Strands Agents, AWS — Apache-2.0) ---
+# Powers every non-Claude model (Kimi, GLM, MiniMax, DeepSeek, Groq, …) via
+# LiteLLM. Native swarm/graph multi-agent + built-in shell/file/python/http
+# tools. Clean install on Python 3.11 (no base-image bump). Chosen over
+# OpenHands, whose 1.28.x line has an unresolvable lmnr/opentelemetry conflict
+# and needs 3.12. The [litellm] extra provides the provider-agnostic model.
+strands-agents[litellm]>=1.43
+strands-agents-tools>=0.8
