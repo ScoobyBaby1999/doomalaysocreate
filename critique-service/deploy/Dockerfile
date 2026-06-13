@@ -12,10 +12,19 @@ COPY app/ .
 RUN npm run build
 
 # --- stage 2: the python gateway, serving the built app from ./static --------------
+# python:3.11-slim is enough for the service + the Claude Agent SDK (needs 3.10+).
+# When the OpenHands free tier is re-enabled (see requirements.txt) bump to 3.12-slim.
 FROM python:3.11-slim
 WORKDIR /app
 
+# git/zip/unzip: the agent orchestrator clones, packs, and unpacks repos & archives
+# in its workspace. Kept minimal; cleaned in the same layer.
+RUN apt-get update && apt-get install -y --no-install-recommends git zip unzip \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt /app/requirements.txt
+# The Claude Agent SDK wheel bundles the Claude Code CLI (a self-contained binary),
+# so no Node.js is needed at runtime.
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
@@ -29,6 +38,10 @@ ENV PORT=7860
 EXPOSE 7860
 
 # run as a non-root user (HF runs containers as uid 1000).
+# HOME must be writable & non-root: the bundled Claude Code CLI keeps its state there.
+# AGENT_ROOT holds per-session agent workspaces (ephemeral /tmp is fine).
+ENV HOME=/home/appuser \
+    AGENT_ROOT=/tmp/agent
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 

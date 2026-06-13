@@ -6,11 +6,13 @@ import json
 import mimetypes
 import os
 import secrets
+import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import agent_sessions
 import authtoken
 import orchestrate
 from content.roles import make_prompt
@@ -786,6 +788,10 @@ class Handler(BaseHTTPRequestHandler):
                     "POST /api/templates": "save a user template {id, schematic} (persisted)",
                     "DELETE /api/templates/<id>": "delete a user template",
                     "GET /api/jobs/<id>": "poll an async job/run (when called with async:true)",
+                    "POST /api/agent": "agent chat: {message, session_id?} -> 202 {session_id}",
+                    "GET /api/agent/<sid>?since=<n>": "poll the agent transcript (delta events)",
+                    "GET /api/agent/<sid>/files": "list workspace artifacts",
+                    "GET /api/agent/<sid>/file?path=": "download a workspace artifact",
                     "GET /api/stats": "live rotation/health per provider + slot",
                     "GET /api/metrics?profile=<id>": "per-profile cost/throttle/latency aggregates",
                     "GET /api/roster": "per-model benchmark + hosts + privacy-safe routability + frontier guarantee",
@@ -795,6 +801,9 @@ class Handler(BaseHTTPRequestHandler):
                     "POST /oauth/set-provider-key": "set a provider API key on the user's Space via HF API",
                 },
                 "oauth_configured": _oauth_configured(),
+                #   agentic orchestrator tier: "claude" (ANTHROPIC_API_KEY + SDK),
+                #   "open" (free provider key + OpenHands SDK), or null.
+                "agent": agent_sessions.agent_tier(),
                 "repo_review": "POST /api/panel or /api/critique with 'files': {path: content} "
                                "or 'repo_url' (+'repo_ref', 'repo_token', 'diff_mode': {base_ref, head_ref}) "
                                "instead of input/plan; each judge gets a pack fitted to its context "
@@ -861,6 +870,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "no such job (unknown id or expired)"})
                 return
             self._send_json(200, snap)
+            return
+        if route.startswith("/api/agent/"):
+            #   transcript polling + artifact access share the bearer token.
+            if not _token_ok(self.headers.get("Authorization")):
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            self._handle_agent_get(route)
             return
         if route == "/oauth/login":
             self._handle_oauth_login()
@@ -1028,6 +1044,98 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_json(200, result)
 
+    # -- agent orchestrator routes ------------------------------------------
+
+    def _handle_agent_post(self, payload: dict) -> None:
+        #   POST /api/agent {message, session_id?} -> 202 {session_id, tier, status}
+        message = payload.get("message")
+        if not isinstance(message, str) or not message.strip():
+            self._send_json(400, {"error": "'message' (non-empty string) is required"})
+            return
+        if len(message) > 100_000:
+            self._send_json(413, {"error": "'message' too large (max 100k chars)"})
+            return
+        if agent_sessions.agent_tier() is None:
+            self._send_json(503, {"error": "no agent tier configured — set ANTHROPIC_API_KEY "
+                                           "(Claude agent) or any free provider key (open agent)"})
+            return
+        session_id = payload.get("session_id")
+        session_id = session_id.strip() if isinstance(session_id, str) else None
+        try:
+            session = agent_sessions.get_or_create(session_id)
+        except agent_sessions.CapacityError as e:
+            self._send_json(429, {"error": str(e)}, headers={"Retry-After": "30"})
+            return
+        except Exception as e:  # noqa: BLE001
+            log_event("agent_create_error", error=repr(e)[:200])
+            self._send_json(500, {"error": f"agent session error: {type(e).__name__}"})
+            return
+        session.submit(message.strip())
+        self._send_json(202, {"session_id": session.id, "tier": session.tier,
+                              "status": session.status})
+
+    def _handle_agent_get(self, route: str) -> None:
+        from urllib.parse import parse_qs, urlsplit
+        rest = route[len("/api/agent/"):]
+        parts = rest.split("/")
+        session = agent_sessions.get_session(parts[0])
+        if session is None:
+            self._send_json(404, {"error": "no such agent session (unknown id or expired)"})
+            return
+        query = parse_qs(urlsplit(self.path).query)
+
+        if len(parts) == 1:                       # poll transcript
+            try:
+                since = int(query.get("since", ["0"])[0])
+            except ValueError:
+                since = 0
+            self._send_json(200, session.snapshot(since=since))
+            return
+
+        if len(parts) == 2 and parts[1] == "files":   # list artifacts
+            files = []
+            root = session.workspace.resolve()
+            for p in sorted(root.rglob("*")):
+                if len(files) >= 500:
+                    break
+                rel = p.relative_to(root)
+                #   hide agent plumbing (.claude/, .git/, any dotfiles)
+                if any(seg.startswith(".") for seg in rel.parts):
+                    continue
+                if p.is_file():
+                    st = p.stat()
+                    files.append({"path": str(rel), "size": st.st_size,
+                                  "mtime": int(st.st_mtime)})
+            self._send_json(200, {"session_id": session.id, "files": files})
+            return
+
+        if len(parts) == 2 and parts[1] == "file":    # download one artifact
+            rel = (query.get("path", [""])[0] or "").strip()
+            root = session.workspace.resolve()
+            target = (root / rel).resolve()
+            #   same traversal guard as _serve_static: stay inside the workspace.
+            if not rel or not target.is_relative_to(root) or not target.is_file():
+                self._send_json(404, {"error": "no such file"})
+                return
+            size = target.stat().st_size
+            if size > 50 * 1024 * 1024:
+                self._send_json(413, {"error": "file too large to download (max 50MB)"})
+                return
+            ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{target.name}"')
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with target.open("rb") as fh:
+                shutil.copyfileobj(fh, self.wfile)
+            return
+
+        self._send_json(404, {"error": "not found"})
+
     def _auth_and_body(self) -> dict | None:
         #   shared gate for POST routes: bearer auth + JSON body parse. on any
         #   failure it writes the error response and returns None.
@@ -1110,7 +1218,7 @@ class Handler(BaseHTTPRequestHandler):
             "NVIDIA_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
             "OPENROUTER_API_KEY", "CEREBRAS_API_KEY", "GITHUB_TOKEN",
             "CF_API_TOKEN", "CF_ACCOUNT_ID", "ZAI_API_KEY", "MOONSHOT_API_KEY",
-            "TAVILY_API_KEY",
+            "TAVILY_API_KEY", "ANTHROPIC_API_KEY",
         }
         if key_name not in _ALLOWED:
             self._send_json(400, {"error": f"key_name not allowed (must be one of {sorted(_ALLOWED)})"})
@@ -1139,11 +1247,15 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/oauth/set-provider-key":
             self._handle_set_provider_key()
             return
-        if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates"):
+        if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates",
+                         "/api/agent"):
             self._send_json(404, {"error": "not found"})
             return
         payload = self._auth_and_body()
         if payload is None:
+            return
+        if route == "/api/agent":
+            self._handle_agent_post(payload)
             return
         panel: Panel = self.server.panel  # type: ignore[attr-defined]
         is_async = bool(payload.get("async"))
