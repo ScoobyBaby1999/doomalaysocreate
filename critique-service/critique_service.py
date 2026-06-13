@@ -871,6 +871,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, snap)
             return
+        if route == "/api/agent/models":
+            if not _token_ok(self.headers.get("Authorization")):
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            self._send_json(200, {"tier": agent_sessions.agent_tier(),
+                                  "models": agent_sessions.agent_models()})
+            return
         if route.startswith("/api/agent/"):
             #   transcript polling + artifact access share the bearer token.
             if not _token_ok(self.headers.get("Authorization")):
@@ -1061,8 +1068,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         session_id = payload.get("session_id")
         session_id = session_id.strip() if isinstance(session_id, str) else None
+        model = payload.get("model")
+        model = model.strip() if isinstance(model, str) and model.strip() else None
+        if model and not any(m["model"] == model for m in agent_sessions.agent_models()):
+            self._send_json(400, {"error": f"model not available: {model}"})
+            return
         try:
-            session = agent_sessions.get_or_create(session_id)
+            session = agent_sessions.get_or_create(session_id, model)
         except agent_sessions.CapacityError as e:
             self._send_json(429, {"error": str(e)}, headers={"Retry-After": "30"})
             return
@@ -1072,7 +1084,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         session.submit(message.strip())
         self._send_json(202, {"session_id": session.id, "tier": session.tier,
-                              "status": session.status})
+                              "model": session.model, "status": session.status})
 
     def _handle_agent_get(self, route: str) -> None:
         from urllib.parse import parse_qs, urlsplit
@@ -1246,6 +1258,20 @@ class Handler(BaseHTTPRequestHandler):
         route = self.path.rstrip("/")
         if route == "/oauth/set-provider-key":
             self._handle_set_provider_key()
+            return
+        #   POST /api/agent/<sid>/interrupt — stop the in-flight turn (bearer-gated,
+        #   no body required). handled before the body-parsing gate below.
+        if route.startswith("/api/agent/") and route.endswith("/interrupt"):
+            if not _token_ok(self.headers.get("Authorization")):
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            sid = route[len("/api/agent/"):-len("/interrupt")]
+            session = agent_sessions.get_session(sid)
+            if session is None:
+                self._send_json(404, {"error": "no such agent session"})
+                return
+            stopped = session.interrupt()
+            self._send_json(200, {"interrupted": stopped, "status": session.status})
             return
         if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates",
                          "/api/agent"):
