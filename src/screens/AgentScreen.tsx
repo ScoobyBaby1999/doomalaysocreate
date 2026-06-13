@@ -1,35 +1,59 @@
 import { useEffect, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { Settings } from "../api/panel";
-import { AgentClient, type AgentEvent, type AgentFile, type AgentStatus } from "../api/agent";
+import {
+  AgentClient,
+  type AgentEvent,
+  type AgentFile,
+  type AgentModel,
+  type AgentStatus,
+} from "../api/agent";
 
 const SESSION_KEY = "loom.agent.session";
+const MODEL_KEY = "loom.agent.model";
 
 /** The agent tab: a chat with the orchestrator running inside the user's Space.
- *  Tier (Claude vs the open SDK) is chosen by the backend from available keys. */
+ *  A model picker chooses which frontier model drives it (Claude via its SDK,
+ *  others via the open agent once that SDK lands). */
 export function AgentScreen({ settings }: { settings: Settings }) {
-  const [tier, setTier] = useState<"claude" | "open" | "mock" | null | undefined>(undefined);
+  const [models, setModels] = useState<AgentModel[] | null>(null);
+  const [selected, setSelected] = useState<string>(localStorage.getItem(MODEL_KEY) || "");
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [status, setStatus] = useState<AgentStatus>("idle");
   const [files, setFiles] = useState<AgentFile[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [cost, setCost] = useState<number | null>(null);
   const sessionRef = useRef<string | null>(sessionStorage.getItem(SESSION_KEY));
+  const lastMsgRef = useRef<string>("");
   const listRef = useRef<VirtuosoHandle>(null);
   const client = useRef(new AgentClient(settings));
   client.current = new AgentClient(settings);
 
-  // discover which tier this Space offers
+  // discover runnable models
   useEffect(() => {
     let alive = true;
-    fetch(settings.baseUrl + "/health", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((h) => alive && setTier((h.agent ?? null) as typeof tier))
-      .catch(() => alive && setTier(null));
+    client.current
+      .models()
+      .then((r) => {
+        if (!alive) return;
+        setModels(r.models);
+        // default selection: stored choice if still valid, else the server default
+        const valid = r.models.find((m) => m.model === selected);
+        if (!valid) {
+          const def = r.models.find((m) => m.default) || r.models[0];
+          if (def) {
+            setSelected(def.model);
+            localStorage.setItem(MODEL_KEY, def.model);
+          }
+        }
+      })
+      .catch(() => alive && setModels([]));
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.baseUrl]);
 
   async function pollUntilSettled(sessionId: string, since: number) {
@@ -39,6 +63,9 @@ export function AgentScreen({ settings }: { settings: Settings }) {
       if (snap.events.length) {
         setEvents((prev) => [...prev, ...snap.events]);
         cursor = snap.next;
+        for (const e of snap.events) {
+          if (e.type === "status" && typeof e.cost_usd === "number") setCost(e.cost_usd);
+        }
       }
       setStatus(snap.status);
       if (snap.status !== "running" && snap.status !== "starting") {
@@ -54,24 +81,26 @@ export function AgentScreen({ settings }: { settings: Settings }) {
     }
   }
 
-  async function send() {
-    const message = input.trim();
+  async function send(text?: string) {
+    const message = (text ?? input).trim();
     if (!message || busy) return;
-    setInput("");
+    if (text === undefined) setInput("");
+    lastMsgRef.current = message;
     setBusy(true);
     setError("");
-    // optimistic echo so the user sees their message immediately
     setEvents((prev) => [
       ...prev,
       { i: -1, ts: Date.now() / 1000, type: "user", text: message } as AgentEvent,
     ]);
     setStatus("running");
     try {
-      const start = await client.current.send(message, sessionRef.current ?? undefined);
+      const start = await client.current.send(
+        message,
+        sessionRef.current ?? undefined,
+        sessionRef.current ? undefined : selected || undefined,
+      );
       sessionRef.current = start.session_id;
       sessionStorage.setItem(SESSION_KEY, start.session_id);
-      setTier(start.tier);
-      // replace the optimistic echo by reloading the authoritative transcript
       const fresh = await client.current.poll(start.session_id, 0);
       setEvents(fresh.events);
       await pollUntilSettled(start.session_id, fresh.next);
@@ -83,41 +112,71 @@ export function AgentScreen({ settings }: { settings: Settings }) {
     }
   }
 
-  function newSession() {
+  async function stop() {
+    if (!sessionRef.current) return;
+    try {
+      await client.current.interrupt(sessionRef.current);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function newSession(model?: string) {
     sessionRef.current = null;
     sessionStorage.removeItem(SESSION_KEY);
     setEvents([]);
     setFiles([]);
     setStatus("idle");
     setError("");
+    setCost(null);
+    if (model) {
+      setSelected(model);
+      localStorage.setItem(MODEL_KEY, model);
+    }
   }
 
-  if (tier === null) {
+  if (models !== null && models.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full p-6 text-center space-y-3">
         <p className="text-sm font-medium">The agent isn't set up yet</p>
         <p className="text-sm text-muted max-w-xs">
           Add an <span className="text-accent">Anthropic key</span> in Settings for the
-          Claude agent, or any free provider key (Groq, NVIDIA, OpenRouter, Google) for
-          the open-source agent.
+          Claude agent. More models (Kimi, GLM, and others) unlock once the open agent
+          ships.
         </p>
       </div>
     );
   }
 
+  const running = status === "running" || status === "starting";
+
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-2 px-3 h-8 border-b border-border text-[11px] text-muted">
-        <span>
-          agent:{" "}
-          <span className="text-accent">
-            {tier === "claude" ? "Claude" : tier === "open" ? "open SDK" : tier ?? "…"}
-          </span>
-        </span>
+      <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted">
+        <select
+          value={selected}
+          onChange={(e) => newSession(e.target.value)}
+          disabled={running || !models}
+          className="bg-surface border border-border rounded-lg px-2 py-1 text-[12px] text-accent outline-none focus:border-accent disabled:opacity-50 max-w-[55%]"
+        >
+          {!models && <option>loading…</option>}
+          {models?.map((m) => (
+            <option key={m.model} value={m.model}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+        {cost != null && <span className="text-[10px]">${cost.toFixed(4)}</span>}
         <span className="ml-auto capitalize">{status}</span>
-        <button onClick={newSession} className="text-accent underline">
-          new session
-        </button>
+        {running ? (
+          <button onClick={stop} className="text-rose-300 underline">
+            stop
+          </button>
+        ) : (
+          <button onClick={() => newSession()} className="text-accent underline">
+            new
+          </button>
+        )}
       </div>
 
       <Virtuoso
@@ -149,9 +208,8 @@ export function AgentScreen({ settings }: { settings: Settings }) {
                 key={f.path}
                 onClick={() => client.current.download(sessionRef.current!, f.path).catch(() => {})}
                 className="text-[11px] px-2 py-1 rounded-lg border border-border hover:border-accent"
-                title={`${f.size} bytes`}
               >
-                ↓ {f.path}
+                ↓ {f.path} <span className="text-muted">({fmtSize(f.size)})</span>
               </button>
             ))}
           </div>
@@ -159,8 +217,16 @@ export function AgentScreen({ settings }: { settings: Settings }) {
       )}
 
       {error && (
-        <div className="border-t border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">
-          {error}
+        <div className="border-t border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-300 flex items-center gap-2">
+          <span className="flex-1">{error}</span>
+          {lastMsgRef.current && (
+            <button
+              onClick={() => send(lastMsgRef.current)}
+              className="px-2 py-1 rounded-lg border border-rose-400/40 text-xs"
+            >
+              Retry
+            </button>
+          )}
         </div>
       )}
 
@@ -180,16 +246,46 @@ export function AgentScreen({ settings }: { settings: Settings }) {
             className="flex-1 resize-none bg-surface border border-border rounded-2xl px-3 py-2 text-[15px] outline-none focus:border-accent max-h-32"
           />
           <button
-            onClick={send}
-            disabled={busy || !input.trim()}
-            className="h-10 px-4 rounded-2xl bg-accent text-white font-medium disabled:opacity-40"
+            onClick={() => (running ? stop() : send())}
+            disabled={!running && (busy || !input.trim())}
+            className={`h-10 px-4 rounded-2xl font-medium disabled:opacity-40 ${
+              running ? "bg-rose-500/80 text-white" : "bg-accent text-white"
+            }`}
           >
-            {busy ? "…" : "Send"}
+            {running ? "Stop" : "Send"}
           </button>
         </div>
       </div>
     </div>
   );
+}
+
+function fmtSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const TOOL_ICONS: Record<string, string> = {
+  bash: "⌘",
+  shell: "⌘",
+  write: "✎",
+  edit: "✎",
+  fileeditor: "✎",
+  str_replace: "✎",
+  read: "👁",
+  view: "👁",
+  glob: "🔍",
+  grep: "🔍",
+  search: "🔍",
+  web: "🌐",
+  fetch: "🌐",
+};
+
+function toolIcon(name: string): string {
+  const k = name.toLowerCase();
+  for (const key of Object.keys(TOOL_ICONS)) if (k.includes(key)) return TOOL_ICONS[key];
+  return "⚙";
 }
 
 function EventRow({ ev }: { ev: AgentEvent }) {
@@ -212,18 +308,20 @@ function EventRow({ ev }: { ev: AgentEvent }) {
   if (ev.type === "thinking") {
     return (
       <div className="px-3 py-1 max-w-2xl mx-auto">
-        <Collapsible label="thinking" muted>
-          {ev.text}
-        </Collapsible>
+        <Collapsible label="thinking">{ev.text}</Collapsible>
       </div>
     );
   }
   if (ev.type === "tool_use") {
     return (
       <div className="px-3 py-1 max-w-2xl mx-auto">
-        <div className="text-[12px] text-muted">
-          <span className="text-accent">⚙ {ev.name}</span>
-          {ev.summary ? <span className="ml-2 font-mono">{ev.summary}</span> : null}
+        <div className="text-[12px] text-muted flex items-baseline gap-2">
+          <span className="text-accent shrink-0">
+            {toolIcon(ev.name)} <span className="font-medium">{ev.name}</span>
+          </span>
+          {ev.summary ? (
+            <span className="font-mono text-[11px] truncate">{ev.summary}</span>
+          ) : null}
         </div>
       </div>
     );
@@ -246,18 +344,23 @@ function EventRow({ ev }: { ev: AgentEvent }) {
       </div>
     );
   }
+  if (ev.type === "status" && ev.state === "idle" && ev.detail === "interrupted") {
+    return (
+      <div className="px-3 py-1 max-w-2xl mx-auto text-center text-[11px] text-muted">
+        — stopped —
+      </div>
+    );
+  }
   return null;
 }
 
 function Collapsible({
   label,
   children,
-  muted,
   error,
 }: {
   label: string;
   children: React.ReactNode;
-  muted?: boolean;
   error?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -265,9 +368,7 @@ function Collapsible({
     <div className={`rounded-lg border ${error ? "border-rose-500/30" : "border-border"}`}>
       <button
         onClick={() => setOpen((o) => !o)}
-        className={`w-full text-left text-[11px] px-2 py-1 ${
-          error ? "text-rose-300" : muted ? "text-muted" : "text-muted"
-        }`}
+        className={`w-full text-left text-[11px] px-2 py-1 ${error ? "text-rose-300" : "text-muted"}`}
       >
         {open ? "▾" : "▸"} {label}
       </button>

@@ -24,9 +24,18 @@ export type AgentEvent =
 
 export type AgentStatus = "starting" | "idle" | "running" | "error";
 
+export interface AgentModel {
+  tier: "claude" | "open";
+  provider: string;
+  model: string;
+  label: string;
+  default: boolean;
+}
+
 export interface AgentSnapshot {
   session_id: string;
   tier: "claude" | "open" | "mock";
+  model: string | null;
   status: AgentStatus;
   events: AgentEvent[];
   next: number;
@@ -35,6 +44,7 @@ export interface AgentSnapshot {
 export interface AgentStart {
   session_id: string;
   tier: "claude" | "open" | "mock";
+  model: string | null;
   status: AgentStatus;
 }
 
@@ -87,12 +97,29 @@ export class AgentClient {
     return (await r.json()) as T;
   }
 
-  /** Start a new session, or continue an existing one if sessionId is given. */
-  send(message: string, sessionId?: string) {
+  /** List models this Space can actually run (for the picker). */
+  models() {
+    return this.req<{ tier: string | null; models: AgentModel[] }>("/api/agent/models");
+  }
+
+  /** Start a new session, or continue an existing one if sessionId is given.
+   *  `model` selects which model/tier drives a NEW session. */
+  send(message: string, sessionId?: string, model?: string) {
+    const body: Record<string, unknown> = { message };
+    if (sessionId) body.session_id = sessionId;
+    if (model) body.model = model;
     return this.req<AgentStart>("/api/agent", {
       method: "POST",
-      body: JSON.stringify(sessionId ? { message, session_id: sessionId } : { message }),
+      body: JSON.stringify(body),
     });
+  }
+
+  /** Stop the in-flight turn for a session. */
+  interrupt(sessionId: string) {
+    return this.req<{ interrupted: boolean; status: AgentStatus }>(
+      `/api/agent/${sessionId}/interrupt`,
+      { method: "POST" },
+    );
   }
 
   /** Poll the transcript; `since` is the cursor returned as `next` last time. */
