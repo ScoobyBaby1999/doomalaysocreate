@@ -323,10 +323,11 @@ class StrandsAdapter(BaseAdapter):
 
         # client_args pass straight to litellm.completion (api_base = custom
         # OpenAI-compatible endpoint, e.g. Z.ai for GLM, NVIDIA for Kimi).
-        client_args: dict = {"model": model, "api_key": _os.environ[key_env]}
+        client_args: dict = {"api_key": _os.environ[key_env]}
         if base_url:
             client_args["api_base"] = base_url
-        llm = LiteLLMModel(client_args=client_args)
+        llm = LiteLLMModel(client_args=client_args, model_id=model)
+
 
         # the agent works in its session workspace; tools are imported defensively
         # so a renamed/missing tool never blocks startup.
