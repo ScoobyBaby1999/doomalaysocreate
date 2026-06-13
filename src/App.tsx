@@ -3,9 +3,10 @@ import { useSettings } from "./state/settings";
 import { Chat } from "./screens/Chat";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
+import { AgentScreen } from "./screens/AgentScreen";
 import type { Settings } from "./api/panel";
 
-type Tab = "chat" | "settings";
+type Tab = "chat" | "agent" | "settings";
 
 export default function App() {
   const [settings, setSettings] = useSettings();
@@ -49,13 +50,15 @@ export default function App() {
       <main className="flex-1 min-h-0">
         {tab === "chat" ? (
           <Chat settings={settings} />
+        ) : tab === "agent" ? (
+          <AgentScreen settings={settings} />
         ) : (
           <SettingsScreen settings={settings} onChange={setSettings} />
         )}
       </main>
 
       <nav className="flex border-t border-border">
-        {(["chat", "settings"] as Tab[]).map((t) => (
+        {(["chat", "agent", "settings"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}

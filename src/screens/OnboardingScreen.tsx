@@ -6,6 +6,7 @@ type Phase =
   | "landing"        // no credentials, show sign-in button
   | "exchanging"     // fetching /oauth/result/<token>
   | "wizard"         // provision done, adding provider keys
+  | "waiting"        // cross-origin Space still building; polling its /health
   | "error";         // something went wrong
 
 interface ProvisionResult {
@@ -93,6 +94,15 @@ export function OnboardingScreen({ onComplete }: { onComplete: (s: Partial<Setti
     return <CenteredMessage>Linking your Space…</CenteredMessage>;
   }
 
+  if (phase === "waiting") {
+    return (
+      <CenteredMessage>
+        Your Space is building — this usually takes 1–3 minutes. We'll take
+        you there automatically.
+      </CenteredMessage>
+    );
+  }
+
   if (phase === "error") {
     return (
       <div className="flex flex-col items-center justify-center h-full p-6 space-y-5 text-center">
@@ -121,7 +131,34 @@ export function OnboardingScreen({ onComplete }: { onComplete: (s: Partial<Setti
     return (
       <ProviderKeyWizard
         provision={provision}
-        onDone={() => {
+        onDone={async () => {
+          let sameOrigin = false;
+          try {
+            sameOrigin = new URL(provision.space_url).origin === window.location.origin;
+          } catch {
+            /* malformed URL — fall through to redirect attempt */
+          }
+          if (sameOrigin) {
+            // Navigating to the same URL with only a hash change does NOT
+            // reload the page — hand the secret to the app directly instead.
+            onComplete({ rotationSecret: provision.rotation_secret });
+            return;
+          }
+          // Cross-origin: the user's Space may still be building. Poll its
+          // /health (CORS errors / non-200 = not ready) before redirecting,
+          // so they land on a working app instead of HF's build page.
+          setPhase("waiting");
+          const deadline = Date.now() + 5 * 60_000;
+          while (Date.now() < deadline) {
+            try {
+              const r = await fetch(`${provision.space_url}/health`, { cache: "no-store" });
+              if (r.ok) break;
+            } catch {
+              /* still building — keep waiting */
+            }
+            await new Promise((res) => setTimeout(res, 5000));
+          }
+          // On timeout we redirect anyway; the Space landing page finishes the job.
           const setup = btoa(JSON.stringify({ rotationSecret: provision.rotation_secret }));
           window.location.href = `${provision.space_url}/#setup=${setup}`;
         }}

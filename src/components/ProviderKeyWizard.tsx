@@ -51,6 +51,14 @@ const PROVIDERS: Provider[] = [
     hint: "Access 100+ models; many have free quotas.",
     placeholder: "sk-or-…",
   },
+  {
+    id: "anthropic",
+    label: "Anthropic (Claude) — paid",
+    envKey: "ANTHROPIC_API_KEY",
+    keyUrl: "https://console.anthropic.com/settings/keys",
+    hint: "Optional. Unlocks the full Claude agent tier (paid key).",
+    placeholder: "sk-ant-…",
+  },
 ];
 
 export function ProviderKeyWizard({
