@@ -335,7 +335,8 @@ def list_public_workspaces(*, page: int = 1, per_page: int = 20,
     if search:
         where += " AND (r.title LIKE ? ESCAPE '\\' OR r.description LIKE ? ESCAPE '\\' OR r.owner_username LIKE ? ESCAPE '\\')"
         # escape LIKE wildcards to prevent pattern injection
-        q = f"%{search.replace('%', '\\%').replace('_', '\\_')}%"
+        escaped = search.replace('%', '\\%').replace('_', '\\_')
+        q = "%" + escaped + "%"
         params += [q, q, q]
     order = "r.indexed_at DESC" if sort == "recent" else "r.indexed_count DESC"
     #   indexed_count doesn't exist yet — fall back to indexed_at
