@@ -17,6 +17,8 @@ ENV PORT=7860
 EXPOSE 7860
 
 # run as a non-root user (HF runs containers as uid 1000).
+ENV BYPASS_TOOL_CONSENT=true
+
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 

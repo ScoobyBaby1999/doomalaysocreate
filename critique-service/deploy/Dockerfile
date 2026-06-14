@@ -41,7 +41,8 @@ EXPOSE 7860
 # HOME must be writable & non-root: the bundled Claude Code CLI keeps its state there.
 # AGENT_ROOT holds per-session agent workspaces (ephemeral /tmp is fine).
 ENV HOME=/home/appuser \
-    AGENT_ROOT=/tmp/agent
+    AGENT_ROOT=/tmp/agent \
+    BYPASS_TOOL_CONSENT=true
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 

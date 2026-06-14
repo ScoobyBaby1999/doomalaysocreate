@@ -41,6 +41,11 @@ MAX_SESSIONS = int(os.environ.get("AGENT_MAX_SESSIONS", "4"))        # RAM bound
 MAX_EVENT_CHARS = int(os.environ.get("AGENT_MAX_EVENT_CHARS", "4000"))
 MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", "50"))
 
+#   per-thread workspace tracking for concurrent agent sessions.  replaces the
+#   process-wide os.chdir() pattern which broke concurrent sessions (session B's
+#   cwd overwrite caused session A's shell commands to run in the wrong dir).
+_thread_local = threading.local()
+
 HERE = Path(__file__).resolve().parent
 SKILLS_SRC = HERE / "agent_skills"   # seeded into each workspace's .claude/skills
 
@@ -230,6 +235,7 @@ class ClaudeAdapter(BaseAdapter):
         options = sdk.ClaudeAgentOptions(
             cwd=str(self.workspace),
             permission_mode="bypassPermissions",   # headless; the Space is the sandbox
+            allow_dangerously_skip_permissions=True,  # required double opt-in for the SDK
             setting_sources=["project"],           # load <workspace>/.claude/skills
             model=self.model,
             system_prompt=AGENT_SYSTEM_PROMPT,
@@ -290,6 +296,20 @@ class ClaudeAdapter(BaseAdapter):
             self.loop.close()
 
 
+def _guarded_shell(**kwargs):
+    """Wrap the Strands shell tool to force execution in the session workspace.
+
+    The Strands shell tool accepts a ``workdir`` kwarg, but we can't trust the
+    LLM to always pass it (or to pass the *right* value).  This wrapper
+    overrides ``workdir`` with the workspace stored in thread-local storage,
+    eliminating the need for a process-wide ``os.chdir()`` that would break
+    concurrent sessions.
+    """
+    from strands_tools import shell as _shell
+    kwargs["workdir"] = str(getattr(_thread_local, "workspace", Path.cwd()))
+    return _shell.tool(**kwargs)
+
+
 class StrandsAdapter(BaseAdapter):
     """Open tier — Strands Agents SDK (AWS, Apache-2.0). Provider-agnostic via
     LiteLLM, so one adapter drives every OpenAI-compatible model (Kimi, GLM,
@@ -308,6 +328,10 @@ class StrandsAdapter(BaseAdapter):
         import os as _os
         from strands import Agent
         from strands.models.litellm import LiteLLMModel
+
+        # headless: skip interactive consent prompts (no TTY in the Space container).
+        # must be set before importing strands_tools so their module-level checks see it.
+        _os.environ["BYPASS_TOOL_CONSENT"] = "true"
 
         if self.model:
             model = self.model
@@ -331,32 +355,33 @@ class StrandsAdapter(BaseAdapter):
 
         # the agent works in its session workspace; tools are imported defensively
         # so a renamed/missing tool never blocks startup.
+        # shell is replaced by _guarded_shell to force workdir per-thread instead
+        # of using a process-wide os.chdir() (which breaks concurrent sessions).
         tools = []
-        for mod_name in ("shell", "file_read", "file_write", "editor",
+        for mod_name in ("file_read", "file_write", "editor",
                          "python_repl", "http_request"):
             try:
                 import importlib
                 tools.append(importlib.import_module(f"strands_tools.{mod_name}"))
             except Exception:
                 continue
+        # guarded shell: forces execution into this session's workspace
+        import types as _types
+        shell_mod = _types.ModuleType("shell_guarded")
+        shell_mod.tool = _guarded_shell
+        tools.append(shell_mod)
 
-        prev = _os.getcwd()
-        try:
-            _os.chdir(self.workspace)   # tools operate relative to the workspace
-            self.agent = Agent(model=llm, tools=tools, system_prompt=AGENT_SYSTEM_PROMPT,
-                               callback_handler=None)
-        finally:
-            _os.chdir(prev)
+        self.agent = Agent(model=llm, tools=tools, system_prompt=AGENT_SYSTEM_PROMPT,
+                           callback_handler=None)
         self._msg_cursor = 0
 
     def turn(self, user_msg: str, emit) -> None:
-        import os as _os
-        prev = _os.getcwd()
+        # set per-thread workspace so _guarded_shell knows where to run commands.
+        _thread_local.workspace = self.workspace
         try:
-            _os.chdir(self.workspace)
             self.agent(user_msg)
         finally:
-            _os.chdir(prev)
+            pass
         # walk newly-appended messages and map Bedrock-style content blocks
         msgs = getattr(self.agent, "messages", []) or []
         for m in msgs[self._msg_cursor:]:
