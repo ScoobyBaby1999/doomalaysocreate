@@ -1100,6 +1100,22 @@ class Handler(BaseHTTPRequestHandler):
                            f"&provision-detail={_q(str(exc)[:160])}")
             return
 
+        # 5b. Copy GitHub OAuth credentials so users don't need their own OAuth App.
+        #     These are read from this Space's own environment (set by the account owner).
+        gh_client_id = os.environ.get("GITHUB_CLIENT_ID", "").strip()
+        gh_client_secret = os.environ.get("GITHUB_CLIENT_SECRET", "").strip()
+        if gh_client_id and gh_client_secret:
+            for key, val in [("GITHUB_CLIENT_ID", gh_client_id),
+                             ("GITHUB_CLIENT_SECRET", gh_client_secret)]:
+                try:
+                    _hf_api(f"https://huggingface.co/api/spaces/{target_repo}/secrets",
+                            method="POST", token=user_token,
+                            body={"key": key, "value": val})
+                except Exception as exc:
+                    # Non-fatal: GitHub integration won't work but the Space still functions.
+                    log_event("oauth_set_github_secret_error", user=username,
+                              key=key, error=str(exc)[:200])
+
         space_name = target_repo.split("/", 1)[1].lower()
         space_url = f"https://{username.lower()}-{space_name}.hf.space"
         result = {
