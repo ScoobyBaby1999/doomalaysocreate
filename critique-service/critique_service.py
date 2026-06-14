@@ -1365,7 +1365,7 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def _handle_github_login(self) -> None:
-        if not _github_configured():
+        if not github_integration._github_configured():
             self._send_json(503, {"error": "GitHub OAuth not configured "
                                            "(GITHUB_CLIENT_ID missing)"})
             return
