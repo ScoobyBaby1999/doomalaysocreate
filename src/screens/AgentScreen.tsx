@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { Settings } from "../api/panel";
 import {
@@ -121,9 +121,9 @@ export function AgentScreen({
       // Merge: keep optimistic user message if backend hasn't echoed it yet
       setEvents((prev) => {
         const userMsg = prev[prev.length - 1];
-        const hasUserMsg = fresh.events.some(
-          (e) => e.type === "user" && e.text === userMsg?.text,
-        );
+        const hasUserMsg =
+          userMsg?.type === "user" &&
+          fresh.events.some((e) => e.type === "user" && e.text === userMsg.text);
         return hasUserMsg ? fresh.events : [...prev.slice(0, -1), ...fresh.events];
       });
       if (!ac.signal.aborted) {

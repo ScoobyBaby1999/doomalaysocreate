@@ -5,7 +5,7 @@ import hljs from "highlight.js";
 // growing text; marked is string-based (fast enough per flush). We disable raw HTML
 // passthrough to prevent XSS via <script>, <img onerror>, etc. in model output or
 // tool/web results.
-marked.setOptions({
+marked.use({
   gfm: true,
   breaks: false,
   html: false,
