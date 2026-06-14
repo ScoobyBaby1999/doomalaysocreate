@@ -613,11 +613,13 @@ def _oauth_configured() -> bool:
 
 
 def _make_oauth_state(nonce: str, redirect_to: str = "") -> str:
-    """HMAC-signed state token: nonce.timestamp.[redirect_to].sig — verifiable without server storage."""
-    from urllib.parse import quote as _quote
+    """HMAC-signed state token: nonce.timestamp.[redirect_to].sig — verifiable without server storage.
+    redirect_to is base64url-encoded to avoid dots/slashes/colons that would
+    corrupt the dot-delimited rsplit() parsing."""
+    import base64 as _b64
     secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
     ts = str(int(time.time()))
-    redirect_enc = _quote(redirect_to, safe="").replace(".", "%2E") if redirect_to else ""
+    redirect_enc = _b64.urlsafe_b64encode(redirect_to.encode()).decode().rstrip("=") if redirect_to else ""
     data = f"{nonce}.{ts}.{redirect_enc}" if redirect_enc else f"{nonce}.{ts}."
     sig = hmac.new(secret, data.encode(), hashlib.sha256).hexdigest()[:16]
     return f"{data}.{sig}"
@@ -625,19 +627,24 @@ def _make_oauth_state(nonce: str, redirect_to: str = "") -> str:
 
 def _verify_oauth_state(state: str) -> tuple[bool, str]:
     """Returns (valid, redirect_to_url). redirect_to is empty string if not a proxy flow."""
-    from urllib.parse import unquote as _unquote
+    import base64 as _b64
     try:
         parts = state.rsplit(".", 2)
-        if len(parts) == 3:
-            nonce_ts, redirect_to, sig = parts
-        else:
+        if len(parts) != 3:
             return False, ""
-        if abs(time.time() - float(nonce_ts.split(".", 1)[1])) > 600:  # 10-minute window
+        nonce_ts, redirect_enc, sig = parts
+        if abs(time.time() - float(nonce_ts.split(".", 1)[1])) > 600:
             return False, ""
         secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
-        data = f"{nonce_ts}.{redirect_to}"
+        data = f"{nonce_ts}.{redirect_enc}"
         expected = hmac.new(secret, data.encode(), hashlib.sha256).hexdigest()[:16]
-        return hmac.compare_digest(expected, sig), _unquote(redirect_to)
+        if not hmac.compare_digest(expected, sig):
+            return False, ""
+        if not redirect_enc:
+            return True, ""
+        padding = 4 - len(redirect_enc) % 4
+        padded = redirect_enc + "=" * padding if padding != 4 else redirect_enc
+        return True, _b64.urlsafe_b64decode(padded).decode()
     except Exception:
         return False, ""
 
