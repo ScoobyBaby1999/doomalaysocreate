@@ -614,15 +614,18 @@ def _oauth_configured() -> bool:
 
 def _make_oauth_state(nonce: str, redirect_to: str = "") -> str:
     """HMAC-signed state token: nonce.timestamp.[redirect_to].sig — verifiable without server storage."""
+    from urllib.parse import quote as _quote
     secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
     ts = str(int(time.time()))
-    data = f"{nonce}.{ts}.{redirect_to}" if redirect_to else f"{nonce}.{ts}."
+    redirect_enc = _quote(redirect_to, safe="") if redirect_to else ""
+    data = f"{nonce}.{ts}.{redirect_enc}" if redirect_enc else f"{nonce}.{ts}."
     sig = hmac.new(secret, data.encode(), hashlib.sha256).hexdigest()[:16]
     return f"{data}.{sig}"
 
 
 def _verify_oauth_state(state: str) -> tuple[bool, str]:
     """Returns (valid, redirect_to_url). redirect_to is empty string if not a proxy flow."""
+    from urllib.parse import unquote as _unquote
     try:
         parts = state.rsplit(".", 2)
         if len(parts) == 3:
@@ -634,7 +637,7 @@ def _verify_oauth_state(state: str) -> tuple[bool, str]:
         secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
         data = f"{nonce_ts}.{redirect_to}"
         expected = hmac.new(secret, data.encode(), hashlib.sha256).hexdigest()[:16]
-        return hmac.compare_digest(expected, sig), redirect_to
+        return hmac.compare_digest(expected, sig), _unquote(redirect_to)
     except Exception:
         return False, ""
 
@@ -937,7 +940,7 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_github_callback()
             return
         if route.startswith("/api/auth/github/proxy-exchange"):
-            self._handle_github_proxy_exchange(route)
+            self._handle_github_proxy_exchange(self.path)
             return
         if route == "/api/auth/status":
             self._handle_auth_status()
