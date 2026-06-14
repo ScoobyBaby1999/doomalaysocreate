@@ -290,6 +290,20 @@ def init_repo(sandbox: str) -> None:
                    cwd=sandbox, capture_output=True, timeout=10)
 
 
+def checkout_branch(sandbox: str, branch: str) -> None:
+    """Checkout an existing branch or create it from the current HEAD."""
+    import re
+    if not branch or '..' in branch or branch.startswith('-') or ' ' in branch:
+        raise RuntimeError(f"invalid branch name: {branch!r}")
+    if not re.match(r'^[a-zA-Z0-9_./\-]+$', branch):
+        raise RuntimeError(f"invalid branch name: {branch!r}")
+    try:
+        _run_git(sandbox, "checkout", branch)
+    except RuntimeError:
+        # branch doesn't exist locally — create it from HEAD
+        _run_git(sandbox, "checkout", "-b", branch)
+
+
 def commit_changes(sandbox: str, message: str) -> str:
     """Stage all changes and commit.  Returns the new commit SHA."""
     _run_git(sandbox, "add", "-A")

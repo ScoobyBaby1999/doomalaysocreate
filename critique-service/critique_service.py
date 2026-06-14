@@ -811,13 +811,17 @@ class Handler(BaseHTTPRequestHandler):
                     "GET /api/workspaces": "list user's workspaces",
                     "POST /api/workspaces": "create workspace (optionally clone from GitHub repo)",
                     "GET /api/workspaces/<id>": "get workspace details",
-                    "PUT /api/workspaces/<id>": "update workspace settings",
+                    "POST /api/workspaces/<id>/update": "update workspace settings",
                     "DELETE /api/workspaces/<id>": "delete workspace + sandbox",
                     "POST /api/workspaces/<id>/commit": "stage all + commit in workspace",
                     "POST /api/workspaces/<id>/push": "push to remote (queued for approval)",
                     "POST /api/workspaces/<id>/pr": "create pull request (queued for approval)",
                     "POST /api/workspaces/<id>/publish": "publish workspace to public registry",
                     "POST /api/workspaces/<id>/unpublish": "remove workspace from registry",
+                    "POST /api/workspaces/<id>/checkout": "checkout a branch in workspace",
+                    "GET /api/workspaces/<id>/logs": "list push history for workspace",
+                    "GET /api/github/repos/<owner>/<repo>/contents": "fetch file contents from repo",
+                    "GET /api/github/repos/<owner>/<repo>/tree": "fetch repo file tree",
                     "GET /api/registry/spaces": "browse public workspaces",
                     "POST /api/auth/push-requests/<id>/resolve": "approve or reject a push request",
                 },
@@ -935,11 +939,23 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/workspaces":
             self._handle_workspaces_list()
             return
-        if route.startswith("/api/workspaces/") and not route.startswith("/api/workspaces/") is False:
-            ws_id = route[len("/api/workspaces/"):]
-            if "/" not in ws_id:  # /api/workspaces/<id> only (no sub-routes)
+        if route.startswith("/api/workspaces/"):
+            ws_rest = route[len("/api/workspaces/"):]
+            parts = ws_rest.split("/", 1)
+            ws_id = parts[0]
+            sub = parts[1] if len(parts) > 1 else ""
+            if sub == "logs":
+                self._handle_workspace_logs(ws_id)
+                return
+            if sub == "":
                 self._handle_workspace_get(ws_id)
                 return
+        if route.startswith("/api/github/repos/") and route.endswith("/contents"):
+            self._handle_github_contents(route)
+            return
+        if route.startswith("/api/github/repos/") and route.endswith("/tree"):
+            self._handle_github_tree(route)
+            return
         if route == "/api/registry/spaces":
             self._handle_registry_list()
             return
@@ -1108,7 +1124,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- agent orchestrator routes ------------------------------------------
 
     def _handle_agent_post(self, payload: dict) -> None:
-        #   POST /api/agent {message, session_id?} -> 202 {session_id, tier, status}
+        #   POST /api/agent {message, session_id?, workspace_id?} -> 202 {session_id, tier, status}
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
             self._send_json(400, {"error": "'message' (non-empty string) is required"})
@@ -1127,18 +1143,37 @@ class Handler(BaseHTTPRequestHandler):
         if model and not any(m["model"] == model for m in agent_sessions.agent_models()):
             self._send_json(400, {"error": f"model not available: {model}"})
             return
+        # optional workspace_id: link agent to a user workspace sandbox
+        workspace_id = payload.get("workspace_id")
+        workspace_id = workspace_id.strip() if isinstance(workspace_id, str) and workspace_id.strip() else None
+        if workspace_id:
+            ws = db.get_workspace(workspace_id)
+            if not ws:
+                self._send_json(404, {"error": "workspace not found"})
+                return
+            # ownership check: agent must operate in caller's workspace
+            user_id = self._require_user()
+            if not user_id:
+                return
+            if ws["user_id"] != user_id:
+                self._send_json(403, {"error": "access denied"})
+                return
         try:
-            session = agent_sessions.get_or_create(session_id, model)
+            session = agent_sessions.get_or_create(session_id, model,
+                                                   workspace_id=workspace_id)
         except agent_sessions.CapacityError as e:
             self._send_json(429, {"error": str(e)}, headers={"Retry-After": "30"})
             return
         except Exception as e:  # noqa: BLE001
             log_event("agent_create_error", error=repr(e)[:200])
-            self._send_json(500, {"error": f"agent session error: {type(e).__name__}"})
+            self._send_json(500, {"error": "agent session error"})
             return
         session.submit(message.strip())
-        self._send_json(202, {"session_id": session.id, "tier": session.tier,
-                              "model": session.model, "status": session.status})
+        resp = {"session_id": session.id, "tier": session.tier,
+                "model": session.model, "status": session.status}
+        if session.workspace_id:
+            resp["workspace_id"] = session.workspace_id
+        self._send_json(202, resp)
 
     def _handle_agent_get(self, route: str) -> None:
         from urllib.parse import parse_qs, urlsplit
@@ -1577,6 +1612,10 @@ class Handler(BaseHTTPRequestHandler):
         user_id = self._require_user()
         if not user_id:
             return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
         try:
             entry = github_integration.publish_workspace(user_id, ws_id)
             self._send_json(200, entry)
@@ -1584,6 +1623,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(exc)})
 
     def _handle_workspace_unpublish(self, ws_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
         github_integration.unpublish_workspace(ws_id)
         self._send_json(200, {"unpublished": ws_id})
 
@@ -1621,6 +1667,84 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "request not found or already resolved"})
             return
         self._send_json(200, result)
+
+    def _handle_workspace_logs(self, ws_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(self.path).query)
+        try:
+            limit = min(int(qs.get("limit", ["50"])[0]), 200)
+        except (ValueError, IndexError):
+            limit = 50
+        logs = db.list_push_logs(ws_id, limit=limit)
+        self._send_json(200, {"logs": logs})
+
+    def _handle_github_contents(self, route: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        # /api/github/repos/<owner>/<repo>/contents?path=<path>&ref=<ref>
+        parts = route.split("/")
+        if len(parts) < 7:
+            self._send_json(400, {"error": "expected /api/github/repos/<owner>/<repo>/contents"})
+            return
+        owner, repo = parts[3], parts[4]
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(self.path).query)
+        path = qs.get("path", [""])[0]
+        ref = qs.get("ref", ["main"])[0]
+        try:
+            content = github_integration.get_file_content(user_id, owner, repo, path, ref)
+            self._send_json(200, content)
+        except Exception as exc:
+            self._send_json(502, {"error": str(exc)})
+
+    def _handle_github_tree(self, route: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        # /api/github/repos/<owner>/<repo>/tree?ref=<ref>
+        parts = route.split("/")
+        if len(parts) < 7:
+            self._send_json(400, {"error": "expected /api/github/repos/<owner>/<repo>/tree"})
+            return
+        owner, repo = parts[3], parts[4]
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(self.path).query)
+        ref = qs.get("ref", ["main"])[0]
+        try:
+            tree = github_integration.get_repo_tree(user_id, owner, repo, ref)
+            self._send_json(200, {"tree": tree})
+        except Exception as exc:
+            self._send_json(502, {"error": str(exc)})
+
+    def _handle_workspace_checkout(self, ws_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        payload = self._auth_and_body()
+        if payload is None:
+            return
+        branch = payload.get("branch", "").strip()
+        if not branch:
+            self._send_json(400, {"error": "'branch' is required"})
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        try:
+            github_integration.checkout_branch(ws["sandbox_path"], branch)
+            db.update_workspace(ws_id, current_branch=branch)
+            self._send_json(200, {"branch": branch})
+        except Exception as exc:
+            self._send_json(500, {"error": str(exc)})
 
     def _handle_registry_list(self) -> None:
         from urllib.parse import parse_qs, urlsplit
@@ -1686,6 +1810,10 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/api/workspaces/") and route.endswith("/unpublish"):
             ws_id = route[len("/api/workspaces/"):-len("/unpublish")]
             self._handle_workspace_unpublish(ws_id)
+            return
+        if route.startswith("/api/workspaces/") and route.endswith("/checkout"):
+            ws_id = route[len("/api/workspaces/"):-len("/checkout")]
+            self._handle_workspace_checkout(ws_id)
             return
         # -----------------------------------------------------------------------
         if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates",

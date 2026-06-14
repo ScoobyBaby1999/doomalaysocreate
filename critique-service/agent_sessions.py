@@ -467,10 +467,12 @@ def tier_for_model(model: str | None) -> str | None:
 # --------------------------------------------------------------------------
 
 class AgentSession:
-    def __init__(self, tier: str, model: str | None = None):
+    def __init__(self, tier: str, model: str | None = None,
+                 workspace_path: Path | None = None, workspace_id: str | None = None):
         self.id = uuid.uuid4().hex[:16]
         self.tier = tier
         self.model = model
+        self.workspace_id = workspace_id  # links to user's workspace, if any
         self.created = time.time()
         self.updated = self.created
         self.status = "starting"
@@ -480,8 +482,13 @@ class AgentSession:
         self.inbox: queue.Queue = queue.Queue()
         self.adapter: BaseAdapter | None = None
         self._interrupting = False
-        self.workspace = AGENT_ROOT / self.id
-        self.workspace.mkdir(parents=True, exist_ok=True)
+        # use provided workspace path (user's workspace) or create ephemeral one
+        if workspace_path is not None:
+            self.workspace = workspace_path
+            self.workspace.mkdir(parents=True, exist_ok=True)
+        else:
+            self.workspace = AGENT_ROOT / self.id
+            self.workspace.mkdir(parents=True, exist_ok=True)
         self._seed_skills()
         self.thread = threading.Thread(target=self._run, daemon=True,
                                        name=f"agent-{self.id}")
@@ -591,9 +598,11 @@ def get_session(session_id: str) -> AgentSession | None:
 
 
 def get_or_create(session_id: str | None = None,
-                  model: str | None = None) -> AgentSession:
+                  model: str | None = None,
+                  workspace_id: str | None = None) -> AgentSession:
     """Reuse a live session by id, or start a new one (CapacityError if full).
     `model` (optional) selects which model/tier drives a NEW session.
+    `workspace_id` (optional) links the session to a user workspace sandbox.
     """
     tier = tier_for_model(model)
     if tier is None:
@@ -604,6 +613,14 @@ def get_or_create(session_id: str | None = None,
             return _sessions[session_id]
         if len(_sessions) >= MAX_SESSIONS:
             raise CapacityError(f"max {MAX_SESSIONS} concurrent agent sessions")
-        s = AgentSession(tier, model)
+        # resolve workspace_id to a filesystem path
+        workspace_path = None
+        if workspace_id:
+            import db
+            ws = db.get_workspace(workspace_id)
+            if ws and ws.get("sandbox_path"):
+                workspace_path = Path(ws["sandbox_path"])
+        s = AgentSession(tier, model, workspace_path=workspace_path,
+                         workspace_id=workspace_id)
         _sessions[s.id] = s
         return s
