@@ -748,7 +748,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy",
                          "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
                          "img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
-                         "manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+                         "manifest-src 'self'; base-uri 'none'")
         self.end_headers()
         self.wfile.write(body)
         return True
