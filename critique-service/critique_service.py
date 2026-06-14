@@ -745,6 +745,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "public, max-age=31536000, immutable")
         else:
             self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                         "img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
+                         "manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
         return True
