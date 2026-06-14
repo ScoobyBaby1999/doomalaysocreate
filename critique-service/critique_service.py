@@ -612,26 +612,31 @@ def _oauth_configured() -> bool:
     return bool(os.environ.get("OAUTH_CLIENT_ID", "").strip())
 
 
-def _make_oauth_state(nonce: str) -> str:
-    """HMAC-signed state token: nonce.timestamp.sig — verifiable without server storage."""
+def _make_oauth_state(nonce: str, redirect_to: str = "") -> str:
+    """HMAC-signed state token: nonce.timestamp.[redirect_to].sig — verifiable without server storage."""
     secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
     ts = str(int(time.time()))
-    data = f"{nonce}.{ts}"
+    data = f"{nonce}.{ts}.{redirect_to}" if redirect_to else f"{nonce}.{ts}."
     sig = hmac.new(secret, data.encode(), hashlib.sha256).hexdigest()[:16]
     return f"{data}.{sig}"
 
 
-def _verify_oauth_state(state: str) -> bool:
+def _verify_oauth_state(state: str) -> tuple[bool, str]:
+    """Returns (valid, redirect_to_url). redirect_to is empty string if not a proxy flow."""
     try:
-        nonce, ts, sig = state.rsplit(".", 2)
-        if abs(time.time() - float(ts)) > 600:  # 10-minute window
-            return False
+        parts = state.rsplit(".", 2)
+        if len(parts) == 3:
+            nonce_ts, redirect_to, sig = parts
+        else:
+            return False, ""
+        if abs(time.time() - float(nonce_ts.split(".", 1)[1])) > 600:  # 10-minute window
+            return False, ""
         secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
-        data = f"{nonce}.{ts}"
+        data = f"{nonce_ts}.{redirect_to}"
         expected = hmac.new(secret, data.encode(), hashlib.sha256).hexdigest()[:16]
-        return hmac.compare_digest(expected, sig)
+        return hmac.compare_digest(expected, sig), redirect_to
     except Exception:
-        return False
+        return False, ""
 
 
 def _hf_api(url: str, *, method: str = "GET", token: str = "",
@@ -1009,7 +1014,7 @@ class Handler(BaseHTTPRequestHandler):
         if error_param:
             self._redirect(f"https://{host}/#provision-error={error_param}")
             return
-        if not code or not state or not _verify_oauth_state(state):
+        if not code or not state or not _verify_oauth_state(state)[0]:
             self._redirect(f"https://{host}/#provision-error=invalid_state")
             return
 
@@ -1385,8 +1390,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(503, {"error": "GitHub OAuth not configured "
                                            "(GITHUB_CLIENT_ID missing)"})
             return
+        # Accept redirect_to for proxy flow: user's Space sends us their URL
+        # so we can forward the callback back to them after GitHub auth.
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(self.path).query)
+        redirect_to = (qs.get("redirect_to", [""])[0] or "").strip()
         nonce = secrets.token_urlsafe(16)
-        state = _make_oauth_state(nonce)
+        state = _make_oauth_state(nonce, redirect_to)
         url = github_integration.make_github_authorize_url(state)
         self._redirect(url)
 
@@ -1398,16 +1408,31 @@ class Handler(BaseHTTPRequestHandler):
         error_param = (qs.get("error", [""])[0] or "").strip()
         host = self._space_host()
 
+        valid, redirect_to = _verify_oauth_state(state) if state else (False, "")
+
         if error_param:
-            self._redirect(f"https://{host}/#github-error={error_param}")
+            # If we have a redirect_to, forward the error there
+            if redirect_to:
+                self._redirect(f"{redirect_to}#github-error={error_param}")
+            else:
+                self._redirect(f"https://{host}/#github-error={error_param}")
             return
-        if not code or not state or not _verify_oauth_state(state):
-            self._redirect(f"https://{host}/#github-error=invalid_state")
+        if not code or not state or not valid:
+            if redirect_to:
+                self._redirect(f"{redirect_to}#github-error=invalid_state")
+            else:
+                self._redirect(f"https://{host}/#github-error=invalid_state")
             return
+
+        # Proxy flow: forward the code to the user's Space
+        if redirect_to:
+            self._redirect(f"{redirect_to}#github-code={code}&state={state}")
+            return
+
+        # Direct flow (main Space): exchange code and complete
         try:
             gh_token = github_integration.exchange_github_code(code)
             user = github_integration.upsert_user_from_github(gh_token)
-            # redirect back to frontend with session_id (= user id)
             self._redirect(f"https://{host}/#github-connected={user['id']}")
         except Exception as exc:
             log_event("github_oauth_error", error=str(exc)[:200])
