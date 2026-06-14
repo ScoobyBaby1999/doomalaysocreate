@@ -2,13 +2,15 @@ import { marked } from "marked";
 import hljs from "highlight.js";
 
 // Render markdown to HTML with code highlighting. During streaming we call this on the
-// growing text; marked is string-based (fast enough per flush). We disable raw HTML
-// passthrough to prevent XSS via <script>, <img onerror>, etc. in model output or
-// tool/web results.
+// growing text; marked is string-based (fast enough per flush). We override the renderer
+// to drop raw HTML tokens, preventing XSS via <script>, <img onerror>, etc. in model
+// output or tool/web results.
 marked.use({
   gfm: true,
   breaks: false,
-  html: false,
+  renderer: {
+    html: () => "",
+  },
 });
 
 export function renderMarkdown(src: string): string {
