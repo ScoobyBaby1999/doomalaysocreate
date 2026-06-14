@@ -617,7 +617,7 @@ def _make_oauth_state(nonce: str, redirect_to: str = "") -> str:
     from urllib.parse import quote as _quote
     secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
     ts = str(int(time.time()))
-    redirect_enc = _quote(redirect_to, safe="") if redirect_to else ""
+    redirect_enc = _quote(redirect_to, safe="").replace(".", "%2E") if redirect_to else ""
     data = f"{nonce}.{ts}.{redirect_enc}" if redirect_enc else f"{nonce}.{ts}."
     sig = hmac.new(secret, data.encode(), hashlib.sha256).hexdigest()[:16]
     return f"{data}.{sig}"
