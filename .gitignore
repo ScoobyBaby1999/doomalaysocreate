@@ -6,3 +6,8 @@ reference/timemanager/backend/outputs/
 # runtime job/metrics state (never commit)
 critique-service/data/
 app/
+
+.env
+.rotation_secret
+*.db
+__pycache__/

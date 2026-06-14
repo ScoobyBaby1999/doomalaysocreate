@@ -14,6 +14,8 @@ from pathlib import Path
 
 import agent_sessions
 import authtoken
+import db
+import github_integration
 import orchestrate
 from content.roles import make_prompt
 from jobs import JobCapExceeded, JobRunner, finalize_judges, run_panel_slots
@@ -799,8 +801,28 @@ class Handler(BaseHTTPRequestHandler):
                     "GET /oauth/callback": "HF OAuth callback — provisions user Space",
                     "GET /oauth/result/<token>": "exchange one-time token for provision result",
                     "POST /oauth/set-provider-key": "set a provider API key on the user's Space via HF API",
+                    # GitHub integration
+                    "GET /api/auth/github/login": "start GitHub OAuth flow (redirects to GitHub)",
+                    "GET /api/auth/github/callback": "GitHub OAuth callback — stores encrypted token",
+                    "POST /api/auth/github/disconnect": "remove stored GitHub token",
+                    "GET /api/auth/status": "check GitHub + HF auth status",
+                    "GET /api/github/repos": "list authenticated user's GitHub repos",
+                    "GET /api/github/repos/<owner>/<repo>/branches": "list branches for a repo",
+                    "GET /api/workspaces": "list user's workspaces",
+                    "POST /api/workspaces": "create workspace (optionally clone from GitHub repo)",
+                    "GET /api/workspaces/<id>": "get workspace details",
+                    "PUT /api/workspaces/<id>": "update workspace settings",
+                    "DELETE /api/workspaces/<id>": "delete workspace + sandbox",
+                    "POST /api/workspaces/<id>/commit": "stage all + commit in workspace",
+                    "POST /api/workspaces/<id>/push": "push to remote (queued for approval)",
+                    "POST /api/workspaces/<id>/pr": "create pull request (queued for approval)",
+                    "POST /api/workspaces/<id>/publish": "publish workspace to public registry",
+                    "POST /api/workspaces/<id>/unpublish": "remove workspace from registry",
+                    "GET /api/registry/spaces": "browse public workspaces",
+                    "POST /api/auth/push-requests/<id>/resolve": "approve or reject a push request",
                 },
                 "oauth_configured": _oauth_configured(),
+                "github_configured": github_integration._github_configured(),
                 #   agentic orchestrator tier: "claude" (ANTHROPIC_API_KEY + SDK),
                 #   "open" (free provider key + OpenHands SDK), or null.
                 "agent": agent_sessions.agent_tier(),
@@ -894,6 +916,38 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/oauth/result/"):
             self._handle_oauth_result(route[len("/oauth/result/"):])
             return
+        # --- GitHub integration routes -------------------------------------------
+        if route == "/api/auth/github/login":
+            self._handle_github_login()
+            return
+        if route == "/api/auth/github/callback":
+            self._handle_github_callback()
+            return
+        if route == "/api/auth/status":
+            self._handle_auth_status()
+            return
+        if route == "/api/github/repos":
+            self._handle_github_repos()
+            return
+        if route.startswith("/api/github/repos/") and route.endswith("/branches"):
+            self._handle_github_branches(route)
+            return
+        if route == "/api/workspaces":
+            self._handle_workspaces_list()
+            return
+        if route.startswith("/api/workspaces/") and not route.startswith("/api/workspaces/") is False:
+            ws_id = route[len("/api/workspaces/"):]
+            if "/" not in ws_id:  # /api/workspaces/<id> only (no sub-routes)
+                self._handle_workspace_get(ws_id)
+                return
+        if route == "/api/registry/spaces":
+            self._handle_registry_list()
+            return
+        if route.startswith("/api/auth/push-requests/"):
+            req_id = route[len("/api/auth/push-requests/"):]
+            self._handle_push_request_status(req_id)
+            return
+        # -----------------------------------------------------------------------
         if not route.startswith("/api") and self._serve_static(urlsplit(self.path).path):
             return
         self._send_json(404, {"error": "not found"})
@@ -1254,6 +1308,331 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_json(200, {"ok": True, "set": key_name, "repo": repo})
 
+    # --- GitHub integration handlers ------------------------------------------
+
+    def _require_user(self) -> str | None:
+        """Extract user_id from the bearer token.  Returns None and sends error
+        if auth is missing or user not found.  Does NOT auto-create users —
+        only tokens from completed GitHub or HF OAuth flows are accepted."""
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            self._send_json(401, {"error": "missing bearer token"})
+            return None
+        token = auth[len("Bearer "):].strip()
+        if not token:
+            self._send_json(401, {"error": "empty bearer token"})
+            return None
+        # check if this is a known user (token == session_id for now)
+        user = db.get_user(token)
+        if user:
+            return user["id"]
+        self._send_json(401, {"error": "unknown session — complete GitHub OAuth first"})
+        return None
+
+    def _handle_github_login(self) -> None:
+        if not _github_configured():
+            self._send_json(503, {"error": "GitHub OAuth not configured "
+                                           "(GITHUB_CLIENT_ID missing)"})
+            return
+        nonce = secrets.token_urlsafe(16)
+        state = _make_oauth_state(nonce)
+        url = github_integration.make_github_authorize_url(state)
+        self._redirect(url)
+
+    def _handle_github_callback(self) -> None:
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(self.path).query)
+        code = (qs.get("code", [""])[0] or "").strip()
+        state = (qs.get("state", [""])[0] or "").strip()
+        error_param = (qs.get("error", [""])[0] or "").strip()
+        host = self._space_host()
+
+        if error_param:
+            self._redirect(f"https://{host}/#github-error={error_param}")
+            return
+        if not code or not state or not _verify_oauth_state(state):
+            self._redirect(f"https://{host}/#github-error=invalid_state")
+            return
+        try:
+            gh_token = github_integration.exchange_github_code(code)
+            user = github_integration.upsert_user_from_github(gh_token)
+            # redirect back to frontend with session_id (= user id)
+            self._redirect(f"https://{host}/#github-connected={user['id']}")
+        except Exception as exc:
+            log_event("github_oauth_error", error=str(exc)[:200])
+            self._redirect(f"https://{host}/#github-error=token_exchange_failed")
+
+    def _handle_github_disconnect(self) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        db.delete_github_token(user_id)
+        self._send_json(200, {"disconnected": True})
+
+    def _handle_auth_status(self) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        user = db.get_user(user_id)
+        self._send_json(200, {
+            "authenticated": bool(user and user.get("github_token_encrypted")),
+            "github_username": user.get("github_username") if user else None,
+            "hf_username": user.get("hf_username") if user else None,
+        })
+
+    def _handle_github_repos(self) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        try:
+            repos = github_integration.list_user_repos(user_id)
+            self._send_json(200, {"repos": repos})
+        except Exception as exc:
+            self._send_json(502, {"error": str(exc)})
+
+    def _handle_github_branches(self, route: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        # /api/github/repos/<owner>/<repo>/branches
+        parts = route.split("/")
+        if len(parts) < 7:
+            self._send_json(400, {"error": "expected /api/github/repos/<owner>/<repo>/branches"})
+            return
+        owner, repo = parts[3], parts[4]
+        try:
+            branches = github_integration.list_repo_branches(user_id, owner, repo)
+            self._send_json(200, {"branches": branches})
+        except Exception as exc:
+            self._send_json(502, {"error": str(exc)})
+
+    def _handle_workspaces_list(self) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        workspaces = github_integration.list_workspaces(user_id)
+        self._send_json(200, {"workspaces": workspaces})
+
+    def _handle_workspace_get(self, ws_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        ws = github_integration.get_workspace(ws_id)
+        if not ws:
+            self._send_json(404, {"error": "workspace not found"})
+            return
+        if ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        self._send_json(200, ws)
+
+    def _handle_workspace_create(self) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        payload = self._auth_and_body()
+        if payload is None:
+            return
+        title = payload.get("title", "").strip()
+        if not title:
+            self._send_json(400, {"error": "'title' is required"})
+            return
+        try:
+            ws = github_integration.create_workspace(
+                user_id, title=title,
+                description=payload.get("description", ""),
+                source_repo=payload.get("source_repo"),
+                source_branch=payload.get("source_branch"),
+                visibility=payload.get("visibility", "private"),
+                auto_sync=bool(payload.get("auto_sync")))
+            self._send_json(201, ws)
+        except Exception as exc:
+            self._send_json(500, {"error": str(exc)})
+
+    def _handle_workspace_update(self, ws_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        payload = self._auth_and_body()
+        if payload is None:
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        try:
+            ws = github_integration.update_workspace(ws_id, **payload)
+            self._send_json(200, ws)
+        except Exception as exc:
+            self._send_json(500, {"error": str(exc)})
+
+    def _handle_workspace_delete(self, ws_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        if github_integration.delete_workspace(ws_id):
+            self._send_json(200, {"deleted": ws_id})
+        else:
+            self._send_json(404, {"error": "workspace not found"})
+
+    def _handle_workspace_commit(self, ws_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        payload = self._auth_and_body()
+        if payload is None:
+            return
+        message = payload.get("message", "").strip()
+        if not message:
+            self._send_json(400, {"error": "'message' (commit message) is required"})
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        try:
+            sha = github_integration.commit_changes(ws["sandbox_path"], message)
+            self._send_json(200, {"commit_sha": sha})
+        except Exception as exc:
+            self._send_json(500, {"error": str(exc)})
+
+    def _handle_workspace_push(self, ws_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        payload = self._auth_and_body()
+        if payload is None:
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        branch = payload.get("branch", ws.get("current_branch", "main"))
+        force = bool(payload.get("force", False))
+        auto = bool(payload.get("auto_approve", False))
+        if auto:
+            # auto-approve: push directly
+            try:
+                sha = github_integration.push_to_remote(
+                    user_id, ws_id, branch, force=force)
+                self._send_json(200, {"commit_sha": sha, "branch": branch})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+        else:
+            # queue for user approval
+            action = "git_force_push" if force else "git_push"
+            rid = github_integration.enqueue_push_request(
+                user_id, ws_id, action, branch=branch)
+            self._send_json(202, {
+                "status": "pending_approval",
+                "request_id": rid,
+                "action": action,
+                "branch": branch,
+            })
+
+    def _handle_workspace_pr(self, ws_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        payload = self._auth_and_body()
+        if payload is None:
+            return
+        title = payload.get("title", "").strip()
+        if not title:
+            self._send_json(400, {"error": "'title' is required for PR"})
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        auto = bool(payload.get("auto_approve", False))
+        if auto:
+            try:
+                result = github_integration.create_pull_request(
+                    user_id, ws_id, title=title,
+                    body=payload.get("body", ""),
+                    head_branch=payload.get("head_branch", "main"),
+                    base_branch=payload.get("base_branch", "main"))
+                self._send_json(200, result)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+        else:
+            rid = github_integration.enqueue_push_request(
+                user_id, ws_id, "gh_pr_create",
+                title=title, body=payload.get("body", ""),
+                head_branch=payload.get("head_branch", "main"),
+                base_branch=payload.get("base_branch", "main"))
+            self._send_json(202, {
+                "status": "pending_approval",
+                "request_id": rid,
+                "action": "gh_pr_create",
+                "title": title,
+            })
+
+    def _handle_workspace_publish(self, ws_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        try:
+            entry = github_integration.publish_workspace(user_id, ws_id)
+            self._send_json(200, entry)
+        except Exception as exc:
+            self._send_json(500, {"error": str(exc)})
+
+    def _handle_workspace_unpublish(self, ws_id: str) -> None:
+        github_integration.unpublish_workspace(ws_id)
+        self._send_json(200, {"unpublished": ws_id})
+
+    def _handle_push_request_status(self, req_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        from github_integration import _approval_queue, _approval_lock
+        with _approval_lock:
+            req = _approval_queue.get(req_id)
+        if req is None:
+            self._send_json(404, {"error": "request not found or already resolved"})
+            return
+        if req["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        self._send_json(200, {
+            "status": "pending_approval",
+            "request_id": req_id,
+            "action": req["action"],
+            "created_at": req["created_at"],
+        })
+
+    def _handle_push_request_resolve(self, req_id: str) -> None:
+        user_id = self._require_user()
+        if not user_id:
+            return
+        payload = self._auth_and_body()
+        if payload is None:
+            return
+        approved = bool(payload.get("approved", False))
+        # ownership check is done inside resolve_push_request
+        result = github_integration.resolve_push_request(req_id, approved, user_id)
+        if result is None:
+            self._send_json(404, {"error": "request not found or already resolved"})
+            return
+        self._send_json(200, result)
+
+    def _handle_registry_list(self) -> None:
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(self.path).query)
+        page = int(qs.get("page", ["1"])[0])
+        per_page = int(qs.get("per_page", ["20"])[0])
+        sort = qs.get("sort", ["recent"])[0]
+        search = qs.get("search", [""])[0]
+        result = github_integration.list_registry(
+            page=page, per_page=per_page, sort=sort, search=search)
+        self._send_json(200, result)
+
     def do_POST(self) -> None:
         route = self.path.rstrip("/")
         if route == "/oauth/set-provider-key":
@@ -1273,6 +1652,42 @@ class Handler(BaseHTTPRequestHandler):
             stopped = session.interrupt()
             self._send_json(200, {"interrupted": stopped, "status": session.status})
             return
+        # --- GitHub integration POST routes --------------------------------------
+        if route == "/api/auth/github/disconnect":
+            self._handle_github_disconnect()
+            return
+        if route == "/api/workspaces":
+            self._handle_workspace_create()
+            return
+        if route.startswith("/api/workspaces/") and route.endswith("/commit"):
+            ws_id = route[len("/api/workspaces/"):-len("/commit")]
+            self._handle_workspace_commit(ws_id)
+            return
+        if route.startswith("/api/workspaces/") and route.endswith("/push"):
+            ws_id = route[len("/api/workspaces/"):-len("/push")]
+            self._handle_workspace_push(ws_id)
+            return
+        if route.startswith("/api/workspaces/") and route.endswith("/pr"):
+            ws_id = route[len("/api/workspaces/"):-len("/pr")]
+            self._handle_workspace_pr(ws_id)
+            return
+        if route.startswith("/api/workspaces/") and route.endswith("/publish"):
+            ws_id = route[len("/api/workspaces/"):-len("/publish")]
+            self._handle_workspace_publish(ws_id)
+            return
+        if route.startswith("/api/auth/push-requests/") and route.endswith("/resolve"):
+            req_id = route[len("/api/auth/push-requests/"):-len("/resolve")]
+            self._handle_push_request_resolve(req_id)
+            return
+        if route.startswith("/api/workspaces/") and route.endswith("/update"):
+            ws_id = route[len("/api/workspaces/"):-len("/update")]
+            self._handle_workspace_update(ws_id)
+            return
+        if route.startswith("/api/workspaces/") and route.endswith("/unpublish"):
+            ws_id = route[len("/api/workspaces/"):-len("/unpublish")]
+            self._handle_workspace_unpublish(ws_id)
+            return
+        # -----------------------------------------------------------------------
         if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates",
                          "/api/agent"):
             self._send_json(404, {"error": "not found"})
@@ -1336,11 +1751,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
-        if not route.startswith("/api/templates/"):
-            self._send_json(404, {"error": "not found"})
-            return
         if not _token_ok(self.headers.get("Authorization")):
             self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        # workspace deletion
+        if route.startswith("/api/workspaces/"):
+            ws_id = route[len("/api/workspaces/"):]
+            if ws_id:
+                self._handle_workspace_delete(ws_id)
+                return
+        # template deletion
+        if not route.startswith("/api/templates/"):
+            self._send_json(404, {"error": "not found"})
             return
         panel: Panel = self.server.panel  # type: ignore[attr-defined]
         tid = route[len("/api/templates/"):]
@@ -1545,6 +1967,9 @@ def main() -> int:
     panel = Panel()
     if not panel.providers:
         log_event("startup_warning", msg="no providers have API keys - every judge will fail")
+
+    # initialize SQLite database for GitHub integration
+    db.init_db()
 
     server = BoundedThreadingHTTPServer((host, port), Handler, max_workers=MAX_WORKERS)
     server.panel = panel  # type: ignore[attr-defined]

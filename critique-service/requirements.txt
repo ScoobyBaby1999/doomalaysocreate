@@ -2,6 +2,8 @@ httpx>=0.27
 # optional: only used when METRICS_HF_REPO is set (durable per-profile metrics).
 # the import is guarded so the service still runs in-memory without it.
 huggingface_hub>=0.23
+# token encryption at rest for GitHub/HF OAuth tokens (Fernet = AES-128-CBC + HMAC).
+cryptography>=42.0
 
 # --- agent orchestrator: Claude tier ---
 # The official Agent SDK bundles the Claude Code CLI inside the wheel (a

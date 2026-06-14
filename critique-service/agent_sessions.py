@@ -37,7 +37,7 @@ from pathlib import Path
 
 AGENT_ROOT = Path(os.environ.get("AGENT_ROOT", "/tmp/agent"))
 SESSION_TTL_S = int(os.environ.get("AGENT_SESSION_TTL_S", "7200"))   # 2h idle
-MAX_SESSIONS = int(os.environ.get("AGENT_MAX_SESSIONS", "4"))        # RAM bound
+MAX_SESSIONS = int(os.environ.get("AGENT_MAX_SESSIONS", "8"))        # RAM bound
 MAX_EVENT_CHARS = int(os.environ.get("AGENT_MAX_EVENT_CHARS", "4000"))
 MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", "50"))
 
@@ -297,16 +297,30 @@ class ClaudeAdapter(BaseAdapter):
 
 
 def _guarded_shell(**kwargs):
-    """Wrap the Strands shell tool to force execution in the session workspace.
+    """Wrap the Strands shell tool: force workspace dir + intercept git commands.
 
-    The Strands shell tool accepts a ``workdir`` kwarg, but we can't trust the
-    LLM to always pass it (or to pass the *right* value).  This wrapper
-    overrides ``workdir`` with the workspace stored in thread-local storage,
-    eliminating the need for a process-wide ``os.chdir()`` that would break
-    concurrent sessions.
+    1. Overrides ``workdir`` with the session workspace from thread-local storage.
+    2. Checks the command against the git interception layer — blocked/approval-
+       required commands return an error result instead of executing.
     """
     from strands_tools import shell as _shell
+    from git_intercept import check_command
+
     kwargs["workdir"] = str(getattr(_thread_local, "workspace", Path.cwd()))
+
+    # git command interception: check before execution
+    cmd = kwargs.get("command", "")
+    if isinstance(cmd, str) and cmd.strip():
+        verdict = check_command(cmd)
+        if not verdict.allowed:
+            return {
+                "status": "error",
+                "content": [{"text": (
+                    f"Command requires user approval: {verdict.action}\n"
+                    f"Original command: {verdict.command}\n"
+                    f"This action has been queued for user review."
+                )}],
+            }
     return _shell.tool(**kwargs)
 
 
