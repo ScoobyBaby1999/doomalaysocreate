@@ -932,6 +932,9 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/auth/github/callback":
             self._handle_github_callback()
             return
+        if route.startswith("/api/auth/github/proxy-exchange"):
+            self._handle_github_proxy_exchange(route)
+            return
         if route == "/api/auth/status":
             self._handle_auth_status()
             return
@@ -1437,6 +1440,29 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             log_event("github_oauth_error", error=str(exc)[:200])
             self._redirect(f"https://{host}/#github-error=token_exchange_failed")
+
+    def _handle_github_proxy_exchange(self, route: str) -> None:
+        """Exchange a GitHub OAuth code received via the proxy flow.
+        Called by the frontend when it receives #github-code=<code>&state=<state>."""
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(route).query)
+        code = (qs.get("code", [""])[0] or "").strip()
+        state = (qs.get("state", [""])[0] or "").strip()
+
+        if not code or not state:
+            self._send_json(400, {"error": "missing code or state"})
+            return
+        valid, _ = _verify_oauth_state(state)
+        if not valid:
+            self._send_json(400, {"error": "invalid or expired state"})
+            return
+        try:
+            gh_token = github_integration.exchange_github_code(code)
+            user = github_integration.upsert_user_from_github(gh_token)
+            self._send_json(200, {"session_id": user["id"]})
+        except Exception as exc:
+            log_event("github_proxy_exchange_error", error=str(exc)[:200])
+            self._send_json(500, {"error": "token exchange failed"})
 
     def _handle_github_disconnect(self) -> None:
         user_id = self._require_user()
