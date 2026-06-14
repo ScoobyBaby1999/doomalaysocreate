@@ -42,11 +42,13 @@ export function GithubConnect({ settings, onConnected }: Props) {
   }, [settings.githubSessionId]);
 
   function handleConnect() {
-    // Generate CSRF state parameter and store for verification on callback
-    const state = crypto.randomUUID();
-    sessionStorage.setItem("github_oauth_state", state);
-    // redirect to backend GitHub OAuth with state — on return, App.tsx verifies and picks up the hash
-    window.location.href = client.loginUrl() + "?state=" + encodeURIComponent(state);
+    // OAuth proxy flow: redirect to the main Space's login endpoint which handles
+    // the GitHub OAuth and forwards the callback back to this user's Space.
+    // The main Space has the registered callback URL on GitHub.
+    const MAIN_SPACE = "https://scoobybaby1999-loom.hf.space";
+    const thisSpace = window.location.origin;
+    const loginUrl = `${MAIN_SPACE}/api/auth/github/login?redirect_to=${encodeURIComponent(thisSpace)}`;
+    window.location.href = loginUrl;
   }
 
   async function handleDisconnect() {

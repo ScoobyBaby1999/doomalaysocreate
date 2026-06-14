@@ -5,6 +5,7 @@ import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { AgentScreen } from "./screens/AgentScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
+import { exchangeGitHubCode } from "./api/github";
 import type { Settings } from "./api/panel";
 
 type Tab = "chat" | "agent" | "workspaces" | "settings";
@@ -15,12 +16,14 @@ export default function App() {
   const [manualSetup, setManualSetup] = useState(false);
   const [tab, setTab] = useState<Tab>(hasCredentials ? "chat" : "settings");
 
-  // Handle GitHub OAuth callback hash (#github-connected=<id>&state=<state> or #github-error=...)
+  // Handle GitHub OAuth callback hash
+  // Formats: #github-connected=<id> (direct), #github-code=<code>&state=<state> (proxy), #github-error=...
   useEffect(() => {
     const hash = window.location.hash.slice(1);
     if (!hash) return;
     const params = new URLSearchParams(hash);
     const githubId = params.get("github-connected");
+    const githubCode = params.get("github-code");
     const githubError = params.get("github-error");
     const state = params.get("state");
 
@@ -28,15 +31,19 @@ export default function App() {
     history.replaceState(null, "", window.location.pathname + window.location.search);
 
     if (githubId) {
-      // Verify OAuth state parameter to prevent session fixation
-      const expectedState = sessionStorage.getItem("github_oauth_state");
-      sessionStorage.removeItem("github_oauth_state");
-      if (!expectedState || state !== expectedState) {
-        console.error("GitHub OAuth state mismatch — possible CSRF attack");
-        return;
-      }
+      // Direct flow (main Space): session ID returned directly
       setSettings({ ...settings, githubSessionId: githubId });
       setTab("workspaces");
+    } else if (githubCode && state) {
+      // Proxy flow: exchange code for token via this Space's backend
+      exchangeGitHubCode(githubCode, state, settings.baseUrl).then((result) => {
+        if (result.session_id) {
+          setSettings({ ...settings, githubSessionId: result.session_id });
+          setTab("workspaces");
+        }
+      }).catch((e) => {
+        console.error("GitHub code exchange failed:", e);
+      });
     } else if (githubError) {
       console.error("GitHub OAuth error:", githubError);
     }

@@ -333,3 +333,26 @@ export class GitHubClient {
     return this.req<RegistryPage>(`/api/registry/spaces${qs ? "?" + qs : ""}`);
   }
 }
+
+/** Exchange a GitHub OAuth code for a session ID via the backend.
+ *  Used by the proxy flow where the main Space forwards the callback to user Spaces. */
+export async function exchangeGitHubCode(
+  code: string,
+  state: string,
+  baseUrl: string,
+): Promise<{ session_id: string }> {
+  const r = await fetch(
+    `${baseUrl}/api/auth/github/proxy-exchange?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+  );
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j?.error) msg = j.error;
+    } catch {
+      /* non-json */
+    }
+    throw new ApiError(r.status, msg);
+  }
+  return r.json() as Promise<{ session_id: string }>;
+}
