@@ -9,6 +9,8 @@ export interface Settings {
   baseUrl: string; // "" when served by the gateway itself, "/backend" in dev (proxied), or "https://<space>.hf.space"
   token: string; // static CRITIQUE_TOKEN, or a gen_token.py windowed token
   rotationSecret: string; // CRITIQUE_ROTATION_SECRET; preferred - wire token derived per call
+  githubSessionId?: string; // user_id from GitHub OAuth — bearer for /api/auth/*, /api/workspaces/*
+  githubUsername?: string; // cached GitHub username for display
 }
 
 export interface JudgeProgress {

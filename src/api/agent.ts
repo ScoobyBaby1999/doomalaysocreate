@@ -46,6 +46,7 @@ export interface AgentStart {
   tier: "claude" | "open" | "mock";
   model: string | null;
   status: AgentStatus;
+  workspace_id?: string;
 }
 
 export interface AgentFile {
@@ -103,11 +104,13 @@ export class AgentClient {
   }
 
   /** Start a new session, or continue an existing one if sessionId is given.
-   *  `model` selects which model/tier drives a NEW session. */
-  send(message: string, sessionId?: string, model?: string) {
+   *  `model` selects which model/tier drives a NEW session.
+   *  `workspaceId` links the agent to a user workspace sandbox. */
+  send(message: string, sessionId?: string, model?: string, workspaceId?: string) {
     const body: Record<string, unknown> = { message };
     if (sessionId) body.session_id = sessionId;
     if (model) body.model = model;
+    if (workspaceId) body.workspace_id = workspaceId;
     return this.req<AgentStart>("/api/agent", {
       method: "POST",
       body: JSON.stringify(body),
@@ -122,7 +125,10 @@ export class AgentClient {
     );
   }
 
-  /** Poll the transcript; `since` is the cursor returned as `next` last time. */
+  /** Poll the transcript; `since` is the cursor returned as `next` last time.
+   *  NOTE: Session ID is in the URL path (not a header) because GET requests can't
+   *  have bodies. Backend logs should redact session IDs to prevent leakage via
+   *  proxy/CDN access logs. A future improvement could use short-lived signed tokens. */
   poll(sessionId: string, since: number) {
     return this.req<AgentSnapshot>(`/api/agent/${sessionId}?since=${since}`);
   }

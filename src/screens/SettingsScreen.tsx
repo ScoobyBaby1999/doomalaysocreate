@@ -13,6 +13,7 @@ export function SettingsScreen({
   const [draft, setDraft] = useState<Settings>(settings);
   const [status, setStatus] = useState<string>("");
   const [frontier, setFrontier] = useState<string>("");
+  const [confirmLogout, setConfirmLogout] = useState(false);
 
   useEffect(() => setDraft(settings), [settings]);
 
@@ -32,6 +33,20 @@ export function SettingsScreen({
     } catch (e) {
       setStatus("✗ " + (e instanceof Error ? e.message : String(e)));
     }
+  }
+
+  function handleLogout() {
+    if (!confirmLogout) {
+      setConfirmLogout(true);
+      return;
+    }
+    // Clear all stored credentials and reload
+    localStorage.removeItem("loom.settings.v1");
+    localStorage.removeItem("loom.settings.expiry");
+    localStorage.removeItem("loom.agent.session");
+    localStorage.removeItem("loom.agent.model");
+    sessionStorage.clear();
+    window.location.reload();
   }
 
   const field = "w-full bg-surface border border-border rounded-xl px-3 py-2 text-[15px] outline-none focus:border-accent";
@@ -93,6 +108,41 @@ export function SettingsScreen({
       </button>
       {status && <p className="text-sm">{status}</p>}
       {frontier && <p className="text-sm text-muted">{frontier}</p>}
+
+      {/* Logout / Danger Zone */}
+      <div className="border-t border-border pt-5 mt-5">
+        <h3 className="text-sm font-medium text-rose-300 mb-2">Account</h3>
+        <p className="text-[11px] text-muted mb-3">
+          Sign out and clear all stored credentials from this device. You'll need to
+          reconnect GitHub and re-enter your settings.
+        </p>
+        {confirmLogout ? (
+          <div className="space-y-2">
+            <p className="text-sm text-rose-300">Are you sure? This will reload the app.</p>
+            <div className="flex gap-2">
+              <button
+                onClick={handleLogout}
+                className="flex-1 py-1.5 rounded-lg bg-rose-600 text-white text-sm"
+              >
+                Yes, log out
+              </button>
+              <button
+                onClick={() => setConfirmLogout(false)}
+                className="flex-1 py-1.5 rounded-lg border border-border text-sm"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={handleLogout}
+            className="w-full py-1.5 rounded-lg border border-rose-500/40 text-rose-300 text-sm hover:bg-rose-500/10"
+          >
+            Log out & clear credentials
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { Settings } from "../api/panel";
 import {
@@ -14,8 +14,15 @@ const MODEL_KEY = "loom.agent.model";
 
 /** The agent tab: a chat with the orchestrator running inside the user's Space.
  *  A model picker chooses which frontier model drives it (Claude via its SDK,
- *  others via the open agent once that SDK lands). */
-export function AgentScreen({ settings }: { settings: Settings }) {
+ *  others via the open agent once that SDK lands).
+ *  When workspaceId is provided, the agent operates in that workspace's sandbox. */
+export function AgentScreen({
+  settings,
+  workspaceId,
+}: {
+  settings: Settings;
+  workspaceId?: string;
+}) {
   const [models, setModels] = useState<AgentModel[] | null>(null);
   const [selected, setSelected] = useState<string>(localStorage.getItem(MODEL_KEY) || "");
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -30,6 +37,7 @@ export function AgentScreen({ settings }: { settings: Settings }) {
   const listRef = useRef<VirtuosoHandle>(null);
   const client = useRef(new AgentClient(settings));
   client.current = new AgentClient(settings);
+  const abortRef = useRef<AbortController | null>(null);
 
   // discover runnable models
   useEffect(() => {
@@ -58,7 +66,9 @@ export function AgentScreen({ settings }: { settings: Settings }) {
 
   async function pollUntilSettled(sessionId: string, since: number) {
     let cursor = since;
+    const ac = abortRef.current;
     for (;;) {
+      if (ac?.signal.aborted) return cursor;
       const snap = await client.current.poll(sessionId, cursor);
       if (snap.events.length) {
         setEvents((prev) => [...prev, ...snap.events]);
@@ -88,6 +98,11 @@ export function AgentScreen({ settings }: { settings: Settings }) {
     lastMsgRef.current = message;
     setBusy(true);
     setError("");
+    // Cancel any previous polling loop
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    // Optimistically add user message to transcript
     setEvents((prev) => [
       ...prev,
       { i: -1, ts: Date.now() / 1000, type: "user", text: message } as AgentEvent,
@@ -98,30 +113,47 @@ export function AgentScreen({ settings }: { settings: Settings }) {
         message,
         sessionRef.current ?? undefined,
         sessionRef.current ? undefined : selected || undefined,
+        workspaceId,
       );
       sessionRef.current = start.session_id;
       sessionStorage.setItem(SESSION_KEY, start.session_id);
       const fresh = await client.current.poll(start.session_id, 0);
-      setEvents(fresh.events);
-      await pollUntilSettled(start.session_id, fresh.next);
+      // Merge: keep optimistic user message if backend hasn't echoed it yet
+      setEvents((prev) => {
+        const userMsg = prev[prev.length - 1];
+        const hasUserMsg = fresh.events.some(
+          (e) => e.type === "user" && e.text === userMsg?.text,
+        );
+        return hasUserMsg ? fresh.events : [...prev.slice(0, -1), ...fresh.events];
+      });
+      if (!ac.signal.aborted) {
+        await pollUntilSettled(start.session_id, fresh.next);
+      }
     } catch (e) {
+      if (ac.signal.aborted) return;
+      // Clear stale session on error so retry doesn't get stuck
+      sessionRef.current = null;
+      sessionStorage.removeItem(SESSION_KEY);
       setError(e instanceof Error ? e.message : String(e));
       setStatus("error");
     } finally {
-      setBusy(false);
+      if (!ac.signal.aborted) setBusy(false);
     }
   }
 
   async function stop() {
     if (!sessionRef.current) return;
+    setStatus("idle"); // optimistic
     try {
       await client.current.interrupt(sessionRef.current);
     } catch {
-      /* ignore */
+      setError("Interrupt failed — the agent may still be running");
+      setStatus("running");
     }
   }
 
   function newSession(model?: string) {
+    abortRef.current?.abort();
     sessionRef.current = null;
     sessionStorage.removeItem(SESSION_KEY);
     setEvents([]);
@@ -129,6 +161,7 @@ export function AgentScreen({ settings }: { settings: Settings }) {
     setStatus("idle");
     setError("");
     setCost(null);
+    setBusy(false);
     if (model) {
       setSelected(model);
       localStorage.setItem(MODEL_KEY, model);
