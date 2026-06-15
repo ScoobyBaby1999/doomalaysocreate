@@ -18,8 +18,7 @@ import time
 import uuid
 from pathlib import Path
 
-DB_PATH = Path(os.environ.get("LOOM_DB_PATH",
-                              Path(__file__).resolve().parent / "loom.db"))
+DB_PATH = Path(os.environ.get("LOOM_DB_PATH", "/data/loom.db"))
 
 _write_lock = threading.Lock()
 _conn: sqlite3.Connection | None = None

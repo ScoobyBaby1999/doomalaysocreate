@@ -42,8 +42,9 @@ EXPOSE 7860
 # AGENT_ROOT holds per-session agent workspaces (ephemeral /tmp is fine).
 ENV HOME=/home/appuser \
     AGENT_ROOT=/tmp/agent \
-    BYPASS_TOOL_CONSENT=true
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+    BYPASS_TOOL_CONSENT=true \
+    LOOM_DB_PATH=/data/loom.db
+RUN mkdir -p /data && chmod 777 /data && useradd -m -u 1000 appuser && chown -R appuser:appuser /app /data
 USER appuser
 
 CMD ["python", "critique_service.py"]

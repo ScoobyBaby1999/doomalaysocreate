@@ -14,6 +14,7 @@ from pathlib import Path
 
 import agent_sessions
 import authtoken
+import dataset_persistence
 import db
 import github_integration
 import orchestrate
@@ -949,6 +950,15 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/api/auth/github/proxy-exchange"):
             self._handle_github_proxy_exchange(self.path)
             return
+        if route == "/api/auth/hf/login":
+            self._handle_hf_login()
+            return
+        if route == "/api/auth/hf/callback":
+            self._handle_hf_callback()
+            return
+        if route.startswith("/api/auth/hf/proxy-exchange"):
+            self._handle_hf_proxy_exchange(self.path)
+            return
         if route == "/api/auth/status":
             self._handle_auth_status()
             return
@@ -1473,7 +1483,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             gh_token = github_integration.exchange_github_code(code)
             user = github_integration.upsert_user_from_github(gh_token)
-            self._send_json(200, {"session_id": user["id"]})
+            result: dict[str, object] = {"session_id": user["id"]}
+            # Chain HF OAuth if user hasn't connected HF yet
+            if not user.get("hf_token_encrypted"):
+                result["next"] = "hf"
+            self._send_json(200, result)
         except Exception as exc:
             log_event("github_proxy_exchange_error", error=str(exc)[:200])
             self._send_json(500, {"error": "token exchange failed"})
@@ -1484,6 +1498,84 @@ class Handler(BaseHTTPRequestHandler):
             return
         db.delete_github_token(user_id)
         self._send_json(200, {"disconnected": True})
+
+    # -- HF OAuth handlers --------------------------------------------------
+
+    def _handle_hf_login(self) -> None:
+        if not dataset_persistence._hf_configured():
+            self._send_json(503, {"error": "HF OAuth not configured "
+                                           "(HF_CLIENT_ID missing)"})
+            return
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(self.path).query)
+        redirect_to = (qs.get("redirect_to", [""])[0] or "").strip()
+        nonce = secrets.token_urlsafe(16)
+        state = _make_oauth_state(nonce, redirect_to)
+        url = dataset_persistence.make_hf_authorize_url(state)
+        self._redirect(url)
+
+    def _handle_hf_callback(self) -> None:
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(self.path).query)
+        code = (qs.get("code", [""])[0] or "").strip()
+        state = (qs.get("state", [""])[0] or "").strip()
+        error_param = (qs.get("error", [""])[0] or "").strip()
+        host = self._space_host()
+
+        valid, redirect_to = _verify_oauth_state(state) if state else (False, "")
+
+        if error_param:
+            if redirect_to:
+                self._redirect(f"{redirect_to}#hf-error={error_param}")
+            else:
+                self._redirect(f"https://{host}/#hf-error={error_param}")
+            return
+        if not code or not state or not valid:
+            if redirect_to:
+                self._redirect(f"{redirect_to}#hf-error=invalid_state")
+            else:
+                self._redirect(f"https://{host}/#hf-error=invalid_state")
+            return
+
+        # Proxy flow: forward the code to the user's Space
+        if redirect_to:
+            self._redirect(f"{redirect_to}#hf-code={code}&state={state}")
+            return
+
+        # Direct flow (main Space): exchange code and complete
+        try:
+            hf_token = dataset_persistence.exchange_hf_code(code)
+            user = dataset_persistence.upsert_user_from_hf(hf_token)
+            self._redirect(f"https://{host}/#hf-connected={user['id']}")
+        except Exception as exc:
+            log_event("hf_oauth_error", error=str(exc)[:200])
+            self._redirect(f"https://{host}/#hf-error=token_exchange_failed")
+
+    def _handle_hf_proxy_exchange(self, route: str) -> None:
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(route).query)
+        code = (qs.get("code", [""])[0] or "").strip()
+        state = (qs.get("state", [""])[0] or "").strip()
+
+        if not code or not state:
+            self._send_json(400, {"error": "missing code or state"})
+            return
+        valid, _ = _verify_oauth_state(state)
+        if not valid:
+            self._send_json(400, {"error": "invalid or expired state"})
+            return
+        try:
+            hf_token = dataset_persistence.exchange_hf_code(code)
+            user = dataset_persistence.upsert_user_from_hf(hf_token)
+            # Initialize dataset persistence now that we have HF token
+            try:
+                dataset_persistence.init_persistence(user["id"])
+            except Exception as exc:
+                log_event("dataset_init_error", error=str(exc)[:200])
+            self._send_json(200, {"session_id": user["id"]})
+        except Exception as exc:
+            log_event("hf_proxy_exchange_error", error=str(exc)[:200])
+            self._send_json(500, {"error": "token exchange failed"})
 
     def _handle_auth_status(self) -> None:
         user_id = self._require_user()
@@ -2177,7 +2269,7 @@ def main() -> int:
     if not panel.providers:
         log_event("startup_warning", msg="no providers have API keys - every judge will fail")
 
-    # initialize SQLite database for GitHub integration
+    # initialize SQLite database for GitHub + HF integration
     db.init_db()
 
     server = BoundedThreadingHTTPServer((host, port), Handler, max_workers=MAX_WORKERS)
@@ -2191,11 +2283,15 @@ def main() -> int:
               token_rotation=bool(os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip()))
     print(f"loom model panel listening on {host}:{port}  "
           f"(providers={[p.name for p in panel.providers]})", flush=True)
+    # Graceful shutdown: on SIGTERM (HF Space rebuild/stop), upload DB one last time
+    import signal
+    signal.signal(signal.SIGTERM, lambda *a: server.shutdown())
     try:
-        server.serve_forever()
+        server.serve_forever(poll_interval=1.0)
     except KeyboardInterrupt:
         pass
     finally:
+        dataset_persistence.shutdown_upload()
         server.server_close()
     return 0
 
