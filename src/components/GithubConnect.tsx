@@ -3,7 +3,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { GitHubClient, type GithubStatus } from "../api/github";
-import type { Settings } from "../api/panel";
+import { ApiError, type Settings } from "../api/panel";
 
 interface Props {
   settings: Settings;
@@ -33,7 +33,7 @@ export function GithubConnect({ settings, onConnected }: Props) {
       })
       .catch((e) => {
         if (alive) {
-          if (e instanceof Error && e.message.includes("401")) {
+          if (e instanceof ApiError && e.status === 401) {
             setSessionExpired(true);
           } else {
             setError("Failed to check connection status");

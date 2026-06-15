@@ -27,11 +27,10 @@ export default function App() {
     const githubId = params.get("github-connected");
     const githubCode = params.get("github-code");
     const githubError = params.get("github-error");
-    const ghState = params.get("state");
+    const stateParam = params.get("state");
     const hfId = params.get("hf-connected");
     const hfCode = params.get("hf-code");
     const hfError = params.get("hf-error");
-    const hfState = params.get("hf-state") || ghState;
 
     // Clear hash immediately
     history.replaceState(null, "", window.location.pathname + window.location.search);
@@ -40,9 +39,9 @@ export default function App() {
       // Direct flow (main Space): session ID returned directly
       setSettings({ ...settings, githubSessionId: githubId });
       setTab("workspaces");
-    } else if (githubCode && ghState) {
+    } else if (githubCode && stateParam) {
       // Proxy flow: exchange code for token via this Space's backend
-      exchangeGitHubCode(githubCode, ghState, settings.baseUrl).then((result) => {
+      exchangeGitHubCode(githubCode, stateParam, settings.baseUrl).then((result) => {
         if (result.session_id) {
           setSettings({ ...settings, githubSessionId: result.session_id });
           // Chain HF OAuth if needed
@@ -63,9 +62,9 @@ export default function App() {
       // Direct HF flow: session ID returned directly
       setSettings({ ...settings, githubSessionId: hfId });
       setTab("workspaces");
-    } else if (hfCode && hfState) {
+    } else if (hfCode && stateParam) {
       // Proxy HF flow: exchange code
-      exchangeHFCode(hfCode, hfState, settings.baseUrl).then((result) => {
+      exchangeHFCode(hfCode, stateParam, settings.baseUrl).then((result) => {
         if (result.session_id) {
           setSettings({ ...settings, githubSessionId: result.session_id });
           setTab("workspaces");
