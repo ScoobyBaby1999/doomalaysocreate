@@ -184,7 +184,8 @@ def init_persistence(user_id: str) -> None:
         _hf_api(f"/api/repos/{ds_name}", token=token)
     except RuntimeError as exc:
         if "404" in str(exc):
-            _hf_api(f"/api/repos/{ds_name}", method="POST", token=token, body={
+            _hf_api("/api/repos", method="POST", token=token, body={
+                "name": ds_name,
                 "private": True,
                 "type": "dataset",
             })
