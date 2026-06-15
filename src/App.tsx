@@ -62,7 +62,7 @@ export default function App() {
             saveSettings(newSettings);
             const MAIN_SPACE = "https://scoobybaby1999-loom.hf.space";
             const thisSpace = window.location.origin;
-            window.location.href = `${MAIN_SPACE}/api/auth/hf/login?redirect_to=${encodeURIComponent(thisSpace)}`;
+            window.location.href = `${MAIN_SPACE}/api/auth/hf/login?redirect_to=${encodeURIComponent(thisSpace)}&github_user_id=${encodeURIComponent(result.session_id)}`;
           } else {
             saveSettings(newSettings);
             setTab("workspaces");
