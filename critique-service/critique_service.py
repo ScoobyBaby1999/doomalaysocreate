@@ -1509,12 +1509,13 @@ class Handler(BaseHTTPRequestHandler):
         from urllib.parse import parse_qs, urlsplit
         qs = parse_qs(urlsplit(self.path).query)
         redirect_to = (qs.get("redirect_to", [""])[0] or "").strip()
+        github_user_id = (qs.get("github_user_id", [""])[0] or "").strip()
         host = self._space_host()
         redirect_uri = f"https://{host}/api/auth/hf/callback"
         nonce = secrets.token_urlsafe(16)
-        # Pack both redirect_to and redirect_uri into state so the user Space's
-        # proxy exchange can extract the correct redirect_uri for token exchange.
-        combined = f"{redirect_to}|{redirect_uri}" if redirect_uri else redirect_to
+        # Pack redirect_to, redirect_uri, and github_user_id into state so the
+        # proxy exchange can find the existing GitHub user and merge HF data.
+        combined = f"{redirect_to}|{redirect_uri}|{github_user_id}" if (redirect_uri or github_user_id) else redirect_to
         state = _make_oauth_state(nonce, combined)
         url = dataset_persistence.make_hf_authorize_url(state, redirect_uri=redirect_uri)
         self._redirect(url)
@@ -1529,10 +1530,17 @@ class Handler(BaseHTTPRequestHandler):
 
         valid, redirect_to = _verify_oauth_state(state) if state else (False, "")
 
-        # Extract redirect_uri if packed into redirect_to (pipe-separated)
+        # Extract redirect_uri and github_user_id if packed into redirect_to (pipe-separated)
+        # Format: redirect_to|redirect_uri|github_user_id
         hf_redirect_uri = ""
+        github_user_id = ""
         if "|" in redirect_to:
-            redirect_to, hf_redirect_uri = redirect_to.split("|", 1)
+            parts = redirect_to.split("|", 2)
+            redirect_to = parts[0]
+            if len(parts) > 1:
+                hf_redirect_uri = parts[1]
+            if len(parts) > 2:
+                github_user_id = parts[2]
 
         if error_param:
             if redirect_to:
@@ -1556,7 +1564,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             redirect_uri = f"https://{host}/api/auth/hf/callback"
             token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
-            user = dataset_persistence.upsert_user_from_hf(token_data)
+            user = dataset_persistence.upsert_user_from_hf(token_data, github_user_id=github_user_id or None)
             self._redirect(f"https://{host}/#hf-connected={user['id']}")
         except Exception as exc:
             log_event("hf_oauth_error", error=str(exc)[:200])
@@ -1575,13 +1583,19 @@ class Handler(BaseHTTPRequestHandler):
         if not valid:
             self._send_json(400, {"error": "invalid or expired state"})
             return
-        # Extract redirect_uri packed into redirect_to (pipe-separated) by _handle_hf_login
+        # Extract redirect_uri and github_user_id packed into redirect_to (pipe-separated)
+        # Format: redirect_to|redirect_uri|github_user_id
         redirect_uri = ""
+        github_user_id = ""
         if "|" in combined:
-            _, redirect_uri = combined.split("|", 1)
+            parts = combined.split("|", 2)
+            if len(parts) > 1:
+                redirect_uri = parts[1]
+            if len(parts) > 2:
+                github_user_id = parts[2]
         try:
             token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
-            user = dataset_persistence.upsert_user_from_hf(token_data)
+            user = dataset_persistence.upsert_user_from_hf(token_data, github_user_id=github_user_id or None)
             # Initialize dataset persistence now that we have HF token
             try:
                 dataset_persistence.init_persistence(user["id"])
