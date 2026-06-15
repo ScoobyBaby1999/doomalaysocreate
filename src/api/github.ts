@@ -34,6 +34,7 @@ export interface Workspace {
   user_id: string;
   source_repo: string | null;
   source_branch: string | null;
+  source_branches: string[] | null;
   current_branch: string;
   sandbox_path: string;
   hf_space_id: string | null;
@@ -201,6 +202,7 @@ export class GitHubClient {
     description?: string;
     source_repo?: string;
     source_branch?: string;
+    source_branches?: string[];
     visibility?: string;
     auto_sync?: boolean;
   }): Promise<Workspace> {

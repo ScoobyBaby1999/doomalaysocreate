@@ -149,6 +149,11 @@ export function WorkspaceScreen({
                   {ws.source_repo && (
                     <div className="text-[11px] text-muted mt-0.5">
                       {ws.source_repo.replace("https://github.com/", "")} · {ws.current_branch}
+                      {ws.source_branches && ws.source_branches.length > 1 && (
+                        <span className="text-[10px] text-muted/60 ml-1">
+                          (+{ws.source_branches.length - 1} more)
+                        </span>
+                      )}
                     </div>
                   )}
                   <div className="text-[10px] text-muted mt-0.5">
@@ -227,6 +232,8 @@ function CreateWorkspace({
   const [selectedRepo, setSelectedRepo] = useState<string>("");
   const [branches, setBranches] = useState<Branch[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<string>("");
+  const [selectedBranches, setSelectedBranches] = useState<Set<string>>(new Set());
+  const [branchMode, setBranchMode] = useState<"single" | "all" | "select">("single");
   const [loadingRepos, setLoadingRepos] = useState(true);
   const [loadingBranches, setLoadingBranches] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -255,6 +262,7 @@ function CreateWorkspace({
   async function handleRepoSelect(fullName: string) {
     setSelectedRepo(fullName);
     setSelectedBranch("");
+    setSelectedBranches(new Set());
     if (!fullName) {
       setBranches([]);
       return;
@@ -290,7 +298,13 @@ function CreateWorkspace({
       };
       if (selectedRepo) {
         opts.source_repo = `https://github.com/${selectedRepo}.git`;
-        opts.source_branch = selectedBranch || undefined;
+        if (branchMode === "single") {
+          opts.source_branch = selectedBranch || undefined;
+        } else if (branchMode === "select") {
+          opts.source_branches = Array.from(selectedBranches);
+          opts.source_branch = opts.source_branches[0] || undefined;
+        }
+        // branchMode === "all": omit source_branch — backend clones full repo
       }
       const ws = await client.createWorkspace(opts);
       onCreated(ws);
@@ -355,25 +369,82 @@ function CreateWorkspace({
         </label>
 
         {selectedRepo && (
-          <label className="block">
-            <span className="text-[11px] text-muted">Branch</span>
-            <select
-              value={selectedBranch}
-              onChange={(e) => setSelectedBranch(e.target.value)}
-              disabled={loadingBranches}
-              className="mt-1 w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
-            >
-              {loadingBranches ? (
-                <option>loading…</option>
-              ) : (
-                branches.map((b) => (
-                  <option key={b.name} value={b.name}>
-                    {b.name}
-                  </option>
-                ))
-              )}
-            </select>
-          </label>
+          <>
+            <label className="block">
+              <span className="text-[11px] text-muted">Branch selection</span>
+              <div className="mt-1 flex gap-2 text-sm">
+                {(["single", "all", "select"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => setBranchMode(mode)}
+                    className={`px-3 py-1.5 rounded-lg border text-[11px] ${
+                      branchMode === mode
+                        ? "border-accent bg-accent/10 text-accent"
+                        : "border-border text-muted hover:border-accent"
+                    }`}
+                  >
+                    {mode === "single" ? "Single" : mode === "all" ? "All" : "Select"}
+                  </button>
+                ))}
+              </div>
+            </label>
+
+            {branchMode === "single" && (
+              <label className="block">
+                <span className="text-[11px] text-muted">Branch</span>
+                <select
+                  value={selectedBranch}
+                  onChange={(e) => setSelectedBranch(e.target.value)}
+                  disabled={loadingBranches}
+                  className="mt-1 w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
+                >
+                  {loadingBranches ? (
+                    <option>loading…</option>
+                  ) : (
+                    branches.map((b) => (
+                      <option key={b.name} value={b.name}>
+                        {b.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+            )}
+
+            {branchMode === "select" && (
+              <label className="block">
+                <span className="text-[11px] text-muted">Branches to clone</span>
+                <div className="mt-1 max-h-40 overflow-y-auto border border-border rounded-lg p-2 space-y-1">
+                  {loadingBranches ? (
+                    <div className="text-[11px] text-muted px-2 py-1">loading…</div>
+                  ) : (
+                    branches.map((b) => (
+                      <label key={b.name} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-surface cursor-pointer text-sm">
+                        <input
+                          type="checkbox"
+                          checked={selectedBranches.has(b.name)}
+                          onChange={(e) => {
+                            const next = new Set(selectedBranches);
+                            if (e.target.checked) next.add(b.name);
+                            else next.delete(b.name);
+                            setSelectedBranches(next);
+                          }}
+                          className="accent-accent"
+                        />
+                        {b.name}
+                      </label>
+                    ))
+                  )}
+                </div>
+              </label>
+            )}
+
+            {branchMode === "all" && (
+              <div className="text-[11px] text-muted bg-surface border border-border rounded-lg px-3 py-2">
+                All branches will be cloned (shallow).
+              </div>
+            )}
+          </>
         )}
 
         <button
