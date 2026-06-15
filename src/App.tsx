@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSettings } from "./state/settings";
+import { useSettings, saveSettings } from "./state/settings";
 import { Chat } from "./screens/Chat";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
@@ -43,9 +43,12 @@ export default function App() {
       // Proxy flow: exchange code for token via this Space's backend
       exchangeGitHubCode(githubCode, stateParam, settings.baseUrl).then((result) => {
         if (result.session_id) {
-          setSettings({ ...settings, githubSessionId: result.session_id });
-          // Chain HF OAuth if needed
+          const newSettings = { ...settings, githubSessionId: result.session_id };
+          setSettings(newSettings);
           if (result.next === "hf") {
+            // Persist to localStorage BEFORE navigation — React's useEffect
+            // may not flush before window.location.href takes effect.
+            saveSettings(newSettings);
             const MAIN_SPACE = "https://scoobybaby1999-loom.hf.space";
             const thisSpace = window.location.origin;
             window.location.href = `${MAIN_SPACE}/api/auth/hf/login?redirect_to=${encodeURIComponent(thisSpace)}`;
@@ -66,7 +69,9 @@ export default function App() {
       // Proxy HF flow: exchange code
       exchangeHFCode(hfCode, stateParam, settings.baseUrl).then((result) => {
         if (result.session_id) {
-          setSettings({ ...settings, githubSessionId: result.session_id });
+          const newSettings = { ...settings, githubSessionId: result.session_id };
+          saveSettings(newSettings);
+          setSettings(newSettings);
           setTab("workspaces");
         }
       }).catch((e) => {
