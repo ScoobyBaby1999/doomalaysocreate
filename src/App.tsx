@@ -5,7 +5,7 @@ import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { AgentScreen } from "./screens/AgentScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
-import { exchangeGitHubCode } from "./api/github";
+import { exchangeGitHubCode, exchangeHFCode } from "./api/github";
 import type { Settings } from "./api/panel";
 
 type Tab = "chat" | "agent" | "workspaces" | "settings";
@@ -16,8 +16,10 @@ export default function App() {
   const [manualSetup, setManualSetup] = useState(false);
   const [tab, setTab] = useState<Tab>(hasCredentials ? "chat" : "settings");
 
-  // Handle GitHub OAuth callback hash
-  // Formats: #github-connected=<id> (direct), #github-code=<code>&state=<state> (proxy), #github-error=...
+  // Handle OAuth callback hashes
+  // GitHub: #github-connected=<id> | #github-code=<code>&state=<state> (proxy) | #github-error=...
+  // HF:     #hf-connected=<id>     | #hf-code=<code>&state=<state> (proxy)     | #hf-error=...
+  // Chain:  GitHub result.next="hf" triggers automatic HF OAuth redirect
   useEffect(() => {
     const hash = window.location.hash.slice(1);
     if (!hash) return;
@@ -25,7 +27,11 @@ export default function App() {
     const githubId = params.get("github-connected");
     const githubCode = params.get("github-code");
     const githubError = params.get("github-error");
-    const state = params.get("state");
+    const ghState = params.get("state");
+    const hfId = params.get("hf-connected");
+    const hfCode = params.get("hf-code");
+    const hfError = params.get("hf-error");
+    const hfState = params.get("hf-state") || ghState;
 
     // Clear hash immediately
     history.replaceState(null, "", window.location.pathname + window.location.search);
@@ -34,18 +40,41 @@ export default function App() {
       // Direct flow (main Space): session ID returned directly
       setSettings({ ...settings, githubSessionId: githubId });
       setTab("workspaces");
-    } else if (githubCode && state) {
+    } else if (githubCode && ghState) {
       // Proxy flow: exchange code for token via this Space's backend
-      exchangeGitHubCode(githubCode, state, settings.baseUrl).then((result) => {
+      exchangeGitHubCode(githubCode, ghState, settings.baseUrl).then((result) => {
         if (result.session_id) {
           setSettings({ ...settings, githubSessionId: result.session_id });
-          setTab("workspaces");
+          // Chain HF OAuth if needed
+          if (result.next === "hf") {
+            const MAIN_SPACE = "https://scoobybaby1999-loom.hf.space";
+            const thisSpace = window.location.origin;
+            window.location.href = `${MAIN_SPACE}/api/auth/hf/login?redirect_to=${encodeURIComponent(thisSpace)}`;
+          } else {
+            setTab("workspaces");
+          }
         }
       }).catch((e) => {
         console.error("GitHub code exchange failed:", e);
       });
     } else if (githubError) {
       console.error("GitHub OAuth error:", githubError);
+    } else if (hfId) {
+      // Direct HF flow: session ID returned directly
+      setSettings({ ...settings, githubSessionId: hfId });
+      setTab("workspaces");
+    } else if (hfCode && hfState) {
+      // Proxy HF flow: exchange code
+      exchangeHFCode(hfCode, hfState, settings.baseUrl).then((result) => {
+        if (result.session_id) {
+          setSettings({ ...settings, githubSessionId: result.session_id });
+          setTab("workspaces");
+        }
+      }).catch((e) => {
+        console.error("HF code exchange failed:", e);
+      });
+    } else if (hfError) {
+      console.error("HF OAuth error:", hfError);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

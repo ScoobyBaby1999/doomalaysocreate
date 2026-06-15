@@ -269,8 +269,8 @@ function CreateWorkspace({
       // auto-select default branch
       const def = r.branches.find((b) => b.name === "main") || r.branches[0];
       if (def) setSelectedBranch(def.name);
-    } catch {
-      if (reqId === repoSelectRef.current) setError("Failed to load branches");
+      } catch (e) {
+        if (reqId === repoSelectRef.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (reqId === repoSelectRef.current) setLoadingBranches(false);
     }

@@ -335,14 +335,37 @@ export class GitHubClient {
 }
 
 /** Exchange a GitHub OAuth code for a session ID via the backend.
- *  Used by the proxy flow where the main Space forwards the callback to user Spaces. */
+ *  Used by the proxy flow where the main Space forwards the callback to user Spaces.
+ *  Returns { session_id, next?: "hf" } — if next="hf", HF OAuth should follow. */
 export async function exchangeGitHubCode(
+  code: string,
+  state: string,
+  baseUrl: string,
+): Promise<{ session_id: string; next?: string }> {
+  const r = await fetch(
+    `${baseUrl}/api/auth/github/proxy-exchange?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+  );
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j?.error) msg = j.error;
+    } catch {
+      /* non-json */
+    }
+    throw new ApiError(r.status, msg);
+  }
+  return r.json() as Promise<{ session_id: string; next?: string }>;
+}
+
+/** Exchange a HF OAuth code for a session ID via the backend. */
+export async function exchangeHFCode(
   code: string,
   state: string,
   baseUrl: string,
 ): Promise<{ session_id: string }> {
   const r = await fetch(
-    `${baseUrl}/api/auth/github/proxy-exchange?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    `${baseUrl}/api/auth/hf/proxy-exchange?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
   );
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
