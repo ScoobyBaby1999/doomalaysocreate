@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSettings, saveSettings } from "./state/settings";
+import { useSettings, saveSettings, loadSettings } from "./state/settings";
 import { Chat } from "./screens/Chat";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
@@ -21,6 +21,15 @@ export default function App() {
   // HF:     #hf-connected=<id>     | #hf-code=<code>&state=<state> (proxy)     | #hf-error=...
   // Chain:  GitHub result.next="hf" triggers automatic HF OAuth redirect
   useEffect(() => {
+    // Re-read localStorage on bfcache restore (back/forward nav) so React
+    // state matches what saveSettings() wrote before navigation.
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) {
+        setSettings(loadSettings());
+      }
+    };
+    window.addEventListener("pageshow", onPageShow);
+
     const hash = window.location.hash.slice(1);
     if (!hash) return;
     const params = new URLSearchParams(hash);
