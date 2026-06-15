@@ -12,7 +12,7 @@ type Tab = "chat" | "agent" | "workspaces" | "settings";
 
 export default function App() {
   const [settings, setSettings] = useSettings();
-  const hasCredentials = !!(settings.token || settings.rotationSecret);
+  const hasCredentials = !!(settings.token || settings.rotationSecret || settings.githubSessionId);
   const [manualSetup, setManualSetup] = useState(false);
   const [tab, setTab] = useState<Tab>(hasCredentials ? "chat" : "settings");
 
@@ -46,7 +46,9 @@ export default function App() {
 
     if (githubId) {
       // Direct flow (main Space): session ID returned directly
-      setSettings({ ...settings, githubSessionId: githubId });
+      const ghSettings = { ...settings, githubSessionId: githubId };
+      saveSettings(ghSettings);
+      setSettings(ghSettings);
       setTab("workspaces");
     } else if (githubCode && stateParam) {
       // Proxy flow: exchange code for token via this Space's backend
@@ -62,6 +64,7 @@ export default function App() {
             const thisSpace = window.location.origin;
             window.location.href = `${MAIN_SPACE}/api/auth/hf/login?redirect_to=${encodeURIComponent(thisSpace)}`;
           } else {
+            saveSettings(newSettings);
             setTab("workspaces");
           }
         }
@@ -72,7 +75,9 @@ export default function App() {
       console.error("GitHub OAuth error:", githubError);
     } else if (hfId) {
       // Direct HF flow: session ID returned directly
-      setSettings({ ...settings, githubSessionId: hfId });
+      const hfSettings = { ...settings, githubSessionId: hfId };
+      saveSettings(hfSettings);
+      setSettings(hfSettings);
       setTab("workspaces");
     } else if (hfCode && stateParam) {
       // Proxy HF flow: exchange code
