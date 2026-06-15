@@ -193,23 +193,25 @@ def get_repo_tree(user_id: str, owner: str, repo: str,
 def create_workspace(user_id: str, *, title: str, description: str = "",
                      source_repo: str | None = None,
                      source_branch: str | None = None,
+                     source_branches: list[str] | None = None,
                      visibility: str = "private",
                      auto_sync: bool = False) -> dict:
     """Create a new workspace.  If source_repo is given, clone it into the
-    sandbox directory."""
+    sandbox directory.  source_branches can specify multiple branches to clone;
+    when source_branch is None and source_branches is None, all branches are cloned."""
     sandbox_base = Path(os.environ.get("WORKSPACE_BASE", "/workspace"))
     ws_id = db._gen_id()
     sandbox_path = str(sandbox_base / ws_id)
-    # create sandbox dir
     Path(sandbox_path).mkdir(parents=True, exist_ok=True)
     ws = db.create_workspace(
         user_id, title=title, description=description,
         source_repo=source_repo, source_branch=source_branch,
+        source_branches=source_branches,
         visibility=visibility, auto_sync=auto_sync,
         sandbox_path=sandbox_path)
-    # clone if source_repo provided
     if source_repo:
-        _clone_repo(user_id, source_repo, source_branch or "main", sandbox_path)
+        _clone_repo(user_id, source_repo, source_branch,
+                    dest=sandbox_path, branches=source_branches)
     return ws
 
 
@@ -258,26 +260,84 @@ def _sanitize_git_error(err: str) -> str:
     return err
 
 
-def _clone_repo(user_id: str, repo_url: str, branch: str, dest: str) -> None:
-    """Clone a GitHub repo using the user's stored token for auth."""
+def _clone_repo(user_id: str, repo_url: str, branch: str | None = None,
+                dest: str | None = None, branches: list[str] | None = None) -> None:
+    """Clone a GitHub repo into ``dest``.
+
+    Three modes:
+    * ``branch=None`` and ``branches=None`` — full repo clone (all branches).
+    * ``branch='main'`` and ``branches=None`` — single branch (current behaviour).
+    * ``branches=['main','dev']`` — clone listed branches (first is default).
+    """
     import subprocess
+    if dest is None:
+        raise RuntimeError("dest is required for _clone_repo")
     token = _token_for_user(user_id)
-    # Use git's http.extraHeader instead of embedding token in URL (avoids
-    # token persistence in .git/config and leakage in error messages).
+    auth = f"http.extraHeader=Authorization: Bearer {token}"
+
+    # Mode A: clone all branches
+    if branch is None and branches is None:
+        cmd = [
+            "git", "clone", "--no-single-branch", "--depth", "1",
+            "-c", auth, repo_url, dest,
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("git clone timed out")
+        if result.returncode != 0:
+            raise RuntimeError(f"git clone failed: {_sanitize_git_error(result.stderr.strip())}")
+        return
+
+    # Mode C: clone specific branches
+    if branches:
+        first = branches[0]
+        cmd = [
+            "git", "clone", "--depth", "1", "-b", first, "--single-branch",
+            "-c", auth, repo_url, dest,
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("git clone timed out")
+        if result.returncode != 0:
+            raise RuntimeError(f"git clone failed: {_sanitize_git_error(result.stderr.strip())}")
+
+        for extra in branches[1:]:
+            fetch = [
+                "git", "-C", dest, "fetch", "origin",
+                f"{extra}:refs/remotes/origin/{extra}", "--depth", "1",
+                "-c", auth,
+            ]
+            r = subprocess.run(fetch, capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                raise RuntimeError(
+                    f"git fetch {extra} failed: {_sanitize_git_error(r.stderr.strip())}")
+            # Create a local branch tracking the fetched remote
+            co = subprocess.run(
+                ["git", "-C", dest, "checkout", "-b", extra, f"origin/{extra}"],
+                capture_output=True, text=True, timeout=30)
+            if co.returncode != 0:
+                raise RuntimeError(
+                    f"git checkout {extra} failed: {_sanitize_git_error(co.stderr.strip())}")
+        # Checkout first branch as default
+        subprocess.run(
+            ["git", "-C", dest, "checkout", first],
+            capture_output=True, timeout=30)
+        return
+
+    # Mode B: single branch (default to "main")
+    effective = branch or "main"
     cmd = [
-        "git", "clone", "--depth", "1", "-b", branch,
-        "-c", f"http.extraHeader=Authorization: Bearer {token}",
-        repo_url, dest,
+        "git", "clone", "--depth", "1", "-b", effective,
+        "-c", auth, repo_url, dest,
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
         raise RuntimeError("git clone timed out")
     if result.returncode != 0:
-        # sanitize error: strip any URLs that might contain auth headers
-        err = result.stderr.strip()
-        err = _sanitize_git_error(err)
-        raise RuntimeError(f"git clone failed: {err}")
+        raise RuntimeError(f"git clone failed: {_sanitize_git_error(result.stderr.strip())}")
 
 
 def init_repo(sandbox: str) -> None:

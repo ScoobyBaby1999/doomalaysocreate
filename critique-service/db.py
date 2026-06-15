@@ -52,7 +52,12 @@ def _migrate(db: sqlite3.Connection) -> None:
         try:
             db.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
-            pass  # column already exists
+            pass
+    # source_branches is on workspaces, not users
+    try:
+        db.execute("ALTER TABLE workspaces ADD COLUMN source_branches TEXT")
+    except sqlite3.OperationalError:
+        pass
     db.commit()
 
 
@@ -76,6 +81,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
     user_id         TEXT NOT NULL REFERENCES users(id),
     source_repo     TEXT,
     source_branch   TEXT,
+    source_branches TEXT,
     current_branch  TEXT NOT NULL DEFAULT 'main',
     sandbox_path    TEXT NOT NULL,
     hf_space_id     TEXT,
@@ -233,18 +239,23 @@ def delete_github_token(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def create_workspace(user_id: str, *, title: str, source_repo: str | None = None,
-                     source_branch: str | None = None, visibility: str = "private",
+                     source_branch: str | None = None,
+                     source_branches: list[str] | None = None,
+                     visibility: str = "private",
                      description: str = "", auto_sync: bool = False,
                      sandbox_path: str = "", hf_space_id: str | None = None) -> dict:
     db = _db()
     wid = _gen_id()
     now = _iso_now()
+    branches_json = json.dumps(source_branches) if source_branches else None
     with _write_lock:
         db.execute(
             "INSERT INTO workspaces (id, user_id, source_repo, source_branch, "
-            "sandbox_path, hf_space_id, auto_sync, visibility, title, description, "
-            "created_at, last_modified) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (wid, user_id, source_repo, source_branch, sandbox_path, hf_space_id,
+            "source_branches, sandbox_path, hf_space_id, auto_sync, visibility, "
+            "title, description, created_at, last_modified) VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (wid, user_id, source_repo, source_branch, branches_json,
+             sandbox_path, hf_space_id,
              int(auto_sync), visibility, title, description, now, now))
         db.commit()
     return get_workspace(wid)
@@ -264,7 +275,8 @@ def list_user_workspaces(user_id: str) -> list[dict]:
 
 def update_workspace(workspace_id: str, **fields) -> dict | None:
     allowed = {"title", "description", "visibility", "current_branch",
-               "hf_space_id", "auto_sync", "last_modified", "sandbox_path"}
+               "hf_space_id", "auto_sync", "last_modified", "sandbox_path",
+               "source_branches"}
     updates = []
     params = []
     for k, v in fields.items():
@@ -272,6 +284,8 @@ def update_workspace(workspace_id: str, **fields) -> dict | None:
             continue
         if k == "auto_sync":
             v = int(v)
+        elif k == "source_branches" and isinstance(v, list):
+            v = json.dumps(v)
         updates.append(f"{k} = ?")
         params.append(v)
     if not updates:

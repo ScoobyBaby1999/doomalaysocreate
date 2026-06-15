@@ -1512,7 +1512,10 @@ class Handler(BaseHTTPRequestHandler):
         host = self._space_host()
         redirect_uri = f"https://{host}/api/auth/hf/callback"
         nonce = secrets.token_urlsafe(16)
-        state = _make_oauth_state(nonce, redirect_to)
+        # Pack both redirect_to and redirect_uri into state so the user Space's
+        # proxy exchange can extract the correct redirect_uri for token exchange.
+        combined = f"{redirect_to}|{redirect_uri}" if redirect_uri else redirect_to
+        state = _make_oauth_state(nonce, combined)
         url = dataset_persistence.make_hf_authorize_url(state, redirect_uri=redirect_uri)
         self._redirect(url)
 
@@ -1525,6 +1528,11 @@ class Handler(BaseHTTPRequestHandler):
         host = self._space_host()
 
         valid, redirect_to = _verify_oauth_state(state) if state else (False, "")
+
+        # Extract redirect_uri if packed into redirect_to (pipe-separated)
+        hf_redirect_uri = ""
+        if "|" in redirect_to:
+            redirect_to, hf_redirect_uri = redirect_to.split("|", 1)
 
         if error_param:
             if redirect_to:
@@ -1563,13 +1571,15 @@ class Handler(BaseHTTPRequestHandler):
         if not code or not state:
             self._send_json(400, {"error": "missing code or state"})
             return
-        valid, _ = _verify_oauth_state(state)
+        valid, combined = _verify_oauth_state(state)
         if not valid:
             self._send_json(400, {"error": "invalid or expired state"})
             return
+        # Extract redirect_uri packed into redirect_to (pipe-separated) by _handle_hf_login
+        redirect_uri = ""
+        if "|" in combined:
+            _, redirect_uri = combined.split("|", 1)
         try:
-            host = self._space_host()
-            redirect_uri = f"https://{host}/api/auth/hf/callback"
             token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
             user = dataset_persistence.upsert_user_from_hf(token_data)
             # Initialize dataset persistence now that we have HF token
@@ -1669,6 +1679,7 @@ class Handler(BaseHTTPRequestHandler):
                 description=payload.get("description", ""),
                 source_repo=payload.get("source_repo"),
                 source_branch=payload.get("source_branch"),
+                source_branches=payload.get("source_branches"),
                 visibility=payload.get("visibility", "private"),
                 auto_sync=bool(payload.get("auto_sync")))
             self._send_json(201, ws)
