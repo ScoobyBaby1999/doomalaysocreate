@@ -33,7 +33,7 @@ import db
 HF_AUTHORIZE_URL = "https://huggingface.co/oauth/authorize"
 HF_TOKEN_URL = "https://huggingface.co/oauth/token"
 HF_API_BASE = "https://huggingface.co"
-HF_SCOPES = "openid profile write"
+HF_SCOPES = "openid profile write-repos"
 
 # ---------------------------------------------------------------------------
 # HF API helpers
