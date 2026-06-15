@@ -1515,7 +1515,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) < 7:
             self._send_json(400, {"error": "expected /api/github/repos/<owner>/<repo>/branches"})
             return
-        owner, repo = parts[3], parts[4]
+        owner, repo = parts[4], parts[5]
         try:
             branches = github_integration.list_repo_branches(user_id, owner, repo)
             self._send_json(200, {"branches": branches})
@@ -1775,7 +1775,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) < 7:
             self._send_json(400, {"error": "expected /api/github/repos/<owner>/<repo>/contents"})
             return
-        owner, repo = parts[3], parts[4]
+        owner, repo = parts[4], parts[5]
         from urllib.parse import parse_qs, urlsplit
         qs = parse_qs(urlsplit(self.path).query)
         path = qs.get("path", [""])[0]
@@ -1795,7 +1795,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) < 7:
             self._send_json(400, {"error": "expected /api/github/repos/<owner>/<repo>/tree"})
             return
-        owner, repo = parts[3], parts[4]
+        owner, repo = parts[4], parts[5]
         from urllib.parse import parse_qs, urlsplit
         qs = parse_qs(urlsplit(self.path).query)
         ref = qs.get("ref", ["main"])[0]
