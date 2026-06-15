@@ -1509,9 +1509,11 @@ class Handler(BaseHTTPRequestHandler):
         from urllib.parse import parse_qs, urlsplit
         qs = parse_qs(urlsplit(self.path).query)
         redirect_to = (qs.get("redirect_to", [""])[0] or "").strip()
+        host = self._space_host()
+        redirect_uri = f"https://{host}/api/auth/hf/callback"
         nonce = secrets.token_urlsafe(16)
         state = _make_oauth_state(nonce, redirect_to)
-        url = dataset_persistence.make_hf_authorize_url(state)
+        url = dataset_persistence.make_hf_authorize_url(state, redirect_uri=redirect_uri)
         self._redirect(url)
 
     def _handle_hf_callback(self) -> None:
@@ -1544,8 +1546,9 @@ class Handler(BaseHTTPRequestHandler):
 
         # Direct flow (main Space): exchange code and complete
         try:
-            hf_token = dataset_persistence.exchange_hf_code(code)
-            user = dataset_persistence.upsert_user_from_hf(hf_token)
+            redirect_uri = f"https://{host}/api/auth/hf/callback"
+            token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
+            user = dataset_persistence.upsert_user_from_hf(token_data)
             self._redirect(f"https://{host}/#hf-connected={user['id']}")
         except Exception as exc:
             log_event("hf_oauth_error", error=str(exc)[:200])
@@ -1565,8 +1568,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid or expired state"})
             return
         try:
-            hf_token = dataset_persistence.exchange_hf_code(code)
-            user = dataset_persistence.upsert_user_from_hf(hf_token)
+            host = self._space_host()
+            redirect_uri = f"https://{host}/api/auth/hf/callback"
+            token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
+            user = dataset_persistence.upsert_user_from_hf(token_data)
             # Initialize dataset persistence now that we have HF token
             try:
                 dataset_persistence.init_persistence(user["id"])
@@ -1582,10 +1587,23 @@ class Handler(BaseHTTPRequestHandler):
         if not user_id:
             return
         user = db.get_user(user_id)
+        hf_expires_at = user.get("hf_token_expires_at") if user else None
+        hf_refresh_ok = bool(user and user.get("hf_refresh_token_encrypted"))
+        hf_healthy = False
+        if hf_expires_at:
+            try:
+                from datetime import datetime, timezone, timedelta
+                expiry = datetime.fromisoformat(hf_expires_at)
+                hf_healthy = expiry > datetime.now(timezone.utc) - timedelta(days=7)
+            except (ValueError, TypeError):
+                pass
         self._send_json(200, {
             "authenticated": bool(user and user.get("github_token_encrypted")),
             "github_username": user.get("github_username") if user else None,
             "hf_username": user.get("hf_username") if user else None,
+            "hf_token_expires_at": hf_expires_at,
+            "hf_refresh_available": hf_refresh_ok,
+            "hf_token_healthy": hf_healthy,
         })
 
     def _handle_github_repos(self) -> None:

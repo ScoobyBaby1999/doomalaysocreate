@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -33,7 +34,7 @@ import db
 HF_AUTHORIZE_URL = "https://huggingface.co/oauth/authorize"
 HF_TOKEN_URL = "https://huggingface.co/oauth/token"
 HF_API_BASE = "https://huggingface.co"
-HF_SCOPES = "openid profile write-repos"
+HF_SCOPES = "openid profile write-repos offline_access"
 
 # ---------------------------------------------------------------------------
 # HF API helpers
@@ -84,10 +85,14 @@ def _space_name() -> str:
 # HF OAuth flow
 # ---------------------------------------------------------------------------
 
-def make_hf_authorize_url(state: str) -> str:
-    """Build the HF OAuth authorize URL with state token."""
+def make_hf_authorize_url(state: str, redirect_uri: str = "") -> str:
+    """Build the HF OAuth authorize URL with state token.
+
+    ``redirect_uri`` must match the registered callback URL exactly.
+    """
     params = urlencode({
         "client_id": os.environ.get("HF_CLIENT_ID", ""),
+        "redirect_uri": redirect_uri,
         "scope": HF_SCOPES,
         "response_type": "code",
         "state": state,
@@ -95,9 +100,10 @@ def make_hf_authorize_url(state: str) -> str:
     return f"{HF_AUTHORIZE_URL}?{params}"
 
 
-def exchange_hf_code(code: str) -> str:
-    """Exchange OAuth code for access token. Returns the raw token string.
+def exchange_hf_code(code: str, redirect_uri: str = "") -> dict:
+    """Exchange OAuth code for tokens. Returns dict with access_token, refresh_token, expires_in.
 
+    ``redirect_uri`` must match the value used in the authorize request.
     Raises RuntimeError on failure.
     """
     body = urlencode({
@@ -105,6 +111,7 @@ def exchange_hf_code(code: str) -> str:
         "client_secret": os.environ.get("HF_CLIENT_SECRET", ""),
         "code": code,
         "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
     }).encode()
     req = urllib.request.Request(HF_TOKEN_URL, data=body, method="POST")
     req.add_header("Accept", "application/json")
@@ -118,7 +125,7 @@ def exchange_hf_code(code: str) -> str:
     token = data.get("access_token", "").strip()
     if not token:
         raise RuntimeError(f"HF token exchange returned no access_token: {data}")
-    return token
+    return data
 
 
 def get_hf_user(token: str) -> dict:
@@ -126,23 +133,98 @@ def get_hf_user(token: str) -> dict:
     return _hf_api("/api/whoami-v2", token=token)
 
 
-def upsert_user_from_hf(hf_token: str) -> dict:
-    """Fetch HF user info, upsert into DB, return the user row."""
+def upsert_user_from_hf(token_data: dict) -> dict:
+    """Fetch HF user info, upsert into DB, return the user row.
+
+    ``token_data`` must contain ``access_token``, and may contain
+    ``refresh_token`` and ``expires_in`` from the token exchange response.
+    """
+    hf_token = token_data["access_token"]
     info = get_hf_user(hf_token)
     encrypted = crypto.encrypt_token(hf_token)
+    refresh_encrypted = crypto.encrypt_token(token_data["refresh_token"]) if token_data.get("refresh_token") else None
+    expires_at = ""
+    if token_data.get("expires_in"):
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))).isoformat()
     return db.upsert_user(
         hf_id=info["name"],
         hf_username=info["name"],
         hf_token_encrypted=encrypted,
+        hf_refresh_token_encrypted=refresh_encrypted,
+        hf_token_expires_at=expires_at,
     )
 
 
 def _hf_token_for_user(user_id: str) -> str:
-    """Retrieve and decrypt a user's stored HF token. Raises if missing."""
+    """Retrieve and decrypt a user's stored HF token.
+
+    Auto-refreshes the token if it expires within 7 days and a refresh
+    token is available.  Raises RuntimeError if no token is stored.
+    """
     user = db.get_user(user_id)
     if not user or not user.get("hf_token_encrypted"):
         raise RuntimeError("HF not connected — please link your Hugging Face account")
+    expires_at = user.get("hf_token_expires_at") or ""
+    if _hf_token_expires_soon(expires_at) and user.get("hf_refresh_token_encrypted"):
+        try:
+            _refresh_hf_token(user_id, user)
+        except Exception as exc:
+            print(f"[dataset_persistence] token refresh failed: {exc}", flush=True)
+    user = db.get_user(user_id)
     return crypto.decrypt_token(user["hf_token_encrypted"])
+
+
+def _hf_token_expires_soon(expires_at: str, within_days: int = 7) -> bool:
+    """Return True if the token expires within ``within_days`` or is already expired."""
+    if not expires_at:
+        return True
+    try:
+        expiry = datetime.fromisoformat(expires_at)
+        return expiry - timedelta(days=within_days) < datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        return True
+
+
+def _refresh_hf_token(user_id: str, user: dict) -> None:
+    """Refresh a user's HF token using the stored refresh token.
+
+    Updates the DB with new access/refresh tokens and expiry.
+    """
+    refresh_encrypted = user.get("hf_refresh_token_encrypted")
+    if not refresh_encrypted:
+        raise RuntimeError("no refresh token stored")
+    old_refresh = crypto.decrypt_token(refresh_encrypted)
+    body = urlencode({
+        "client_id": os.environ.get("HF_CLIENT_ID", ""),
+        "client_secret": os.environ.get("HF_CLIENT_SECRET", ""),
+        "grant_type": "refresh_token",
+        "refresh_token": old_refresh,
+    }).encode()
+    req = urllib.request.Request(HF_TOKEN_URL, data=body, method="POST")
+    req.add_header("Accept", "application/json")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:400]
+        raise RuntimeError(f"HF token refresh failed (HTTP {exc.code}): {detail}") from exc
+    new_token = data.get("access_token", "").strip()
+    if not new_token:
+        raise RuntimeError(f"HF token refresh returned no access_token: {data}")
+    encrypted = crypto.encrypt_token(new_token)
+    new_refresh_encrypted = None
+    if data.get("refresh_token"):
+        new_refresh_encrypted = crypto.encrypt_token(data["refresh_token"])
+    expires_at = ""
+    if data.get("expires_in"):
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(data["expires_in"]))).isoformat()
+    db.upsert_user(
+        hf_id=user["hf_id"],
+        hf_token_encrypted=encrypted,
+        hf_refresh_token_encrypted=new_refresh_encrypted,
+        hf_token_expires_at=expires_at,
+    )
 
 
 # ---------------------------------------------------------------------------

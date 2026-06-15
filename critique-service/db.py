@@ -35,9 +35,24 @@ def _db() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist.  Runs migrations for existing tables."""
     db = _db()
     db.executescript(SCHEMA)
+    db.commit()
+    # schema migrations for existing databases
+    _migrate(db)
+
+
+def _migrate(db: sqlite3.Connection) -> None:
+    """Add columns that may not exist in older DBs."""
+    for col in (
+        "hf_refresh_token_encrypted",
+        "hf_token_expires_at",
+    ):
+        try:
+            db.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     db.commit()
 
 
@@ -50,6 +65,8 @@ CREATE TABLE IF NOT EXISTS users (
     hf_id           TEXT,
     hf_username     TEXT,
     hf_token_encrypted TEXT,
+    hf_refresh_token_encrypted TEXT,
+    hf_token_expires_at TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -116,7 +133,9 @@ def _gen_id() -> str:
 def upsert_user(*, github_id: int | None = None, github_username: str | None = None,
                 github_token_encrypted: str | None = None,
                 hf_id: str | None = None, hf_username: str | None = None,
-                hf_token_encrypted: str | None = None) -> dict:
+                hf_token_encrypted: str | None = None,
+                hf_refresh_token_encrypted: str | None = None,
+                hf_token_expires_at: str | None = None) -> dict:
     """Create or update a user by github_id or hf_id. Returns the user row."""
     db = _db()
     now = _iso_now()
@@ -135,10 +154,13 @@ def upsert_user(*, github_id: int | None = None, github_username: str | None = N
             uid = _gen_id()
             db.execute(
                 "INSERT INTO users (id, github_id, github_username, github_token_encrypted, "
-                "hf_id, hf_username, hf_token_encrypted, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "hf_id, hf_username, hf_token_encrypted, "
+                "hf_refresh_token_encrypted, hf_token_expires_at, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (uid, github_id, github_username, github_token_encrypted,
-                 hf_id, hf_username, hf_token_encrypted, now, now))
+                 hf_id, hf_username, hf_token_encrypted,
+                 hf_refresh_token_encrypted, hf_token_expires_at, now, now))
             db.commit()
             return get_user(uid)
         # update
@@ -162,6 +184,12 @@ def upsert_user(*, github_id: int | None = None, github_username: str | None = N
         if hf_token_encrypted is not None:
             updates.append("hf_token_encrypted = ?")
             params.append(hf_token_encrypted)
+        if hf_refresh_token_encrypted is not None:
+            updates.append("hf_refresh_token_encrypted = ?")
+            params.append(hf_refresh_token_encrypted)
+        if hf_token_expires_at is not None:
+            updates.append("hf_token_expires_at = ?")
+            params.append(hf_token_expires_at)
         if updates:
             updates.append("updated_at = ?")
             params.append(now)
