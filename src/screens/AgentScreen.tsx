@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { Settings } from "../api/panel";
+import type { Workspace } from "../api/github";
 import {
   AgentClient,
   type AgentEvent,
-  type AgentFile,
   type AgentModel,
   type AgentStatus,
 } from "../api/agent";
@@ -32,6 +32,10 @@ export function AgentScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [cost, setCost] = useState<number | null>(null);
+  // workspaces selector state: fetched from /api/workspaces; user picks which
+  // sandbox the agent should operate in (or No workspace for ephemeral sandbox)
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(workspaceId || null);
   const sessionRef = useRef<string | null>(sessionStorage.getItem(SESSION_KEY));
   const lastMsgRef = useRef<string>("");
   const listRef = useRef<VirtuosoHandle>(null);
@@ -63,6 +67,25 @@ export function AgentScreen({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.baseUrl]);
+
+  // load user workspaces for the selector
+  useEffect(() => {
+    if (!settings.githubSessionId) return;
+    let alive = true;
+    fetch(`${settings.baseUrl}/api/workspaces`, {
+      headers: {
+        Authorization: `Bearer ${settings.githubSessionId}`,
+      },
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("fetch workspaces failed"))))
+      .then((data) => {
+        if (alive) setWorkspaces(data.workspaces || []);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [settings.baseUrl, settings.githubSessionId]);
 
   async function pollUntilSettled(sessionId: string, since: number) {
     let cursor = since;
@@ -113,7 +136,7 @@ export function AgentScreen({
         message,
         sessionRef.current ?? undefined,
         sessionRef.current ? undefined : selected || undefined,
-        workspaceId,
+        selectedWorkspace,
       );
       sessionRef.current = start.session_id;
       sessionStorage.setItem(SESSION_KEY, start.session_id);
@@ -199,6 +222,21 @@ export function AgentScreen({
             </option>
           ))}
         </select>
+        {workspaces.length > 0 && (
+          <select
+            value={selectedWorkspace || ""}
+            onChange={(e) => setSelectedWorkspace(e.target.value || null)}
+            disabled={running}
+            className="bg-surface border border-border rounded-lg px-2 py-1 text-[12px] text-accent outline-none focus:border-accent disabled:opacity-50 max-w-[40%]"
+          >
+            <option value="">(sandbox)</option>
+            {workspaces.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.title || w.id}
+              </option>
+            ))}
+          </select>
+        )}
         {cost != null && <span className="text-[10px]">${cost.toFixed(4)}</span>}
         <span className="ml-auto capitalize">{status}</span>
         {running ? (
