@@ -15,7 +15,14 @@ export function WorkspaceScreen({
   settings: Settings;
   onChange: (s: Settings) => void;
 }) {
-  const client = useMemo(() => new GitHubClient(settings), [settings]);
+  const handleUnauthorized = () => {
+    onChange({ ...settings, githubSessionId: "", githubUsername: "" });
+    setView("list");
+  };
+  const client = useMemo(
+    () => new GitHubClient(settings, handleUnauthorized),
+    [settings, handleUnauthorized],
+  );
   const [view, setView] = useState<View>("list");
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selected, setSelected] = useState<Workspace | null>(null);
@@ -114,6 +121,15 @@ export function WorkspaceScreen({
           <button onClick={refresh} className="underline">
             refresh
           </button>
+          {settings.githubSessionId && (
+            <button
+              onClick={() => onChange({ ...settings, githubSessionId: "", githubUsername: "" })}
+              className="px-2 py-1 rounded border border-rose-500/40 text-rose-300 hover:bg-rose-500/10"
+              title="Clear session (fixes stale 401 errors)"
+            >
+              clear
+            </button>
+          )}
         </div>
 
         {error && (

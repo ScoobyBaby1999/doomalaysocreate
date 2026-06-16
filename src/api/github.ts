@@ -104,7 +104,10 @@ export interface RegistryPage {
 // --- Client --------------------------------------------------------------
 
 export class GitHubClient {
-  constructor(private settings: Settings) {}
+  constructor(
+    private settings: Settings,
+    private onUnauthorized?: () => void,
+  ) {}
 
   private get sessionId(): string {
     return this.settings.githubSessionId || "";
@@ -125,6 +128,9 @@ export class GitHubClient {
   private async req<T>(path: string, init?: RequestInit): Promise<T> {
     let r = await this.raw(path, init);
     if (!r.ok) {
+      if (r.status === 401 && this.onUnauthorized) {
+        this.onUnauthorized();
+      }
       let msg = `HTTP ${r.status}`;
       try {
         const j = await r.json();
