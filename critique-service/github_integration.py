@@ -296,16 +296,18 @@ def _clone_repo(user_id: str, repo_url: str, branch: str | None = None,
     * ``branches=['main','dev']`` — clone listed branches (first is default).
     """
     import subprocess
+    from urllib.parse import urlparse
     if dest is None:
         raise RuntimeError("dest is required for _clone_repo")
     token = _token_for_user(user_id)
-    auth = f"http.extraHeader=Authorization: Bearer {token}"
+    parsed = urlparse(repo_url)
+    auth_repo_url = f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
 
     # Mode A: clone all branches
     if branch is None and branches is None:
         cmd = [
             "git", "clone", "--no-single-branch", "--depth", "1",
-            "-c", auth, repo_url, dest,
+            auth_repo_url, dest,
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -320,7 +322,7 @@ def _clone_repo(user_id: str, repo_url: str, branch: str | None = None,
         first = branches[0]
         cmd = [
             "git", "clone", "--depth", "1", "-b", first, "--single-branch",
-            "-c", auth, repo_url, dest,
+            auth_repo_url, dest,
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -333,20 +335,17 @@ def _clone_repo(user_id: str, repo_url: str, branch: str | None = None,
             fetch = [
                 "git", "-C", dest, "fetch", "origin",
                 f"{extra}:refs/remotes/origin/{extra}", "--depth", "1",
-                "-c", auth,
             ]
             r = subprocess.run(fetch, capture_output=True, text=True, timeout=60)
             if r.returncode != 0:
                 raise RuntimeError(
                     f"git fetch {extra} failed: {_sanitize_git_error(r.stderr.strip())}")
-            # Create a local branch tracking the fetched remote
             co = subprocess.run(
                 ["git", "-C", dest, "checkout", "-b", extra, f"origin/{extra}"],
                 capture_output=True, text=True, timeout=30)
             if co.returncode != 0:
                 raise RuntimeError(
                     f"git checkout {extra} failed: {_sanitize_git_error(co.stderr.strip())}")
-        # Checkout first branch as default
         subprocess.run(
             ["git", "-C", dest, "checkout", first],
             capture_output=True, timeout=30)
@@ -356,7 +355,7 @@ def _clone_repo(user_id: str, repo_url: str, branch: str | None = None,
     effective = branch or "main"
     cmd = [
         "git", "clone", "--depth", "1", "-b", effective,
-        "-c", auth, repo_url, dest,
+        auth_repo_url, dest,
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -411,16 +410,15 @@ def push_to_remote(user_id: str, workspace_id: str, branch: str,
         raise RuntimeError("Workspace has no source repo configured")
     token = _token_for_user(user_id)
     sandbox = ws["sandbox_path"]
-    # set remote URL (no token in URL — use http.extraHeader for auth)
-    repo_url = ws["source_repo"]
+    from urllib.parse import urlparse
+    parsed = urlparse(ws["source_repo"])
+    auth_repo_url = f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
     try:
-        _run_git(sandbox, "remote", "set-url", "origin", repo_url)
+        _run_git(sandbox, "remote", "set-url", "origin", auth_repo_url)
     except RuntimeError:
-        _run_git(sandbox, "remote", "add", "origin", repo_url)
-    # push with auth header
+        _run_git(sandbox, "remote", "add", "origin", auth_repo_url)
     args = [
         "push", "-u", "origin", branch,
-        "-c", f"http.extraHeader=Authorization: Bearer {token}",
     ]
     if force:
         args.append("--force")
