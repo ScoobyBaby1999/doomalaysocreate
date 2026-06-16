@@ -192,19 +192,6 @@ export function AgentScreen({
     }
   }
 
-  if (models !== null && models.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full p-6 text-center space-y-3">
-        <p className="text-sm font-medium">The agent isn't set up yet</p>
-        <p className="text-sm text-muted max-w-xs">
-          Add an <span className="text-accent">Anthropic key</span> in Settings for the
-          Claude agent. More models (Kimi, GLM, and others) unlock once the open agent
-          ships.
-        </p>
-      </div>
-    );
-  }
-
   const running = status === "running" || status === "starting";
 
   return (
