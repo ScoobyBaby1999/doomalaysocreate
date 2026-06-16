@@ -25,6 +25,7 @@ from pathlib import Path
 
 import crypto
 import db
+import jwt_auth
 
 # ---------------------------------------------------------------------------
 # Config
@@ -92,11 +93,17 @@ def get_github_user(token: str) -> dict:
     return _github_api("/user", token=token)
 
 
-def upsert_user_from_github(github_token: str) -> dict:
-    """Fetch GitHub user info, upsert into DB, return the user row."""
+def upsert_user_from_github(github_token: str, user_id: str | None = None) -> dict:
+    """Fetch GitHub user info, upsert into DB, return the user row.
+
+    If ``user_id`` is None, a deterministic ID is derived from the GitHub user id
+    (via ``jwt_auth.derive_user_id``) so the row survives DB rebuilds.
+    """
     info = get_github_user(github_token)
     encrypted = crypto.encrypt_token(github_token)
+    uid = user_id or jwt_auth.derive_user_id(info["id"])
     return db.upsert_user(
+        user_id=uid,
         github_id=info["id"],
         github_username=info["login"],
         github_token_encrypted=encrypted,

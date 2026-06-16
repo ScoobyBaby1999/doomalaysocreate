@@ -26,6 +26,7 @@ from urllib.parse import urlencode
 
 import crypto
 import db
+import jwt_auth
 
 # ---------------------------------------------------------------------------
 # Config
@@ -140,6 +141,7 @@ def upsert_user_from_hf(token_data: dict, user_id: str | None = None) -> dict:
     ``refresh_token`` and ``expires_in`` from the token exchange response.
     If ``user_id`` is provided, look up existing user by that internal UUID first.
     If found, use their github_id for the upsert to ensure merge works.
+    If ``user_id`` is None, derives a deterministic ID from the HF username.
     """
     hf_token = token_data["access_token"]
     info = get_hf_user(hf_token)
@@ -148,6 +150,10 @@ def upsert_user_from_hf(token_data: dict, user_id: str | None = None) -> dict:
     expires_at = ""
     if token_data.get("expires_in"):
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))).isoformat()
+
+    # Derive a deterministic ID if none provided
+    if user_id is None:
+        user_id = jwt_auth.derive_user_id_from_hf(info["name"])
 
     github_id = None
     if user_id:

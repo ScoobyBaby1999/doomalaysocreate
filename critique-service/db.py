@@ -162,7 +162,7 @@ def upsert_user(*, user_id: str | None = None, github_id: int | None = None, git
             if row:
                 user = dict(row)
         if user is None:
-            uid = _gen_id()
+            uid = user_id if user_id else _gen_id()
             db.execute(
                 "INSERT INTO users (id, github_id, github_username, github_token_encrypted, "
                 "hf_id, hf_username, hf_token_encrypted, "

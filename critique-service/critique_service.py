@@ -17,6 +17,7 @@ import authtoken
 import dataset_persistence
 import db
 import github_integration
+import jwt_auth
 import orchestrate
 from content.roles import make_prompt
 from jobs import JobCapExceeded, JobRunner, finalize_judges, run_panel_slots
@@ -1394,9 +1395,14 @@ class Handler(BaseHTTPRequestHandler):
     # --- GitHub integration handlers ------------------------------------------
 
     def _require_user(self) -> str | None:
-        """Extract user_id from the bearer token.  Returns None and sends error
-        if auth is missing or user not found.  Does NOT auto-create users —
-        only tokens from completed GitHub or HF OAuth flows are accepted."""
+        """Extract and validate user_id from the JWT bearer token.
+
+        Verifies the JWT signature + expiry.  If the user row is missing from
+        the DB (ephemeral SQLite), reconstructs it from the JWT payload so
+        sessions survive a DB rebuild.
+        Returns the deterministic user_id on success, None on failure (with an
+        HTTP 401 already sent to the response).
+        """
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             self._send_json(401, {"error": "missing bearer token"})
@@ -1405,12 +1411,37 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             self._send_json(401, {"error": "empty bearer token"})
             return None
-        # check if this is a known user (token == session_id for now)
-        user = db.get_user(token)
-        if user:
-            return user["id"]
-        self._send_json(401, {"error": "unknown session — complete GitHub OAuth first"})
-        return None
+
+        payload = jwt_auth.verify_jwt(token)
+        if not payload:
+            self._send_json(401, {"error": "invalid or expired session token"})
+            return None
+
+        user_id = payload["sub"]
+
+        # If the user row is missing (DB wiped), reconstruct it from the JWT.
+        # The encrypted tokens are opaque but valid as long as the JWT is valid.
+        user = db.get_user(user_id)
+        if not user:
+            github_id = payload.get("github_id")
+            github_username = payload.get("github_username")
+            github_token_enc = payload.get("github_token_enc")
+            hf_id = payload.get("hf_id")
+            hf_token_enc = payload.get("hf_token_enc")
+            if github_id is not None and github_token_enc:
+                db.upsert_user(
+                    user_id=user_id,
+                    github_id=github_id,
+                    github_username=github_username,
+                    github_token_encrypted=github_token_enc,
+                    hf_id=hf_id,
+                    hf_token_encrypted=hf_token_enc,
+                )
+            else:
+                self._send_json(401, {"error": "incomplete session - please re-authenticate"})
+                return None
+
+        return user_id
 
     def _handle_github_login(self) -> None:
         if not github_integration._github_configured():
@@ -1460,7 +1491,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             gh_token = github_integration.exchange_github_code(code)
             user = github_integration.upsert_user_from_github(gh_token)
-            self._redirect(f"https://{host}/#github-connected={user['id']}")
+            jwt_token = jwt_auth.generate_jwt(
+                github_id=user["github_id"],
+                github_username=user.get("github_username", ""),
+                github_token_encrypted=user.get("github_token_encrypted", ""),
+            )
+            self._redirect(f"https://{host}/#github-connected={jwt_token}")
         except Exception as exc:
             log_event("github_oauth_error", error=str(exc)[:200])
             self._redirect(f"https://{host}/#github-error=token_exchange_failed")
@@ -1483,7 +1519,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             gh_token = github_integration.exchange_github_code(code)
             user = github_integration.upsert_user_from_github(gh_token)
-            result: dict[str, object] = {"session_id": user["id"]}
+            user_id = user["id"]
+            jwt_token = jwt_auth.generate_jwt(
+                github_id=user["github_id"],
+                github_username=user.get("github_username", ""),
+                github_token_encrypted=user.get("github_token_encrypted", ""),
+            )
+            result: dict[str, object] = {"session_id": jwt_token, "user_id": user_id}
             # Chain HF OAuth if user hasn't connected HF yet
             if not user.get("hf_token_encrypted"):
                 result["next"] = "hf"
@@ -1565,7 +1607,16 @@ class Handler(BaseHTTPRequestHandler):
             redirect_uri = f"https://{host}/api/auth/hf/callback"
             token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
             user = dataset_persistence.upsert_user_from_hf(token_data, user_id=github_user_id or None)
-            self._redirect(f"https://{host}/#hf-connected={user['id']}")
+            # Re-fetch to ensure we have the complete row (with github_id if merged)
+            user = db.get_user(user["id"]) or user
+            jwt_token = jwt_auth.generate_jwt(
+                github_id=user.get("github_id", 0),
+                github_username=user.get("github_username", ""),
+                github_token_encrypted=user.get("github_token_encrypted", ""),
+                hf_id=user.get("hf_username", ""),
+                hf_token_encrypted=user.get("hf_token_encrypted", ""),
+            )
+            self._redirect(f"https://{host}/#hf-connected={jwt_token}")
         except Exception as exc:
             log_event("hf_oauth_error", error=str(exc)[:200])
             self._redirect(f"https://{host}/#hf-error=token_exchange_failed")
@@ -1601,7 +1652,17 @@ class Handler(BaseHTTPRequestHandler):
                 dataset_persistence.init_persistence(user["id"])
             except Exception as exc:
                 log_event("dataset_init_error", error=str(exc)[:200])
-            self._send_json(200, {"session_id": user["id"]})
+            # Re-fetch to ensure we have the complete row (with github_id if merged)
+            user = db.get_user(user["id"]) or user
+            user_id = user["id"]
+            jwt_token = jwt_auth.generate_jwt(
+                github_id=user.get("github_id", 0),
+                github_username=user.get("github_username", ""),
+                github_token_encrypted=user.get("github_token_encrypted", ""),
+                hf_id=user.get("hf_username", ""),
+                hf_token_encrypted=user.get("hf_token_encrypted", ""),
+            )
+            self._send_json(200, {"session_id": jwt_token, "user_id": user_id})
         except Exception as exc:
             log_event("hf_proxy_exchange_error", error=str(exc)[:200])
             self._send_json(500, {"error": "token exchange failed"})
