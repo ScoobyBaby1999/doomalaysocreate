@@ -1305,8 +1305,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "body must be a JSON object"})
             return None
         return payload
-        #   shared gate for POST routes: bearer auth + JSON body parse. on any
-        #   failure it writes the error response and returns None.
+
+    def _auth_and_body(self) -> dict | None:
+        """Shared gate for panel POST routes: panel bearer auth + JSON body parse.
+        On any failure it writes the error response and returns None."""
         if not _token_ok(self.headers.get("Authorization")):
             if not _auth_configured():
                 self._send_json(503, {"error": "no auth secret configured on server "
@@ -1314,22 +1316,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(401, {"error": "missing or invalid bearer token"})
             return None
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            length = 0
-        if length <= 0 or length > MAX_BODY_BYTES:
-            self._send_json(413, {"error": f"body must be 1..{MAX_BODY_BYTES} bytes"})
-            return None
-        try:
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError) as e:
-            self._send_json(400, {"error": f"invalid JSON body: {e}"})
-            return None
-        if not isinstance(payload, dict):
-            self._send_json(400, {"error": "body must be a JSON object"})
-            return None
-        return payload
+        return self._read_json_body()
 
     @staticmethod
     def _valid_panel(p) -> bool:
