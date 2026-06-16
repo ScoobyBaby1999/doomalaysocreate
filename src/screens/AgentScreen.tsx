@@ -5,6 +5,7 @@ import type { Workspace } from "../api/github";
 import {
   AgentClient,
   type AgentEvent,
+  type AgentFile,
   type AgentModel,
   type AgentStatus,
 } from "../api/agent";
@@ -136,7 +137,7 @@ export function AgentScreen({
         message,
         sessionRef.current ?? undefined,
         sessionRef.current ? undefined : selected || undefined,
-        selectedWorkspace,
+        selectedWorkspace ?? undefined,
       );
       sessionRef.current = start.session_id;
       sessionStorage.setItem(SESSION_KEY, start.session_id);
