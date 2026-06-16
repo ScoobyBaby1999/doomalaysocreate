@@ -14,7 +14,7 @@ export default function App() {
   const [settings, setSettings] = useSettings();
   const hasCredentials = !!(settings.token || settings.rotationSecret || settings.githubSessionId);
   const [manualSetup, setManualSetup] = useState(false);
-  const [tab, setTab] = useState<Tab>("workspaces");
+  const [tab, setTab] = useState<Tab>(hasCredentials ? "chat" : "settings");
 
   // Handle OAuth callback hashes
   // GitHub: #github-connected=<id> | #github-code=<code>&state=<state> (proxy) | #github-error=...
@@ -62,7 +62,7 @@ export default function App() {
             saveSettings(newSettings);
             const MAIN_SPACE = "https://scoobybaby1999-loom.hf.space";
             const thisSpace = window.location.origin;
-            window.location.href = `${MAIN_SPACE}/api/auth/hf/login?redirect_to=${encodeURIComponent(thisSpace)}&user_id=${encodeURIComponent(result.session_id)}`;
+            window.location.href = `${MAIN_SPACE}/api/auth/hf/login?redirect_to=${encodeURIComponent(thisSpace)}&github_user_id=${encodeURIComponent(result.session_id)}`;
           } else {
             saveSettings(newSettings);
             setTab("workspaces");
