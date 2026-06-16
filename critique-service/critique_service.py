@@ -1428,18 +1428,19 @@ class Handler(BaseHTTPRequestHandler):
             github_token_enc = payload.get("github_token_enc")
             hf_id = payload.get("hf_id")
             hf_token_enc = payload.get("hf_token_enc")
-            if github_id is not None and github_token_enc:
-                db.upsert_user(
-                    user_id=user_id,
-                    github_id=github_id,
-                    github_username=github_username,
-                    github_token_encrypted=github_token_enc,
-                    hf_id=hf_id,
-                    hf_token_encrypted=hf_token_enc,
-                )
-            else:
+            has_github = github_id and github_token_enc
+            has_hf = hf_id and hf_token_enc
+            if not (has_github or has_hf):
                 self._send_json(401, {"error": "incomplete session - please re-authenticate"})
                 return None
+            db.upsert_user(
+                user_id=user_id,
+                github_id=github_id if has_github else None,
+                github_username=github_username if has_github else None,
+                github_token_encrypted=github_token_enc if has_github else None,
+                hf_id=hf_id if has_hf else None,
+                hf_token_encrypted=hf_token_enc if has_hf else None,
+            )
 
         return user_id
 
@@ -1492,6 +1493,7 @@ class Handler(BaseHTTPRequestHandler):
             gh_token = github_integration.exchange_github_code(code)
             user = github_integration.upsert_user_from_github(gh_token)
             jwt_token = jwt_auth.generate_jwt(
+                user_id=user["id"],
                 github_id=user["github_id"],
                 github_username=user.get("github_username", ""),
                 github_token_encrypted=user.get("github_token_encrypted", ""),
@@ -1522,6 +1524,7 @@ class Handler(BaseHTTPRequestHandler):
             user = github_integration.upsert_user_from_github(gh_token)
             user_id = user["id"]
             jwt_token = jwt_auth.generate_jwt(
+                user_id=user["id"],
                 github_id=user["github_id"],
                 github_username=user.get("github_username", ""),
                 github_token_encrypted=user.get("github_token_encrypted", ""),
@@ -1612,11 +1615,12 @@ class Handler(BaseHTTPRequestHandler):
             # Re-fetch to ensure we have the complete row (with github_id if merged)
             user = db.get_user(user["id"]) or user
             jwt_token = jwt_auth.generate_jwt(
-                github_id=user.get("github_id", 0),
-                github_username=user.get("github_username", ""),
-                github_token_encrypted=user.get("github_token_encrypted", ""),
-                hf_id=user.get("hf_username", ""),
-                hf_token_encrypted=user.get("hf_token_encrypted", ""),
+                user_id=user["id"],
+                github_id=user.get("github_id") or 0,
+                github_username=user.get("github_username") or "",
+                github_token_encrypted=user.get("github_token_encrypted") or "",
+                hf_id=user.get("hf_username") or "",
+                hf_token_encrypted=user.get("hf_token_encrypted") or "",
                 audience=self._space_host(),
             )
             self._redirect(f"https://{host}/#hf-connected={jwt_token}")
@@ -1659,11 +1663,12 @@ class Handler(BaseHTTPRequestHandler):
             user = db.get_user(user["id"]) or user
             user_id = user["id"]
             jwt_token = jwt_auth.generate_jwt(
-                github_id=user.get("github_id", 0),
-                github_username=user.get("github_username", ""),
-                github_token_encrypted=user.get("github_token_encrypted", ""),
-                hf_id=user.get("hf_username", ""),
-                hf_token_encrypted=user.get("hf_token_encrypted", ""),
+                user_id=user["id"],
+                github_id=user.get("github_id") or 0,
+                github_username=user.get("github_username") or "",
+                github_token_encrypted=user.get("github_token_encrypted") or "",
+                hf_id=user.get("hf_username") or "",
+                hf_token_encrypted=user.get("hf_token_encrypted") or "",
                 audience=self._space_host(),
             )
             self._send_json(200, {"session_id": jwt_token, "user_id": user_id})

@@ -86,9 +86,10 @@ def derive_user_id_from_hf(hf_name: str) -> str:
 # ---------------------------------------------------------------------------
 def generate_jwt(
     *,
-    github_id: int,
-    github_username: str,
-    github_token_encrypted: str,
+    user_id: str,
+    github_id: int = 0,
+    github_username: str = "",
+    github_token_encrypted: str = "",
     hf_id: str = "",
     hf_token_encrypted: str = "",
     exp_hours: int = DEFAULT_EXP_HOURS,
@@ -96,13 +97,15 @@ def generate_jwt(
 ) -> str:
     """Mint a new JWT with embedded encrypted credentials.
 
+    ``user_id`` is the deterministic internal ID (from ``derive_user_id`` or
+    ``derive_user_id_from_hf``).  It becomes the JWT ``sub`` claim so auth
+    lookups are stable across DB rebuilds.
     ``audience`` identifies the Space that should accept this token.
     When empty, uses SPACE_ID env var.  When that is also empty the
     payload carries no aud claim (callers must accept tokens from any
     source — not recommended).
     """
     now = int(time.time())
-    user_id = derive_user_id(github_id)
     payload = {
         "sub": user_id,
         "github_id": github_id,
@@ -167,9 +170,10 @@ def refresh_jwt(token: str, exp_hours: int = DEFAULT_EXP_HOURS) -> str | None:
     for k in ("exp", "iat"):
         payload.pop(k, None)
     return generate_jwt(
-        github_id=payload["github_id"],
-        github_username=payload["github_username"],
-        github_token_encrypted=payload["github_token_enc"],
+        user_id=payload["sub"],
+        github_id=payload.get("github_id", 0),
+        github_username=payload.get("github_username", ""),
+        github_token_encrypted=payload.get("github_token_enc", ""),
         hf_id=payload.get("hf_id", ""),
         hf_token_encrypted=payload.get("hf_token_enc", ""),
         exp_hours=exp_hours,
