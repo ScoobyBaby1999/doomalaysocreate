@@ -276,10 +276,7 @@ function CreateWorkspace({
     const reqId = ++repoSelectRef.current;
     try {
       const [owner, repo] = fullName.split("/");
-      const [branchesResult, repoDetails] = await Promise.all([
-        client.branches(owner, repo),
-        client.contents(owner, repo, "", "HEAD"), // fetch repo root to get description
-      ]);
+      const branchesResult = await client.branches(owner, repo);
       if (reqId !== repoSelectRef.current) return;
       setBranches(branchesResult.branches);
       const def = branchesResult.branches.find((b) => b.name === "main") || branchesResult.branches[0];
