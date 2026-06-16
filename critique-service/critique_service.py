@@ -606,6 +606,16 @@ def _token_ok(header_value: str | None) -> bool:
     return ok
 
 
+def _token_or_jwt_ok(header_value: str | None) -> bool:
+    """Accept either panel token (static/rotation) OR a valid JWT."""
+    if _token_ok(header_value):
+        return True
+    if not header_value or not header_value.startswith("Bearer "):
+        return False
+    token = header_value[len("Bearer "):].strip()
+    return jwt_auth.verify_jwt(token, expected_aud=os.environ.get("SPACE_ID", "")) is not None
+
+
 # ---------------------------------------------------------------------------
 # OAuth / onboarding helpers
 # ---------------------------------------------------------------------------
@@ -919,7 +929,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, snap)
             return
         if route == "/api/agent/models":
-            if not _token_ok(self.headers.get("Authorization")):
+            if not _token_or_jwt_ok(self.headers.get("Authorization")):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             self._send_json(200, {"tier": agent_sessions.agent_tier(),
@@ -927,7 +937,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route.startswith("/api/agent/"):
             #   transcript polling + artifact access share the bearer token.
-            if not _token_ok(self.headers.get("Authorization")):
+            if not _token_or_jwt_ok(self.headers.get("Authorization")):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             self._handle_agent_get(route)
@@ -2080,7 +2090,7 @@ class Handler(BaseHTTPRequestHandler):
         #   POST /api/agent/<sid>/interrupt — stop the in-flight turn (bearer-gated,
         #   no body required). handled before the body-parsing gate below.
         if route.startswith("/api/agent/") and route.endswith("/interrupt"):
-            if not _token_ok(self.headers.get("Authorization")):
+            if not _token_or_jwt_ok(self.headers.get("Authorization")):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             sid = route[len("/api/agent/"):-len("/interrupt")]
@@ -2090,6 +2100,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             stopped = session.interrupt()
             self._send_json(200, {"interrupted": stopped, "status": session.status})
+            return
+        #   POST /api/agent — start/continue agent session. Accepts JWT or panel token.
+        if route == "/api/agent":
+            if not _token_or_jwt_ok(self.headers.get("Authorization")):
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            self._handle_agent_post(payload)
             return
         # --- GitHub integration POST routes --------------------------------------
         if route == "/api/auth/github/disconnect":
@@ -2131,15 +2151,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_workspace_checkout(ws_id)
             return
         # -----------------------------------------------------------------------
-        if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates",
-                         "/api/agent"):
+        if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates"):
             self._send_json(404, {"error": "not found"})
             return
         payload = self._auth_and_body()
         if payload is None:
-            return
-        if route == "/api/agent":
-            self._handle_agent_post(payload)
             return
         panel: Panel = self.server.panel  # type: ignore[attr-defined]
         is_async = bool(payload.get("async"))
