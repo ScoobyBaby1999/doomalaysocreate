@@ -1286,7 +1286,25 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_json(404, {"error": "not found"})
 
-    def _auth_and_body(self) -> dict | None:
+    def _read_json_body(self) -> dict | None:
+        """Parse the request body as JSON (no auth check — caller already
+        called _require_user() for OAuth endpoints)."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > MAX_BODY_BYTES:
+            self._send_json(413, {"error": f"body must be 1..{MAX_BODY_BYTES} bytes"})
+            return None
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            self._send_json(400, {"error": f"invalid JSON body: {e}"})
+            return None
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "body must be a JSON object"})
+            return None
+        return payload
         #   shared gate for POST routes: bearer auth + JSON body parse. on any
         #   failure it writes the error response and returns None.
         if not _token_ok(self.headers.get("Authorization")):
@@ -1774,7 +1792,7 @@ class Handler(BaseHTTPRequestHandler):
         user_id = self._require_user()
         if not user_id:
             return
-        payload = self._auth_and_body()
+        payload = self._read_json_body()
         if payload is None:
             return
         title = payload.get("title", "").strip()
@@ -1798,7 +1816,7 @@ class Handler(BaseHTTPRequestHandler):
         user_id = self._require_user()
         if not user_id:
             return
-        payload = self._auth_and_body()
+        payload = self._read_json_body()
         if payload is None:
             return
         ws = db.get_workspace(ws_id)
@@ -1828,7 +1846,7 @@ class Handler(BaseHTTPRequestHandler):
         user_id = self._require_user()
         if not user_id:
             return
-        payload = self._auth_and_body()
+        payload = self._read_json_body()
         if payload is None:
             return
         message = payload.get("message", "").strip()
@@ -1849,7 +1867,7 @@ class Handler(BaseHTTPRequestHandler):
         user_id = self._require_user()
         if not user_id:
             return
-        payload = self._auth_and_body()
+        payload = self._read_json_body()
         if payload is None:
             return
         ws = db.get_workspace(ws_id)
@@ -1883,7 +1901,7 @@ class Handler(BaseHTTPRequestHandler):
         user_id = self._require_user()
         if not user_id:
             return
-        payload = self._auth_and_body()
+        payload = self._read_json_body()
         if payload is None:
             return
         title = payload.get("title", "").strip()
@@ -1967,7 +1985,7 @@ class Handler(BaseHTTPRequestHandler):
         user_id = self._require_user()
         if not user_id:
             return
-        payload = self._auth_and_body()
+        payload = self._read_json_body()
         if payload is None:
             return
         approved = bool(payload.get("approved", False))
@@ -2038,7 +2056,7 @@ class Handler(BaseHTTPRequestHandler):
         user_id = self._require_user()
         if not user_id:
             return
-        payload = self._auth_and_body()
+        payload = self._read_json_body()
         if payload is None:
             return
         branch = payload.get("branch", "").strip()
