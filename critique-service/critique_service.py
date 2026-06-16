@@ -1412,7 +1412,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "empty bearer token"})
             return None
 
-        payload = jwt_auth.verify_jwt(token)
+        payload = jwt_auth.verify_jwt(token, expected_aud=self._space_host())
         if not payload:
             self._send_json(401, {"error": "invalid or expired session token"})
             return None
@@ -1495,6 +1495,7 @@ class Handler(BaseHTTPRequestHandler):
                 github_id=user["github_id"],
                 github_username=user.get("github_username", ""),
                 github_token_encrypted=user.get("github_token_encrypted", ""),
+                audience=self._space_host(),
             )
             self._redirect(f"https://{host}/#github-connected={jwt_token}")
         except Exception as exc:
@@ -1524,6 +1525,7 @@ class Handler(BaseHTTPRequestHandler):
                 github_id=user["github_id"],
                 github_username=user.get("github_username", ""),
                 github_token_encrypted=user.get("github_token_encrypted", ""),
+                audience=self._space_host(),
             )
             result: dict[str, object] = {"session_id": jwt_token, "user_id": user_id}
             # Chain HF OAuth if user hasn't connected HF yet
@@ -1615,6 +1617,7 @@ class Handler(BaseHTTPRequestHandler):
                 github_token_encrypted=user.get("github_token_encrypted", ""),
                 hf_id=user.get("hf_username", ""),
                 hf_token_encrypted=user.get("hf_token_encrypted", ""),
+                audience=self._space_host(),
             )
             self._redirect(f"https://{host}/#hf-connected={jwt_token}")
         except Exception as exc:
@@ -1661,6 +1664,7 @@ class Handler(BaseHTTPRequestHandler):
                 github_token_encrypted=user.get("github_token_encrypted", ""),
                 hf_id=user.get("hf_username", ""),
                 hf_token_encrypted=user.get("hf_token_encrypted", ""),
+                audience=self._space_host(),
             )
             self._send_json(200, {"session_id": jwt_token, "user_id": user_id})
         except Exception as exc:

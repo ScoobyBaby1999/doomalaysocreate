@@ -15,14 +15,18 @@ import time
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-# shared secret: prefer dedicated JWT_SECRET, fall back to rotation secret,
-# then to a (non-random) per-installation default.  Spaces should set
-# CRITIQUE_ROTATION_SECRET (already required anyway).
-JWT_SECRET = os.environ.get(
-    "JWT_SECRET",
-    os.environ.get("CRITIQUE_ROTATION_SECRET", "loom-jvT-default-S3c"),
-).encode()
-assert JWT_SECRET, "JWT_SECRET or CRITIQUE_ROTATION_SECRET must be set"
+# shared secret: prefer dedicated JWT_SECRET, fall back to rotation secret.
+# NO hardcoded fallback — if neither is set the module refuses to load.
+_raw = os.environ.get("JWT_SECRET") or os.environ.get("CRITIQUE_ROTATION_SECRET")
+if not _raw:
+    raise RuntimeError(
+        "JWT_SECRET or CRITIQUE_ROTATION_SECRET must be set"
+    )
+JWT_SECRET = _raw.encode()
+
+# default audience: the SPACE_ID env var (set per-Space by HF).  When absent
+# the caller must supply an explicit audience to generate_jwt / verify_jwt.
+_DEFAULT_AUD = os.environ.get("SPACE_ID", "")
 
 # default token lifetime -- 7 days.  Short enough that a leaked JWT
 # expires quickly; long enough that users aren't annoyed.
@@ -88,8 +92,15 @@ def generate_jwt(
     hf_id: str = "",
     hf_token_encrypted: str = "",
     exp_hours: int = DEFAULT_EXP_HOURS,
+    audience: str = "",
 ) -> str:
-    """Mint a new JWT with embedded encrypted credentials."""
+    """Mint a new JWT with embedded encrypted credentials.
+
+    ``audience`` identifies the Space that should accept this token.
+    When empty, uses SPACE_ID env var.  When that is also empty the
+    payload carries no aud claim (callers must accept tokens from any
+    source — not recommended).
+    """
     now = int(time.time())
     user_id = derive_user_id(github_id)
     payload = {
@@ -102,6 +113,9 @@ def generate_jwt(
         "iat": now,
         "exp": now + (exp_hours * 3600),
     }
+    aud = audience or _DEFAULT_AUD
+    if aud:
+        payload["aud"] = aud
     header_b64 = _b64url_encode(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
     payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode())
     sig_b64 = _sign(header_b64, payload_b64)
@@ -111,8 +125,13 @@ def generate_jwt(
 # ---------------------------------------------------------------------------
 # Verification
 # ---------------------------------------------------------------------------
-def verify_jwt(token: str) -> dict | None:
-    """Verify a JWT.  Returns payload dict or None if invalid/expired."""
+def verify_jwt(token: str, expected_aud: str | None = None) -> dict | None:
+    """Verify a JWT.  Returns payload dict or None if invalid/expired/misaddressed.
+
+    When ``expected_aud`` is None the SPACE_ID env var is used as the
+    expected audience.  When both are empty the aud claim is not checked
+    (not recommended).
+    """
     if not token or "." not in token:
         return None
     parts = token.split(".")
@@ -128,6 +147,11 @@ def verify_jwt(token: str) -> dict | None:
     exp = payload.get("exp")
     if not exp or exp < time.time():
         return None
+    aud = payload.get("aud")
+    if aud:
+        want = expected_aud or _DEFAULT_AUD
+        if want and aud != want:
+            return None
     return payload
 
 
@@ -149,4 +173,5 @@ def refresh_jwt(token: str, exp_hours: int = DEFAULT_EXP_HOURS) -> str | None:
         hf_id=payload.get("hf_id", ""),
         hf_token_encrypted=payload.get("hf_token_enc", ""),
         exp_hours=exp_hours,
+        audience=payload.get("aud", ""),
     )
