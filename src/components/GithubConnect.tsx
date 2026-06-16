@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { GitHubClient, type GithubStatus } from "../api/github";
 import { ApiError, type Settings } from "../api/panel";
+import { getJWTSub } from "../lib/jwt";
 
 interface Props {
   settings: Settings;
@@ -17,7 +18,7 @@ export function GithubConnect({ settings, onConnected }: Props) {
   const [sessionExpired, setSessionExpired] = useState(false);
 
   const client = useMemo(() => new GitHubClient(settings), [settings]);
-  const connected = !!settings.githubSessionId;
+  const hasSession = !!settings.githubSessionId;
 
   useEffect(() => {
     if (!settings.githubSessionId) {
@@ -52,9 +53,13 @@ export function GithubConnect({ settings, onConnected }: Props) {
   function handleConnect() {
     // OAuth proxy flow: redirect to the main Space's login endpoint which handles
     // the GitHub OAuth and forwards the callback back to this user's Space.
+    // If user already has a session (e.g. from HF OAuth), pass its `sub` so
+    // the backend merges the GitHub account instead of creating a new one.
     const MAIN_SPACE = "https://scoobybaby1999-loom.hf.space";
     const thisSpace = window.location.origin;
-    const loginUrl = `${MAIN_SPACE}/api/auth/github/login?redirect_to=${encodeURIComponent(thisSpace)}`;
+    const existingId = settings.githubSessionId ? getJWTSub(settings.githubSessionId) : null;
+    const existingParam = existingId ? `&existing_id=${encodeURIComponent(existingId)}` : "";
+    const loginUrl = `${MAIN_SPACE}/api/auth/github/login?redirect_to=${encodeURIComponent(thisSpace)}${existingParam}`;
     window.location.href = loginUrl;
   }
 
@@ -94,7 +99,8 @@ export function GithubConnect({ settings, onConnected }: Props) {
     );
   }
 
-  if (connected && status?.authenticated) {
+  // If they have a GitHub connection, show fully connected
+  if (hasSession && status?.github_username) {
     return (
       <div className="flex items-center gap-1.5 text-[11px]">
         <span className="text-green-400">✓</span>
@@ -112,12 +118,13 @@ export function GithubConnect({ settings, onConnected }: Props) {
     );
   }
 
+  // If they have any session (HF only) they need to connect GitHub
   return (
     <button
       onClick={handleConnect}
       className="text-[11px] px-2 py-1 rounded-lg border border-border hover:border-accent text-accent"
     >
-      🔗 Connect Accounts
+      🔗 Connect GitHub
     </button>
   );
 }

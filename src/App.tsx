@@ -6,6 +6,7 @@ import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { AgentScreen } from "./screens/AgentScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
 import { exchangeGitHubCode, exchangeHFCode } from "./api/github";
+import { getJWTSub } from "./lib/jwt";
 import type { Settings } from "./api/panel";
 
 type Tab = "chat" | "agent" | "workspaces" | "settings";
@@ -62,7 +63,8 @@ export default function App() {
             saveSettings(newSettings);
             const MAIN_SPACE = "https://scoobybaby1999-loom.hf.space";
             const thisSpace = window.location.origin;
-            window.location.href = `${MAIN_SPACE}/api/auth/hf/login?redirect_to=${encodeURIComponent(thisSpace)}&github_user_id=${encodeURIComponent(result.session_id)}`;
+            const userId = getJWTSub(result.session_id) || result.session_id;
+            window.location.href = `${MAIN_SPACE}/api/auth/hf/login?redirect_to=${encodeURIComponent(thisSpace)}&github_user_id=${encodeURIComponent(userId)}`;
           } else {
             saveSettings(newSettings);
             setTab("workspaces");
