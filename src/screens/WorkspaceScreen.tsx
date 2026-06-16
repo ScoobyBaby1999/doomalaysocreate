@@ -239,6 +239,8 @@ function CreateWorkspace({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const repoSelectRef = useRef(0);
+  const titleEdited = useRef(false);
+  const descriptionEdited = useRef(false);
 
   useEffect(() => {
     let alive = true;
@@ -265,20 +267,33 @@ function CreateWorkspace({
     setSelectedBranches(new Set());
     if (!fullName) {
       setBranches([]);
+      // Auto-clear title/description if they were auto-filled
+      if (!titleEdited.current) setTitle("");
+      if (!descriptionEdited.current) setDescription("");
       return;
     }
     setLoadingBranches(true);
     const reqId = ++repoSelectRef.current;
     try {
       const [owner, repo] = fullName.split("/");
-      const r = await client.branches(owner, repo);
-      if (reqId !== repoSelectRef.current) return; // stale — superseded by newer select
-      setBranches(r.branches);
-      // auto-select default branch
-      const def = r.branches.find((b) => b.name === "main") || r.branches[0];
+      const [branchesResult, repoDetails] = await Promise.all([
+        client.branches(owner, repo),
+        client.contents(owner, repo, "", "HEAD"), // fetch repo root to get description
+      ]);
+      if (reqId !== repoSelectRef.current) return;
+      setBranches(branchesResult.branches);
+      const def = branchesResult.branches.find((b) => b.name === "main") || branchesResult.branches[0];
       if (def) setSelectedBranch(def.name);
-      } catch (e) {
-        if (reqId === repoSelectRef.current) setError(e instanceof Error ? e.message : String(e));
+      // Auto-fill title/description if not manually edited
+      const repoInfo = repos.find((r) => r.full_name === fullName);
+      if (repoInfo && !titleEdited.current) {
+        setTitle(repoInfo.name);
+      }
+      if (repoInfo && !descriptionEdited.current) {
+        setDescription(repoInfo.description || "");
+      }
+    } catch (e) {
+      if (reqId === repoSelectRef.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (reqId === repoSelectRef.current) setLoadingBranches(false);
     }
@@ -335,7 +350,7 @@ function CreateWorkspace({
           <span className="text-[11px] text-muted">Title</span>
           <input
             value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={(e) => { titleEdited.current = true; setTitle(e.target.value); }}
             placeholder="my-project"
             className="mt-1 w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
           />
@@ -345,7 +360,7 @@ function CreateWorkspace({
           <span className="text-[11px] text-muted">Description (optional)</span>
           <input
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={(e) => { descriptionEdited.current = true; setDescription(e.target.value); }}
             placeholder="What this workspace is for"
             className="mt-1 w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
           />
