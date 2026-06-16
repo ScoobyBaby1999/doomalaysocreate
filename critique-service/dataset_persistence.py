@@ -133,12 +133,12 @@ def get_hf_user(token: str) -> dict:
     return _hf_api("/api/whoami-v2", token=token)
 
 
-def upsert_user_from_hf(token_data: dict, github_id: str | None = None) -> dict:
+def upsert_user_from_hf(token_data: dict, user_id: str | None = None) -> dict:
     """Fetch HF user info, upsert into DB, return the user row.
 
     ``token_data`` must contain ``access_token``, and may contain
     ``refresh_token`` and ``expires_in`` from the token exchange response.
-    If ``github_id`` is provided, look up existing user by that ID first.
+    If ``user_id`` is provided, look up existing user by that internal UUID first.
     """
     hf_token = token_data["access_token"]
     info = get_hf_user(hf_token)
@@ -148,7 +148,7 @@ def upsert_user_from_hf(token_data: dict, github_id: str | None = None) -> dict:
     if token_data.get("expires_in"):
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))).isoformat()
     return db.upsert_user(
-        github_id=github_id,
+        user_id=user_id,
         hf_id=info["name"],
         hf_username=info["name"],
         hf_token_encrypted=encrypted,

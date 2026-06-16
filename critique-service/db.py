@@ -136,19 +136,24 @@ def _gen_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
-def upsert_user(*, github_id: int | None = None, github_username: str | None = None,
+def upsert_user(*, user_id: str | None = None, github_id: int | None = None, github_username: str | None = None,
                 github_token_encrypted: str | None = None,
                 hf_id: str | None = None, hf_username: str | None = None,
                 hf_token_encrypted: str | None = None,
                 hf_refresh_token_encrypted: str | None = None,
                 hf_token_expires_at: str | None = None) -> dict:
-    """Create or update a user by github_id or hf_id. Returns the user row."""
+    """Create or update a user by user_id (internal UUID), github_id, or hf_id.
+    Returns the user row. user_id takes precedence for lookup."""
     db = _db()
     now = _iso_now()
     with _write_lock:
         # find existing
         user = None
-        if github_id is not None:
+        if user_id is not None:
+            row = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if row:
+                user = dict(row)
+        if user is None and github_id is not None:
             row = db.execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
             if row:
                 user = dict(row)

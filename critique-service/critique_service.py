@@ -1564,7 +1564,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             redirect_uri = f"https://{host}/api/auth/hf/callback"
             token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
-            user = dataset_persistence.upsert_user_from_hf(token_data, github_user_id=github_user_id or None)
+            user = dataset_persistence.upsert_user_from_hf(token_data, user_id=github_user_id or None)
             self._redirect(f"https://{host}/#hf-connected={user['id']}")
         except Exception as exc:
             log_event("hf_oauth_error", error=str(exc)[:200])
@@ -1595,7 +1595,7 @@ class Handler(BaseHTTPRequestHandler):
                 github_user_id = parts[2]
         try:
             token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
-            user = dataset_persistence.upsert_user_from_hf(token_data, github_user_id=github_user_id or None)
+            user = dataset_persistence.upsert_user_from_hf(token_data, user_id=github_user_id or None)
             # Initialize dataset persistence now that we have HF token
             try:
                 dataset_persistence.init_persistence(user["id"])
