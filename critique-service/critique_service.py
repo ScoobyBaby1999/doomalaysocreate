@@ -613,6 +613,9 @@ def _token_or_jwt_ok(header_value: str | None) -> bool:
     if not header_value or not header_value.startswith("Bearer "):
         return False
     token = header_value[len("Bearer "):].strip()
+    space_host = os.environ.get("SPACE_HOST", "")
+    if space_host and jwt_auth.verify_jwt(token, expected_aud=space_host) is not None:
+        return True
     return jwt_auth.verify_jwt(token, expected_aud=os.environ.get("SPACE_ID", "")) is not None
 
 
