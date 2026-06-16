@@ -16,9 +16,9 @@ import re
 # Patterns that require user approval before execution.  Order matters:
 # more specific patterns first so they match before broader ones.
 APPROVAL_REQUIRED_PATTERNS: list[tuple[str, str]] = [
-    (r"git\s+push",               "git_push"),
     (r"git\s+push\s+.*--force",   "git_force_push"),
     (r"git\s+push\s+.*-f\b",      "git_force_push"),
+    (r"git\s+push",               "git_push"),
     (r"git\s+remote\s+add",       "git_remote_add"),
     (r"git\s+remote\s+set-url",   "git_remote_set_url"),
     (r"git\s+config\s+credential", "git_credential_config"),
