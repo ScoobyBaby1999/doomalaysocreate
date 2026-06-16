@@ -139,6 +139,7 @@ def upsert_user_from_hf(token_data: dict, user_id: str | None = None) -> dict:
     ``token_data`` must contain ``access_token``, and may contain
     ``refresh_token`` and ``expires_in`` from the token exchange response.
     If ``user_id`` is provided, look up existing user by that internal UUID first.
+    If found, use their github_id for the upsert to ensure merge works.
     """
     hf_token = token_data["access_token"]
     info = get_hf_user(hf_token)
@@ -147,8 +148,15 @@ def upsert_user_from_hf(token_data: dict, user_id: str | None = None) -> dict:
     expires_at = ""
     if token_data.get("expires_in"):
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))).isoformat()
+
+    github_id = None
+    if user_id:
+        existing = db.get_user(user_id)
+        if existing:
+            github_id = existing.get("github_id")
     return db.upsert_user(
         user_id=user_id,
+        github_id=github_id,
         hf_id=info["name"],
         hf_username=info["name"],
         hf_token_encrypted=encrypted,
