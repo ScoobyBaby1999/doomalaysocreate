@@ -181,8 +181,9 @@ class CapacityError(RuntimeError):
 # --------------------------------------------------------------------------
 
 class BaseAdapter:
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, workspace_id: str | None = None):
         self.workspace = workspace
+        self.workspace_id = workspace_id
 
     def open(self) -> None: ...
     def turn(self, user_msg: str, emit) -> None:
@@ -196,6 +197,10 @@ class BaseAdapter:
 
 class MockAdapter(BaseAdapter):
     """Plumbing test double: echoes and fakes one tool round-trip."""
+
+    def __init__(self, workspace: Path, workspace_id: str | None = None,
+                 system_prompt: str | None = None):
+        super().__init__(workspace, workspace_id)
 
     def turn(self, user_msg: str, emit) -> None:
         emit({"type": "tool_use", "name": "Echo", "summary": user_msg[:80]})
@@ -222,9 +227,11 @@ class ClaudeAdapter(BaseAdapter):
     so the client survives across turns on the same thread.
     """
 
-    def __init__(self, workspace: Path, model: str | None = None):
-        super().__init__(workspace)
+    def __init__(self, workspace: Path, model: str | None = None,
+                 workspace_id: str | None = None, system_prompt: str | None = None):
+        super().__init__(workspace, workspace_id)
         self.model = model or os.environ.get("AGENT_MODEL", "claude-opus-4-8")
+        self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
         self.loop: asyncio.AbstractEventLoop | None = None
         self.client = None
         self._sdk = None
@@ -238,7 +245,7 @@ class ClaudeAdapter(BaseAdapter):
             allow_dangerously_skip_permissions=True,  # required double opt-in for the SDK
             setting_sources=["project"],           # load <workspace>/.claude/skills
             model=self.model,
-            system_prompt=AGENT_SYSTEM_PROMPT,
+            system_prompt=self.system_prompt,
             max_turns=MAX_TURNS,
         )
         self.loop = asyncio.new_event_loop()
@@ -311,6 +318,14 @@ def _guarded_shell(**kwargs):
     # git command interception: check before execution
     cmd = kwargs.get("command", "")
     if isinstance(cmd, str) and cmd.strip():
+        # Allow non-force git push in workspace context: the user explicitly
+        # selected a cloned workspace for the agent, so normal push is safe.
+        # Force push (-f / --force) is still blocked below.
+        stripped = cmd.strip()
+        if stripped.startswith("git push"):
+            is_workspace = getattr(_thread_local, "workspace_id", None) is not None
+            if is_workspace and "-f " not in stripped and "--force" not in stripped:
+                return _shell.tool(**kwargs)
         verdict = check_command(cmd)
         if not verdict.allowed:
             return {
@@ -333,10 +348,12 @@ class StrandsAdapter(BaseAdapter):
     transcript in order.
     """
 
-    def __init__(self, workspace: Path, model: str | None = None):
-        super().__init__(workspace)
+    def __init__(self, workspace: Path, model: str | None = None,
+                 workspace_id: str | None = None, system_prompt: str | None = None):
+        super().__init__(workspace, workspace_id)
         self.model = model
         self.agent = None
+        self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
 
     def open(self) -> None:
         import os as _os
@@ -385,13 +402,14 @@ class StrandsAdapter(BaseAdapter):
         shell_mod.tool = _guarded_shell
         tools.append(shell_mod)
 
-        self.agent = Agent(model=llm, tools=tools, system_prompt=AGENT_SYSTEM_PROMPT,
+        self.agent = Agent(model=llm, tools=tools, system_prompt=self.system_prompt,
                            callback_handler=None)
         self._msg_cursor = 0
 
     def turn(self, user_msg: str, emit) -> None:
         # set per-thread workspace so _guarded_shell knows where to run commands.
         _thread_local.workspace = self.workspace
+        _thread_local.workspace_id = self.workspace_id
         try:
             self.agent(user_msg)
         finally:
@@ -442,12 +460,13 @@ class StrandsAdapter(BaseAdapter):
                 pass
 
 
-def _make_adapter(tier: str, workspace: Path, model: str | None = None) -> BaseAdapter:
+def _make_adapter(tier: str, workspace: Path, model: str | None = None,
+                  workspace_id: str | None = None, system_prompt: str | None = None) -> BaseAdapter:
     if tier == "claude":
-        return ClaudeAdapter(workspace, model)
+        return ClaudeAdapter(workspace, model, workspace_id, system_prompt)
     if tier == "open":
-        return StrandsAdapter(workspace, model)
-    return MockAdapter(workspace)
+        return StrandsAdapter(workspace, model, workspace_id, system_prompt)
+    return MockAdapter(workspace, workspace_id, system_prompt)
 
 
 def tier_for_model(model: str | None) -> str | None:
@@ -473,6 +492,26 @@ class AgentSession:
         self.tier = tier
         self.model = model
         self.workspace_id = workspace_id  # links to user's workspace, if any
+        # Build a context-rich system prompt when the agent is bound to a
+        # cloned workspace, so the model knows it can run git commands.
+        self.system_prompt = AGENT_SYSTEM_PROMPT
+        if self.workspace_id:
+            try:
+                import db
+                ws = db.get_workspace(self.workspace_id)
+                if ws and ws.get("source_repo"):
+                    self.system_prompt = (
+                        f"{AGENT_SYSTEM_PROMPT}\n\n"
+                        f"Workspace: {ws['title'] or ws['source_repo']} at {self.workspace}\n"
+                        f"Git repo: {ws['source_repo']}\n"
+                        f"Current branch: {ws.get('current_branch', 'main') or 'main'}\n"
+                        f"You can use git commands: status, log, diff, branch, "
+                        f"checkout, pull, add, commit, and push.\n"
+                        f"To save changes: git add + git commit.\n"
+                        f"To sync with remote: git push (allowed).\n"
+                    )
+            except Exception:
+                pass
         self.created = time.time()
         self.updated = self.created
         self.status = "starting"
@@ -541,7 +580,8 @@ class AgentSession:
         self.inbox.put(None)
 
     def _run(self) -> None:
-        adapter = _make_adapter(self.tier, self.workspace, self.model)
+        adapter = _make_adapter(self.tier, self.workspace, self.model,
+                                self.workspace_id, self.system_prompt)
         self.adapter = adapter
         try:
             adapter.open()
