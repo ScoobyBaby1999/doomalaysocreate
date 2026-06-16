@@ -59,6 +59,7 @@ export class AgentClient {
   constructor(private settings: Settings) {}
 
   private async bearer(windowsBack = 0): Promise<string> {
+    if (this.settings.githubSessionId) return this.settings.githubSessionId;
     if (this.settings.rotationSecret) return deriveToken(this.settings.rotationSecret, windowsBack);
     return this.settings.token;
   }
