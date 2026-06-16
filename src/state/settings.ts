@@ -34,7 +34,7 @@ export function loadSettings(): Settings {
 export function saveSettings(s: Settings) {
   localStorage.setItem(KEY, JSON.stringify(s));
   // Set/refresh expiry whenever credentials are saved
-  if (s.token || s.rotationSecret) {
+  if (s.token || s.rotationSecret || s.githubSessionId) {
     localStorage.setItem(EXPIRY_KEY, String(Date.now() + EXPIRY_MS));
   }
 }
