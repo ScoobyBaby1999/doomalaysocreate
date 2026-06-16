@@ -134,6 +134,25 @@ def get_hf_user(token: str) -> dict:
     return _hf_api("/api/whoami-v2", token=token)
 
 
+def _valid_user_id(user_id: str | None) -> bool:
+    """Return True if user_id looks like a valid 16-char hex ID.
+
+    Rejects JWT strings (contain dots) and other garbage that might
+    be accidentally passed by the frontend.
+    """
+    if not user_id or not isinstance(user_id, str):
+        return False
+    if len(user_id) != 16:
+        return False
+    if "." in user_id:
+        return False
+    try:
+        int(user_id, 16)
+        return True
+    except ValueError:
+        return False
+
+
 def upsert_user_from_hf(token_data: dict, user_id: str | None = None) -> dict:
     """Fetch HF user info, upsert into DB, return the user row.
 
@@ -152,7 +171,7 @@ def upsert_user_from_hf(token_data: dict, user_id: str | None = None) -> dict:
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))).isoformat()
 
     # Derive a deterministic ID if none provided
-    if user_id is None:
+    if user_id is None or not _valid_user_id(user_id):
         user_id = jwt_auth.derive_user_id_from_hf(info["name"])
 
     github_id = None

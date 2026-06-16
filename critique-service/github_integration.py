@@ -93,6 +93,22 @@ def get_github_user(token: str) -> dict:
     return _github_api("/user", token=token)
 
 
+def _valid_user_id(user_id: str | None) -> bool:
+    """Return True if user_id looks like a valid 16-char hex ID.
+    Rejects JWT strings (contain dots) and other garbage."""
+    if not user_id or not isinstance(user_id, str):
+        return False
+    if len(user_id) != 16:
+        return False
+    if "." in user_id:
+        return False
+    try:
+        int(user_id, 16)
+        return True
+    except ValueError:
+        return False
+
+
 def upsert_user_from_github(github_token: str, user_id: str | None = None) -> dict:
     """Fetch GitHub user info, upsert into DB, return the user row.
 
@@ -101,7 +117,10 @@ def upsert_user_from_github(github_token: str, user_id: str | None = None) -> di
     """
     info = get_github_user(github_token)
     encrypted = crypto.encrypt_token(github_token)
-    uid = user_id or jwt_auth.derive_user_id(info["id"])
+    if _valid_user_id(user_id):
+        uid = user_id
+    else:
+        uid = jwt_auth.derive_user_id(info["id"])
     return db.upsert_user(
         user_id=uid,
         github_id=info["id"],

@@ -1451,11 +1451,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         # Accept redirect_to for proxy flow: user's Space sends us their URL
         # so we can forward the callback back to them after GitHub auth.
+        # existing_id enables merging GitHub OAuth with an existing user account.
         from urllib.parse import parse_qs, urlsplit
         qs = parse_qs(urlsplit(self.path).query)
         redirect_to = (qs.get("redirect_to", [""])[0] or "").strip()
+        existing_id = (qs.get("existing_id", [""])[0] or "").strip()
         nonce = secrets.token_urlsafe(16)
-        state = _make_oauth_state(nonce, redirect_to)
+        # Pack existing_id into the state using pipe separator (same pattern as HF OAuth)
+        if existing_id:
+            state_payload = f"{redirect_to}|{existing_id}" if redirect_to else f"|{existing_id}"
+        else:
+            state_payload = redirect_to
+        state = _make_oauth_state(nonce, state_payload)
         url = github_integration.make_github_authorize_url(state)
         self._redirect(url)
 
@@ -1467,7 +1474,17 @@ class Handler(BaseHTTPRequestHandler):
         error_param = (qs.get("error", [""])[0] or "").strip()
         host = self._space_host()
 
-        valid, redirect_to = _verify_oauth_state(state) if state else (False, "")
+        valid, combined = _verify_oauth_state(state) if state else (False, "")
+
+        # Extract existing_id if packed into redirect_to (pipe-separated)
+        # Format: redirect_to|existing_id
+        redirect_to = combined
+        existing_id = ""
+        if "|" in combined:
+            parts = combined.split("|", 1)
+            redirect_to = parts[0]
+            if len(parts) > 1:
+                existing_id = parts[1]
 
         if error_param:
             # If we have a redirect_to, forward the error there
@@ -1491,7 +1508,7 @@ class Handler(BaseHTTPRequestHandler):
         # Direct flow (main Space): exchange code and complete
         try:
             gh_token = github_integration.exchange_github_code(code)
-            user = github_integration.upsert_user_from_github(gh_token)
+            user = github_integration.upsert_user_from_github(gh_token, user_id=existing_id or None)
             jwt_token = jwt_auth.generate_jwt(
                 user_id=user["id"],
                 github_id=user["github_id"],
@@ -1515,13 +1532,20 @@ class Handler(BaseHTTPRequestHandler):
         if not code or not state:
             self._send_json(400, {"error": "missing code or state"})
             return
-        valid, _ = _verify_oauth_state(state)
+        valid, combined = _verify_oauth_state(state)
         if not valid:
             self._send_json(400, {"error": "invalid or expired state"})
             return
+        # Extract existing_id if packed into state (pipe-separated)
+        # Format: redirect_to|existing_id
+        existing_id = ""
+        if "|" in combined:
+            parts = combined.split("|", 1)
+            if len(parts) > 1:
+                existing_id = parts[1]
         try:
             gh_token = github_integration.exchange_github_code(code)
-            user = github_integration.upsert_user_from_github(gh_token)
+            user = github_integration.upsert_user_from_github(gh_token, user_id=existing_id or None)
             user_id = user["id"]
             jwt_token = jwt_auth.generate_jwt(
                 user_id=user["id"],
@@ -1692,7 +1716,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 pass
         self._send_json(200, {
-            "authenticated": bool(user and user.get("github_token_encrypted")),
+            "authenticated": bool(user and (user.get("github_token_encrypted") or user.get("hf_token_encrypted"))),
             "github_username": user.get("github_username") if user else None,
             "hf_username": user.get("hf_username") if user else None,
             "hf_token_expires_at": hf_expires_at,
