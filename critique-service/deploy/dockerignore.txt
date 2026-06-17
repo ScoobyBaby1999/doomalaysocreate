@@ -1,7 +1,0 @@
-# This .dockerignore goes at the SPACE ROOT (created by the CI workflow).
-# It prevents node_modules from the frontend source tree from being copied
-# into the Docker build context, which would clobber the npm ci install.
-app/node_modules
-app/dist
-app/.git
-*.log
