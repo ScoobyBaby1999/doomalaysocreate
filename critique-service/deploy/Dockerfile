@@ -23,7 +23,7 @@ WORKDIR /app
 
 # git/zip/unzip: the agent orchestrator clones, packs, and unpacks repos & archives
 # in its workspace. Kept minimal; cleaned in the same layer.
-RUN apt-get update && apt-get install -y --no-install-recommends git zip unzip \
+RUN apt-get update && apt-get install -y --no-install-recommends git zip unzip curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
@@ -57,6 +57,7 @@ RUN curl -fsSL https://bun.sh/install | bash && \
 ENV PATH="/home/appuser/.bun/bin:${PATH}"
 
 # Copy + install the GLM bridge (free GLM 5.2 via z-ai-web-dev-sdk)
+# This MUST come before "COPY . /app" which would overwrite it
 COPY glm-bridge /app/glm-bridge
 RUN cd /app/glm-bridge && bun install 2>/dev/null || npm install
 
