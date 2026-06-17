@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Brain, Plus, X, Send, GitMerge, Inbox, FolderTree,
-  Activity, Zap, Loader2, CheckCircle2, AlertCircle, Clock,
+  Activity, Loader2, CheckCircle2, AlertCircle, Clock,
 } from "lucide-react";
 import { ConsciousClient, ApiError } from "../api/conscious";
 import type { Settings } from "../api/panel";
@@ -28,7 +28,7 @@ import type { Agent, DrawerEntry, Conscious, Proposal } from "../api/conscious";
 
 interface NodePos { x: number; y: number; }
 
-function layoutAgents(agents: Agent[], vw: number, vh: number): Record<string, NodePos> {
+function layoutAgents(agents: Agent[]): Record<string, NodePos> {
   const orch = agents.find((a) => a.isOrchestrator === 1);
   const subs = agents.filter((a) => a.isOrchestrator !== 1);
   const pos: Record<string, NodePos> = {};
@@ -205,20 +205,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
     }
   };
 
-  // --- commit a proposal ---
-  const commitProposal = async (pid: string) => {
-    if (!conscious) return;
-    const orch = agents.find((a) => a.isOrchestrator === 1);
-    if (!orch) return;
-    try {
-      await client.current.commitProposal(conscious.id, pid, orch.id);
-      await refreshData(conscious.id);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-    }
-  };
-
-  const positions = layoutAgents(agents, window.innerWidth, window.innerHeight);
+  const positions = layoutAgents(agents);
   const orch = agents.find((a) => a.isOrchestrator === 1);
   const subs = agents.filter((a) => a.isOrchestrator !== 1);
 
@@ -340,9 +327,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
       {selectedAgent && conscious && (
         <AgentSheet
           agent={selectedAgent}
-          conscious={conscious}
           drawer={drawer.filter((d) => d.toAgentId === selectedAgent.id)}
-          settings={settings}
           onClose={() => setSelectedAgent(null)}
           onInvoke={(task) => invokeAgent(selectedAgent, task)}
           onMerge={() => mergeAgent(selectedAgent)}
@@ -432,11 +417,9 @@ function AgentNode({ agent, pos, drawerCount, pendingProps, onTap }: {
 // AgentSheet — bottom sheet for agent interaction
 // ---------------------------------------------------------------------------
 
-function AgentSheet({ agent, conscious, drawer, settings, onClose, onInvoke, onMerge }: {
+function AgentSheet({ agent, drawer, onClose, onInvoke, onMerge }: {
   agent: Agent;
-  conscious: Conscious;
   drawer: DrawerEntry[];
-  settings: Settings;
   onClose: () => void;
   onInvoke: (task: string) => Promise<unknown>;
   onMerge: () => Promise<void>;
