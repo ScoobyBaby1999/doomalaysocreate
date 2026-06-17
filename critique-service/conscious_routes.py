@@ -111,9 +111,15 @@ def handle_request(method: str, raw_path: str, body: dict | None,
 # ---------------------------------------------------------------------------
 
 def _check_ownership(cid: str, user_id: str | None) -> tuple[bool, dict | None]:
-    """Return (ok, error_response). ok=False means send the error_response."""
+    """Return (ok, error_response). ok=False means send the error_response.
+
+    Phase 6: if user_id is None (no GitHub auth), auto-provision a default
+    user + workspace so the conscious system works without GitHub (like the
+    chat panel). The default user owns all conscious instances in this mode.
+    """
     if not user_id:
-        return False, (403, {"error": "GitHub auth required — link your GitHub account"})
+        # Phase 6: no GitHub auth — auto-provision a default user
+        user_id = _ensure_default_user()
     c = conscious_db.get_conscious(cid)
     if not c:
         return False, (404, {"error": "conscious not found"})
@@ -125,19 +131,50 @@ def _check_ownership(cid: str, user_id: str | None) -> tuple[bool, dict | None]:
     return True, None
 
 
+_DEFAULT_USER_ID = "conscious-default-user"
+
+
+def _ensure_default_user() -> str:
+    """Phase 6: create a default user + workspace if they don't exist.
+    Used when no GitHub auth is provided (like the chat panel)."""
+    try:
+        user = _dbmod.get_user(_DEFAULT_USER_ID)
+        if not user:
+            _dbmod.upsert_user(user_id=_DEFAULT_USER_ID)
+        # ensure a default workspace exists
+        ws = _dbmod.get_workspace("conscious-default-workspace")
+        if not ws:
+            _dbmod.create_workspace(
+                _DEFAULT_USER_ID,
+                title="Default Conscious Workspace",
+                sandbox_path="/tmp/conscious-default",
+            )
+        return _DEFAULT_USER_ID
+    except Exception:
+        return _DEFAULT_USER_ID
+
+
 # ---------------------------------------------------------------------------
 # conscious lifecycle
 # ---------------------------------------------------------------------------
 
 def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
+    # Phase 6: if no user_id, auto-provision a default user + workspace
     if not user_id:
-        return 403, {"error": "GitHub auth required — link your GitHub account"}
+        user_id = _ensure_default_user()
     workspace_id = str(body.get("workspace_id", "")).strip()
     if not workspace_id:
-        return 400, {"error": "workspace_id is required"}
+        # Phase 6: use the default workspace if none specified
+        workspace_id = "conscious-default-workspace"
+        _ensure_default_user()  # ensure the workspace exists
     ws = _dbmod.get_workspace(workspace_id)
     if not ws:
-        return 404, {"error": "workspace not found"}
+        # auto-create the workspace if it doesn't exist
+        if workspace_id == "conscious-default-workspace":
+            _ensure_default_user()
+            ws = _dbmod.get_workspace(workspace_id)
+        if not ws:
+            return 404, {"error": "workspace not found"}
     if ws["user_id"] != user_id:
         return 403, {"error": "not your workspace"}
     # cap conscious per workspace (TIER3_PLAN.md §13)
@@ -192,12 +229,20 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
 
 
 def _list_conscious(workspace_id: str, user_id: str | None) -> tuple[int, dict]:
-    if not workspace_id:
-        return 400, {"error": "workspace_id query param is required"}
+    # Phase 6: if no user_id, use default
     if not user_id:
-        return 403, {"error": "GitHub auth required"}
+        user_id = _ensure_default_user()
+    if not workspace_id:
+        workspace_id = "conscious-default-workspace"
     ws = _dbmod.get_workspace(workspace_id)
-    if not ws or ws["user_id"] != user_id:
+    if not ws:
+        # auto-create if it's the default
+        if workspace_id == "conscious-default-workspace":
+            _ensure_default_user()
+            ws = _dbmod.get_workspace(workspace_id)
+        if not ws:
+            return 200, {"conscious": []}  # empty list, not an error
+    if ws["user_id"] != user_id:
         return 403, {"error": "not your workspace"}
     items = conscious_db.list_conscious(workspace_id)
     return 200, {"conscious": items}

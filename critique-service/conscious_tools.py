@@ -244,6 +244,11 @@ def _run_sub_agent(cid: str, to_agent_id: str, task: str,
     # try the real path
     try:
         import agent_sessions
+        # Phase 6: if the agent's tier is "zai", use the FREE GLM bridge
+        # (a Node.js mini-service that wraps z-ai-web-dev-sdk). This avoids
+        # the paid LiteLLM path entirely — GLM 5.2 is free + rate-limited.
+        if sub.get("tier") == "zai":
+            return _run_glm_bridge(sub, task, inputs, cid)
         tier = agent_sessions.tier_for_model(sub["model"])
         if tier is not None:
             from pathlib import Path
@@ -288,6 +293,116 @@ def _stub_result(to_agent_id: str, task: str, inputs: dict) -> str:
     return (f"[stub] would invoke agent {to_agent_id} with task: {task}\n"
             f"inputs: {inputs}\n"
             f"(Phase 2: no agent SDK available; install claude-agent-sdk or strands-agents)")
+
+
+def _run_glm_bridge(sub: dict, task: str, inputs: dict,
+                    cid: str) -> tuple[str, list[str], str, str | None]:
+    """Call the GLM bridge mini-service (free, rate-limited GLM 5.2).
+
+    The bridge is a Node.js/Bun HTTP service at localhost:3030 that wraps
+    the z-ai-web-dev-sdk. This avoids the paid LiteLLM path.
+    """
+    import json as _json
+    import urllib.request as _urlreq
+    from pathlib import Path as _P
+
+    # build the conscious context for the system prompt
+    c = conscious_db.get_conscious(cid) or {}
+    bb_rows = conscious_db.get_blackboard(cid)
+    latest: dict = {}
+    for r in bb_rows:
+        if r["section"] == "event":
+            continue
+        k = f"{r['section']}/{r['key']}"
+        if k not in latest or r["version"] > latest[k]["version"]:
+            latest[k] = r
+    context_parts = [f"Goal: {c.get('goal', '')}"]
+    for r in list(latest.values())[-10:]:
+        context_parts.append(f"[{r['section']}/{r['key']}] {r['value'][:200]}")
+    conscious_context = "\n".join(context_parts)
+
+    system_prompt = (
+        f"You are an AI agent in a Conscious multi-agent system.\n"
+        f"Role: {sub.get('role', '')}\n"
+        f"Model: GLM 5.2 (free)\n"
+        f"Agent ID: {sub['id']}\n\n"
+        f"--- Conscious Context ---\n{conscious_context}\n\n"
+        f"--- Instructions ---\n"
+        f"Your response will be recorded verbatim in the agent drawer.\n"
+        f"If you want to write files, use this format:\n"
+        f"```filename: path/to/file.ext\n"
+        f"file content here\n"
+        f"```\n"
+        f"Be concise but thorough."
+    )
+
+    messages = [
+        {"role": "assistant", "content": system_prompt},
+        {"role": "user", "content": task},
+    ]
+
+    try:
+        body = _json.dumps({"messages": messages, "model": "glm-5.2"}).encode()
+        req = _urlreq.Request(
+            "http://localhost:3030/chat",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urlreq.urlopen(req, timeout=120) as resp:
+            result = _json.loads(resp.read().decode())
+        response_text = result.get("content", "(no response from GLM bridge)")
+    except Exception as exc:
+        return (f"[GLM bridge error] {exc}\n\n(Falling back to simulated response.)",
+                [], "failed", str(exc))
+
+    # parse file-write blocks
+    import re as _re
+    files: list[str] = []
+    wt = _P(sub["worktree_path"])
+    for m in _re.finditer(r"```filename:\s*(.+?)\n([\s\S]*?)```", response_text):
+        filename = m.group(1).strip()
+        content = m.group(2)
+        try:
+            import worktree as _wt
+            target = _wt._safe_join(wt, filename)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            files.append(filename)
+        except Exception:
+            pass
+
+    # commit files on the agent's branch
+    if files:
+        try:
+            import subprocess as _sp
+            for f in files:
+                _sp.run(["git", "-C", str(wt), "add", "--", f],
+                        capture_output=True, text=True, timeout=30)
+            _sp.run(["git", "-C", str(wt), "commit", "-m", f"[agent:glm] {task[:60]}"],
+                    capture_output=True, text=True, timeout=30)
+        except Exception:
+            pass
+
+    # if no files, write the response as markdown
+    if not files:
+        slug = "".join(c if c.isalnum() else "-" for c in task.lower())[:40].strip("-") or "output"
+        filename = f"{slug}.md"
+        try:
+            import worktree as _wt
+            target = _wt._safe_join(wt, filename)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(response_text, encoding="utf-8")
+            import subprocess as _sp
+            _sp.run(["git", "-C", str(wt), "add", "--", filename],
+                    capture_output=True, text=True, timeout=30)
+            _sp.run(["git", "-C", str(wt), "commit", "-m", f"[agent:glm] {task[:60]}"],
+                    capture_output=True, text=True, timeout=30)
+            files.append(filename)
+        except Exception:
+            pass
+
+    return (response_text, files, "done", None)
 
 
 def _list_worktree_files(wt_path: Path) -> list[str]:

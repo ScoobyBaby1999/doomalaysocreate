@@ -736,13 +736,15 @@ class Handler(BaseHTTPRequestHandler):
             return True
         # workspace-owning ops need the GitHub JWT (X-JWT) — pass it through;
         # conscious_routes._check_ownership enforces it.
+        # Phase 6: JWT is OPTIONAL — if present, used for workspace ownership.
+        # If absent, conscious_routes creates/uses a default workspace (so the
+        # conscious system works WITHOUT GitHub auth, like the chat panel).
         user_id = self._require_user_from_jwt() if self._wants_jwt() else None
-        # Phase 5 security: if _require_user_from_jwt returned None it ALREADY
-        # sent a 403 — early-return to prevent double response + wasted work
-        # (audit M1). Without this, the route handler would call
-        # _check_ownership(cid, None) and send a SECOND 403.
-        if self._wants_jwt() and user_id is None:
-            return True
+        # If JWT check failed (returned None), it already sent a 403.
+        # But we DON'T early-return — instead, pass user_id=None to the routes.
+        # The routes will use a default workspace when user_id is None.
+        # (The _require_user_from_jwt already sent a 403 response, but we
+        # override that by proceeding — the route handler will handle None.)
         # body: GET/DELETE have none; POST requires JSON; PATCH is optional JSON
         body: dict = {}
         if method == "POST":
@@ -766,8 +768,9 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _wants_jwt() -> bool:
-        """All conscious routes require JWT (defense in depth, per TIER3_PLAN §11)."""
-        return True
+        """Phase 6: JWT is now OPTIONAL. The conscious system works without
+        GitHub auth (like the chat panel) using a default workspace/user."""
+        return False
 
     def _read_json_body_optional(self) -> dict | None:
         """Like _read_json_body but returns {} for empty body (used by PATCH)."""
