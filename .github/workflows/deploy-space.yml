@@ -57,6 +57,15 @@ jobs:
           cp backend/critique-service/deploy/README.space.md space/README.md
           # .dockerignore prevents node_modules from clobbering npm ci in the build
           cp backend/critique-service/deploy/.dockerignore space/.dockerignore
+          # GLM bridge mini-service (free GLM 5.2 via z-ai-web-dev-sdk)
+          # — copied from the frontend repo's mini-services/glm-bridge
+          # If it doesn't exist there, create a placeholder
+          if [ -d frontend/mini-services/glm-bridge ]; then
+            cp -r frontend/mini-services/glm-bridge space/glm-bridge
+          else
+            mkdir -p space/glm-bridge
+            echo '{"name":"glm-bridge","version":"1.0.0","type":"module","dependencies":{"z-ai-web-dev-sdk":"latest"}}' > space/glm-bridge/package.json
+          fi
           ls space
 
       - name: Push to Space
