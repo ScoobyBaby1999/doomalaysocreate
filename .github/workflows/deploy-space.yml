@@ -55,6 +55,8 @@ jobs:
           # the multi-stage Dockerfile + Space README replace the API-only ones
           cp backend/critique-service/deploy/Dockerfile space/Dockerfile
           cp backend/critique-service/deploy/README.space.md space/README.md
+          # .dockerignore prevents node_modules from clobbering npm ci in the build
+          cp backend/critique-service/deploy/.dockerignore space/.dockerignore
           ls space
 
       - name: Push to Space
