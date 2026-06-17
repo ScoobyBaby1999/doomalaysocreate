@@ -50,6 +50,17 @@ ENV HOME=/home/appuser \
     BYPASS_TOOL_CONSENT=true \
     LOOM_DB_PATH=/data/loom.db
 RUN mkdir -p /data && chmod 777 /data && useradd -m -u 1000 appuser && chown -R appuser:appuser /app /data
+
+# Install Bun (for the GLM bridge mini-service) + z-ai-web-dev-sdk
+RUN curl -fsSL https://bun.sh/install | bash && \
+    /home/appuser/.bun/bin/bun --version
+ENV PATH="/home/appuser/.bun/bin:${PATH}"
+
+# Copy + install the GLM bridge (free GLM 5.2 via z-ai-web-dev-sdk)
+COPY glm-bridge /app/glm-bridge
+RUN cd /app/glm-bridge && bun install 2>/dev/null || npm install
+
 USER appuser
 
-CMD ["python", "critique_service.py"]
+# Start both the GLM bridge (port 3030) + the Python gateway (port 7860)
+CMD ["sh", "-c", "cd /app/glm-bridge && bun index.ts & sleep 2 && cd /app && python critique_service.py"]
