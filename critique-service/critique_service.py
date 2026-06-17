@@ -14,6 +14,7 @@ from pathlib import Path
 
 import agent_sessions
 import authtoken
+import conscious_routes
 import dataset_persistence
 import db
 import github_integration
@@ -606,19 +607,6 @@ def _token_ok(header_value: str | None) -> bool:
     return ok
 
 
-def _token_or_jwt_ok(header_value: str | None) -> bool:
-    """Accept either panel token (static/rotation) OR a valid JWT."""
-    if _token_ok(header_value):
-        return True
-    if not header_value or not header_value.startswith("Bearer "):
-        return False
-    token = header_value[len("Bearer "):].strip()
-    space_host = os.environ.get("SPACE_HOST", "")
-    if space_host and jwt_auth.verify_jwt(token, expected_aud=space_host) is not None:
-        return True
-    return jwt_auth.verify_jwt(token, expected_aud=os.environ.get("SPACE_ID", "")) is not None
-
-
 # ---------------------------------------------------------------------------
 # OAuth / onboarding helpers
 # ---------------------------------------------------------------------------
@@ -725,12 +713,96 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # --- Tier 3: Conscious dispatch ----------------------------------------
+    def _conscious_dispatch(self, method: str) -> bool:
+        """Handle /api/conscious/* if the route matches. Returns True if handled.
+
+        Auth gate: bearer token (``_token_ok``) is required for ALL conscious
+        routes. Workspace-owning ops additionally call ``_require_user_from_jwt``
+        inside ``conscious_routes`` (via the ``user_id`` argument we pass here).
+        Tier 1 invariants (no token in .git/config, no auth regressions) are
+        preserved — this is purely additive dispatch.
+        """
+        from urllib.parse import urlsplit
+        path = urlsplit(self.path).path.rstrip("/")
+        if path != "/api/conscious" and not path.startswith("/api/conscious/"):
+            return False
+        if not _token_ok(self.headers.get("Authorization")):
+            if not _auth_configured():
+                self._send_json(503, {"error": "no auth secret configured on server "
+                                               "(set CRITIQUE_TOKEN or CRITIQUE_ROTATION_SECRET)"})
+            else:
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+            return True
+        # workspace-owning ops need the GitHub JWT (X-JWT) — pass it through;
+        # conscious_routes._check_ownership enforces it.
+        user_id = self._require_user_from_jwt() if self._wants_jwt() else None
+        # Phase 5 security: if _require_user_from_jwt returned None it ALREADY
+        # sent a 403 — early-return to prevent double response + wasted work
+        # (audit M1). Without this, the route handler would call
+        # _check_ownership(cid, None) and send a SECOND 403.
+        if self._wants_jwt() and user_id is None:
+            return True
+        # body: GET/DELETE have none; POST requires JSON; PATCH is optional JSON
+        body: dict = {}
+        if method == "POST":
+            parsed = self._read_json_body()
+            if parsed is None:
+                return True  # _read_json_body already sent the error response
+            body = parsed
+        elif method == "PATCH":
+            parsed = self._read_json_body_optional()
+            if parsed is None:
+                return True
+            body = parsed
+        try:
+            status, payload = conscious_routes.handle_request(
+                method, self.path, body, dict(self.headers), user_id)
+            self._send_json(status, payload)
+        except Exception as exc:  # noqa: BLE001 - never leak a stack trace
+            log_event("conscious_request_error", route=self.path, error=repr(exc)[:300])
+            self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
+        return True
+
+    @staticmethod
+    def _wants_jwt() -> bool:
+        """All conscious routes require JWT (defense in depth, per TIER3_PLAN §11)."""
+        return True
+
+    def _read_json_body_optional(self) -> dict | None:
+        """Like _read_json_body but returns {} for empty body (used by PATCH)."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return {}
+        if length > MAX_BODY_BYTES:
+            self._send_json(413, {"error": f"body must be 1..{MAX_BODY_BYTES} bytes"})
+            return None
+        try:
+            raw = self.rfile.read(length).decode("utf-8")
+        except UnicodeDecodeError as e:
+            self._send_json(400, {"error": f"invalid UTF-8 body: {e}"})
+            return None
+        if not raw.strip():
+            return {}
+        try:
+            payload = json.loads(raw)
+        except ValueError as e:
+            self._send_json(400, {"error": f"invalid JSON body: {e}"})
+            return None
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "body must be a JSON object"})
+            return None
+        return payload
+
     def do_OPTIONS(self) -> None:
         #   CORS preflight for cross-origin POSTs with Authorization/Content-Type.
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-JWT")
         self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -784,6 +856,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
+        # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
+        if route == "/api/conscious" or route.startswith("/api/conscious/"):
+            self._conscious_dispatch("GET")
+            return
         if route == "" and self._serve_static("/"):
             return  # bundled web app owns the root; the JSON overview stays on /health
         if route in ("", "/health"):
@@ -932,15 +1008,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, snap)
             return
         if route == "/api/agent/models":
-            if not _token_or_jwt_ok(self.headers.get("Authorization")):
+            if not _token_ok(self.headers.get("Authorization")):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             self._send_json(200, {"tier": agent_sessions.agent_tier(),
                                   "models": agent_sessions.agent_models()})
             return
         if route.startswith("/api/agent/"):
-            #   transcript polling + artifact access share the bearer token.
-            if not _token_or_jwt_ok(self.headers.get("Authorization")):
+            #   transcript polling + artifact access share the service bearer token.
+            if not _token_ok(self.headers.get("Authorization")):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             self._handle_agent_get(route)
@@ -1213,8 +1289,12 @@ class Handler(BaseHTTPRequestHandler):
             if not ws:
                 self._send_json(404, {"error": "workspace not found"})
                 return
-            # ownership check: agent must operate in caller's workspace
-            user_id = self._require_user()
+            # ownership check: agent must operate in caller's workspace.
+            # The service bearer token in Authorization was already verified by
+            # _auth_and_body; here we additionally require GitHub identity,
+            # carried in the X-JWT header (NOT Authorization, which is reserved
+            # for the service/rotation token).
+            user_id = self._require_user_from_jwt()
             if not user_id:
                 return
             if ws["user_id"] != user_id:
@@ -1460,6 +1540,52 @@ class Handler(BaseHTTPRequestHandler):
                 hf_token_encrypted=hf_token_enc if has_hf else None,
             )
 
+        return user_id
+
+    def _require_user_from_jwt(self) -> str | None:
+        """Extract user_id from the ``X-JWT`` header (fallback: Authorization bearer).
+
+        Used by routes that are service-authed via the rotation token in
+        ``Authorization`` but additionally require GitHub identity for a
+        workspace ownership check.  Sends 403 (not 401) on failure because the
+        caller IS service-authed — they just lack GitHub identity.
+
+        The fallback to ``Authorization`` preserves back-compat for callers
+        that still send the JWT as the bearer; we only treat a candidate as a
+        JWT if it has the JWT shape (two dots) so a rotation token is never
+        misread as a JWT.
+        """
+        jwt = (self.headers.get("X-JWT") or "").strip()
+        if not jwt:
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                candidate = auth[len("Bearer "):].strip()
+                if candidate.count(".") == 2:
+                    jwt = candidate
+        if not jwt:
+            self._send_json(403, {"error": "GitHub auth required — link your GitHub account"})
+            return None
+        payload = jwt_auth.verify_jwt(jwt, expected_aud=os.environ.get("SPACE_HOST", ""))
+        if not payload:
+            payload = jwt_auth.verify_jwt(jwt, expected_aud=os.environ.get("SPACE_ID", ""))
+        if not payload:
+            self._send_json(403, {"error": "invalid or expired GitHub session"})
+            return None
+        user_id = payload["sub"]
+        # reconstruct user row if missing (DB wiped) — same logic as _require_user
+        user = db.get_user(user_id)
+        if not user:
+            github_id = payload.get("github_id")
+            github_token_enc = payload.get("github_token_enc")
+            if not (github_id and github_token_enc):
+                self._send_json(403, {"error": "incomplete GitHub session — please re-authenticate"})
+                return None
+            db.upsert_user(
+                user_id=user_id,
+                github_id=github_id,
+                github_username=payload.get("github_username"),
+                github_token_encrypted=github_token_enc,
+            )
         return user_id
 
     def _handle_github_login(self) -> None:
@@ -2087,13 +2213,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = self.path.rstrip("/")
+        # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
+        if route == "/api/conscious" or route.startswith("/api/conscious/"):
+            self._conscious_dispatch("POST")
+            return
         if route == "/oauth/set-provider-key":
             self._handle_set_provider_key()
             return
         #   POST /api/agent/<sid>/interrupt — stop the in-flight turn (bearer-gated,
         #   no body required). handled before the body-parsing gate below.
         if route.startswith("/api/agent/") and route.endswith("/interrupt"):
-            if not _token_or_jwt_ok(self.headers.get("Authorization")):
+            if not _token_ok(self.headers.get("Authorization")):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             sid = route[len("/api/agent/"):-len("/interrupt")]
@@ -2103,16 +2233,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             stopped = session.interrupt()
             self._send_json(200, {"interrupted": stopped, "status": session.status})
-            return
-        #   POST /api/agent — start/continue agent session. Accepts JWT or panel token.
-        if route == "/api/agent":
-            if not _token_or_jwt_ok(self.headers.get("Authorization")):
-                self._send_json(401, {"error": "missing or invalid bearer token"})
-                return
-            payload = self._read_json_body()
-            if payload is None:
-                return
-            self._handle_agent_post(payload)
             return
         # --- GitHub integration POST routes --------------------------------------
         if route == "/api/auth/github/disconnect":
@@ -2154,11 +2274,17 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_workspace_checkout(ws_id)
             return
         # -----------------------------------------------------------------------
-        if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates"):
+        # POST /api/agent shares the same _auth_and_body gate as the panel routes
+        # (service bearer token in Authorization).  GitHub identity for workspace
+        # ownership is carried separately in the X-JWT header (see _require_user_from_jwt).
+        if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates", "/api/agent"):
             self._send_json(404, {"error": "not found"})
             return
         payload = self._auth_and_body()
         if payload is None:
+            return
+        if route == "/api/agent":
+            self._handle_agent_post(payload)
             return
         panel: Panel = self.server.panel  # type: ignore[attr-defined]
         is_async = bool(payload.get("async"))
@@ -2213,6 +2339,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
+        # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
+        if route == "/api/conscious" or route.startswith("/api/conscious/"):
+            self._conscious_dispatch("DELETE")
+            return
         if not _token_ok(self.headers.get("Authorization")):
             self._send_json(401, {"error": "missing or invalid bearer token"})
             return
@@ -2237,6 +2367,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": f"no such user template {tid!r}"})
         else:
             self._send_json(200, {"deleted": tid})
+
+    def do_PATCH(self) -> None:
+        """PATCH routing (Tier 3 introduces this method for /api/conscious/*).
+
+        Currently only /api/conscious/* uses PATCH. Other PATCH routes can be
+        added here following the same bearer + JWT pattern.
+        """
+        from urllib.parse import urlsplit
+        route = urlsplit(self.path).path.rstrip("/")
+        if route == "/api/conscious" or route.startswith("/api/conscious/"):
+            self._conscious_dispatch("PATCH")
+            return
+        self._send_json(404, {"error": "not found"})
 
     def _handle_run(self, payload: dict, panel: Panel, is_async: bool) -> None:
         #   /api/run: drive a multi-stage orchestrator template/schematic with the

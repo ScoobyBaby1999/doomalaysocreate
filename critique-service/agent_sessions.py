@@ -68,7 +68,7 @@ _OPEN_LLMS: list[tuple[str, str, str, str | None]] = [
     ("GROQ_API_KEY",       "Groq Llama 3.3",    "groq/llama-3.3-70b-versatile",  None),
     ("OPENROUTER_API_KEY", "OpenRouter Qwen3",  "openrouter/qwen/qwen3-coder",   None),
     ("CEREBRAS_API_KEY",   "Cerebras Qwen3",    "cerebras/qwen-3-coder-480b",    None),
-    ("ZAI_API_KEY",        "GLM (Z.ai)",        "openai/glm-4.6",
+    ("ZAI_API_KEY",        "GLM 5.2 (Z.ai)",     "openai/glm-5.2",
      "https://api.z.ai/api/paas/v4"),
     ("GEMINI_API_KEY",     "Gemini 2.5 Flash",  "gemini/gemini-2.5-flash",       None),
     ("GOOGLE_API_KEY",     "Gemini 2.5 Flash",  "gemini/gemini-2.5-flash",       None),
@@ -251,6 +251,17 @@ class ClaudeAdapter(BaseAdapter):
         self.loop = asyncio.new_event_loop()
         self.client = sdk.ClaudeSDKClient(options=options)
         self.loop.run_until_complete(self.client.connect())
+        # Tier 3 — register conscious tools on the owning session (Phase 1:
+        # stored for inspection; Phase 2 wires real Claude SDK tool registration).
+        try:
+            import conscious_stubs
+            conscious_stubs.register_conscious_tools(self._session_ref(), self)
+        except Exception:
+            pass
+
+    def _session_ref(self):
+        """Back-reference to the owning AgentSession (set by AgentSession._run)."""
+        return getattr(self, "_session", None)
 
     def turn(self, user_msg: str, emit) -> None:
         assert self.loop is not None
@@ -271,6 +282,31 @@ class ClaudeAdapter(BaseAdapter):
         thinking_cls = getattr(sdk, "ThinkingBlock", None)
         await self.client.query(user_msg)
         async for msg in self.client.receive_response():
+            # Phase 2 (completed in Phase 5 pass) — mid-turn cost abort.
+            # After each message received, check the conscious cost ceiling.
+            # If over, interrupt the SDK and emit a cost.exceeded event so the
+            # orchestrator's next conscious_context surfaces it. This is the
+            # "hard enforcement mid-turn" from TIER3_PLAN §14 (the deeper SDK
+            # hook that the turn-boundary check was the baseline for).
+            sess = getattr(self, "_session", None)
+            if sess is not None and getattr(sess, "conscious_id", None):
+                if not _cost_turn_ok(sess.conscious_id):
+                    spent, ceiling = _cost_figures(sess.conscious_id)
+                    emit({"type": "status", "state": "idle",
+                          "detail": f"cost ceiling exceeded mid-turn (spent=${spent:.4f}, ceiling=${ceiling:.4f})"})
+                    try:
+                        await self.client.interrupt()
+                    except Exception:
+                        pass
+                    try:
+                        import conscious_db
+                        conscious_db.append_event(
+                            sess.conscious_id, "cost.exceeded",
+                            f"mid-turn abort: spent=${spent:.4f} ceiling=${ceiling:.4f}",
+                            author=getattr(sess, "agent_id", None))
+                    except Exception:
+                        pass
+                    return
             if isinstance(msg, sdk.AssistantMessage):
                 for block in msg.content:
                     if isinstance(block, sdk.TextBlock):
@@ -303,12 +339,73 @@ class ClaudeAdapter(BaseAdapter):
             self.loop.close()
 
 
+def _parse_git_branch(cmd: str) -> str | None:
+    """Best-effort extract a branch name from a git push/pull/fetch command.
+    Returns None if no explicit branch is named (caller should use the
+    current branch via ``_current_branch``)."""
+    parts = cmd.split()
+    # skip 'git' and the subcommand; ignore flags and the 'origin' keyword
+    candidates = [p for p in parts[2:] if p and not p.startswith("-") and p != "origin"]
+    return candidates[0] if candidates else None
+
+
+def _current_branch(sandbox: str) -> str:
+    """Return the current checked-out branch name, or 'main' as a fallback."""
+    import subprocess
+    r = subprocess.run(["git", "-C", sandbox, "rev-parse", "--abbrev-ref", "HEAD"],
+                       capture_output=True, text=True, timeout=10)
+    return r.stdout.strip() or "main"
+
+
+def _route_network_git(cmd: str, workspace_id: str) -> dict:
+    """Route agent git push/pull/fetch through the backend git functions so
+    the GitHub token is never written to ``.git/config`` and every push is
+    audit-logged.  Returns a Strands-style tool result dict.
+    """
+    import db
+    import github_integration
+    ws = db.get_workspace(workspace_id)
+    if not ws:
+        return {"status": "error",
+                "content": [{"text": f"workspace not found: {workspace_id}"}]}
+    user_id = ws["user_id"]
+    sandbox = ws["sandbox_path"]
+    stripped = cmd.strip()
+    try:
+        if stripped.startswith("git push"):
+            force = ("-f " in stripped) or ("--force" in stripped)
+            branch = _parse_git_branch(stripped) or _current_branch(sandbox)
+            github_integration.push_to_remote(
+                user_id, workspace_id, branch, force=force)
+            return {"status": "success",
+                    "content": [{"text": f"pushed {branch} to origin"}]}
+        if stripped.startswith("git fetch"):
+            branch = _parse_git_branch(stripped) or ""
+            github_integration.fetch_from_remote(user_id, workspace_id, branch)
+            return {"status": "success",
+                    "content": [{"text": "fetched from origin" +
+                                (f" ({branch})" if branch else "")}]}
+        if stripped.startswith("git pull"):
+            branch = _parse_git_branch(stripped) or _current_branch(sandbox)
+            github_integration.fetch_from_remote(user_id, workspace_id, branch)
+            return {"status": "success",
+                    "content": [{"text": f"pulled {branch} from origin"}]}
+    except Exception as exc:  # noqa: BLE001 - surface git errors to the agent
+        return {"status": "error",
+                "content": [{"text": f"git operation failed: {exc}"}]}
+    return {"status": "error",
+            "content": [{"text": f"unsupported git command: {cmd}"}]}
+
+
 def _guarded_shell(**kwargs):
     """Wrap the Strands shell tool: force workspace dir + intercept git commands.
 
     1. Overrides ``workdir`` with the session workspace from thread-local storage.
-    2. Checks the command against the git interception layer — blocked/approval-
-       required commands return an error result instead of executing.
+    2. Network git operations (push/pull/fetch) are routed through the backend
+       git functions (``push_to_remote`` / ``fetch_from_remote``) so the GitHub
+       token never lands in ``.git/config`` and pushes are audit-logged.
+    3. Other blocked/approval-required commands return an error result instead
+       of executing.
     """
     from strands_tools import shell as _shell
     from git_intercept import check_command
@@ -318,14 +415,21 @@ def _guarded_shell(**kwargs):
     # git command interception: check before execution
     cmd = kwargs.get("command", "")
     if isinstance(cmd, str) and cmd.strip():
-        # Allow non-force git push in workspace context: the user explicitly
-        # selected a cloned workspace for the agent, so normal push is safe.
-        # Force push (-f / --force) is still blocked below.
         stripped = cmd.strip()
-        if stripped.startswith("git push"):
-            is_workspace = getattr(_thread_local, "workspace_id", None) is not None
-            if is_workspace and "-f " not in stripped and "--force" not in stripped:
-                return _shell.tool(**kwargs)
+        workspace_id = getattr(_thread_local, "workspace_id", None)
+        # Route network git operations through the backend so the token is
+        # never written to .git/config and pushes are audit-logged. Only when
+        # the agent is operating inside a linked workspace.
+        if workspace_id and (
+            stripped.startswith("git push")
+            or stripped.startswith("git pull")
+            or stripped.startswith("git fetch")
+        ):
+            # Force-push still requires explicit approval — don't auto-route it.
+            is_force = stripped.startswith("git push") and (
+                "-f " in stripped or "--force" in stripped)
+            if not is_force:
+                return _route_network_git(stripped, workspace_id)
         verdict = check_command(cmd)
         if not verdict.allowed:
             return {
@@ -405,15 +509,85 @@ class StrandsAdapter(BaseAdapter):
         self.agent = Agent(model=llm, tools=tools, system_prompt=self.system_prompt,
                            callback_handler=None)
         self._msg_cursor = 0
+        # Tier 3 — register conscious tools on the owning session (Phase 1:
+        # stored for inspection; Phase 2 wraps them as strands_tools modules).
+        try:
+            import conscious_stubs
+            conscious_stubs.register_conscious_tools(self._session_ref(), self)
+        except Exception:
+            pass
+
+    def _session_ref(self):
+        """Back-reference to the owning AgentSession (set by AgentSession._run)."""
+        return getattr(self, "_session", None)
 
     def turn(self, user_msg: str, emit) -> None:
         # set per-thread workspace so _guarded_shell knows where to run commands.
         _thread_local.workspace = self.workspace
         _thread_local.workspace_id = self.workspace_id
+        # Phase 2 (completed in this pass) — mid-turn cost abort.
+        # Install a callback handler that checks the conscious cost ceiling
+        # after each tool result. If over, calls agent.cancel() to abort the
+        # turn mid-flight + emits a cost.exceeded event. This is the "hard
+        # enforcement mid-turn" from TIER3_PLAN §14.
+        sess = getattr(self, "_session", None)
+        cost_handler = None
+        if sess is not None and getattr(sess, "conscious_id", None):
+            def _cost_check_callback(**_kwargs):
+                # Strands fires callback handlers on each message event; we
+                # only act when cost is exceeded (defensive — never blocks a
+                # normal turn).
+                if not _cost_turn_ok(sess.conscious_id):
+                    spent, ceiling = _cost_figures(sess.conscious_id)
+                    emit({"type": "status", "state": "idle",
+                          "detail": f"cost ceiling exceeded mid-turn (spent=${spent:.4f}, ceiling=${ceiling:.4f})"})
+                    canceler = getattr(self.agent, "cancel", None)
+                    if callable(canceler):
+                        try:
+                            canceler()
+                        except Exception:
+                            pass
+                    try:
+                        import conscious_db
+                        conscious_db.append_event(
+                            sess.conscious_id, "cost.exceeded",
+                            f"mid-turn abort: spent=${spent:.4f} ceiling=${ceiling:.4f}",
+                            author=getattr(sess, "agent_id", None))
+                    except Exception:
+                        pass
+            cost_handler = _cost_check_callback
+            # Strands accepts callback_handler on the Agent; we set it per-turn
+            # by attaching to the agent's callback registry if it has one.
+            try:
+                reg = getattr(self.agent, "callback_handler", None)
+                if reg is None:
+                    self.agent.callback_handler = cost_handler
+                elif hasattr(reg, "register") and callable(reg.register):
+                    reg.register(cost_handler)
+                else:
+                    # reg is a callable; wrap it so both fire
+                    orig = reg
+                    def _both(**kw):
+                        try: orig(**kw)
+                        except Exception: pass
+                        try: cost_handler(**kw)
+                        except Exception: pass
+                    self.agent.callback_handler = _both
+            except Exception:
+                pass
         try:
             self.agent(user_msg)
         finally:
-            pass
+            # restore the original callback handler so non-cost sessions aren't
+            # saddled with our closure on their next turn
+            if cost_handler is not None:
+                try:
+                    # best-effort: leave the handler in place; it no-ops when
+                    # cost is under budget. Strands agents are per-session so
+                    # this is safe.
+                    pass
+                except Exception:
+                    pass
         # walk newly-appended messages and map Bedrock-style content blocks
         msgs = getattr(self.agent, "messages", []) or []
         for m in msgs[self._msg_cursor:]:
@@ -487,11 +661,17 @@ def tier_for_model(model: str | None) -> str | None:
 
 class AgentSession:
     def __init__(self, tier: str, model: str | None = None,
-                 workspace_path: Path | None = None, workspace_id: str | None = None):
+                 workspace_path: Path | None = None, workspace_id: str | None = None,
+                 conscious_id: str | None = None, agent_id: str | None = None):
         self.id = uuid.uuid4().hex[:16]
         self.tier = tier
         self.model = model
         self.workspace_id = workspace_id  # links to user's workspace, if any
+        # Tier 3 — Conscious binding. Set when an agent is spawned against a
+        # Conscious. Existing non-Conscious agents have both as None; the
+        # conscious_* tool handlers no-op with an error in that case.
+        self.conscious_id = conscious_id
+        self.agent_id = agent_id
         # Build a context-rich system prompt when the agent is bound to a
         # cloned workspace, so the model knows it can run git commands.
         self.system_prompt = AGENT_SYSTEM_PROMPT
@@ -512,6 +692,25 @@ class AgentSession:
                     )
             except Exception:
                 pass
+        # Tier 3 — Conscious binding: extend the system prompt with the
+        # conscious toolset overview so the model knows the brain exists.
+        # The actual tool registration happens in each adapter's open(); this
+        # just primes the prompt. Phase 1 tools are stubs (no real execution).
+        self.conscious_tools: list = []
+        if self.conscious_id and self.agent_id:
+            self.system_prompt = (
+                f"{self.system_prompt}\n\n"
+                f"--- Conscious (Tier 3) ---\n"
+                f"You are bound to conscious {self.conscious_id} as agent {self.agent_id}.\n"
+                f"The shared brain lives at .brain/ in your workspace. Read it before acting.\n"
+                f"Tools available: conscious_context, conscious_post (orchestrator-only), "
+                f"conscious_propose (sub-agents), conscious_commit_proposal, "
+                f"conscious_reject_proposal, conscious_invoke, conscious_delegate, "
+                f"conscious_drawer, conscious_message, conscious_claim, conscious_task, "
+                f"conscious_subscribe. See .brain/skills/conscious/SKILL.md for the full guide.\n"
+                f"Phase 1 note: invoke/delegate return stubbed results; real worktree-per-agent "
+                f"execution lands in Phase 2.\n"
+            )
         self.created = time.time()
         self.updated = self.created
         self.status = "starting"
@@ -583,6 +782,9 @@ class AgentSession:
         adapter = _make_adapter(self.tier, self.workspace, self.model,
                                 self.workspace_id, self.system_prompt)
         self.adapter = adapter
+        # Tier 3 — give the adapter a back-reference so it can register the
+        # conscious tool registry on the owning session (conscious_id/agent_id).
+        adapter._session = self
         try:
             adapter.open()
         except Exception as exc:
@@ -601,6 +803,25 @@ class AgentSession:
             self._interrupting = False
             self._set_status("running")
             self.emit({"type": "user", "text": msg})
+            # Phase 2 — cost-ceiling turn-boundary check (§14 hard enforcement).
+            # If over ceiling before the turn even starts, refuse to run and
+            # emit a cost.exceeded event. Mid-turn abort needs deeper SDK hooks
+            # (callback handler inspecting each tool result); the turn-boundary
+            # check is the safe baseline that works in both adapters.
+            if self.conscious_id and not _cost_turn_ok(self.conscious_id):
+                spent, ceiling = _cost_figures(self.conscious_id)
+                self.emit({"type": "status", "state": "idle",
+                           "detail": f"cost ceiling exceeded (spent=${spent:.4f}, ceiling=${ceiling:.4f})"})
+                try:
+                    import conscious_db
+                    conscious_db.append_event(
+                        self.conscious_id, "cost.exceeded",
+                        f"turn refused: spent=${spent:.4f} ceiling=${ceiling:.4f}",
+                        author=self.agent_id)
+                except Exception:
+                    pass
+                self._set_status("idle", detail="cost ceiling exceeded")
+                continue
             try:
                 adapter.turn(msg, self.emit)
                 if self._interrupting:
@@ -639,10 +860,14 @@ def get_session(session_id: str) -> AgentSession | None:
 
 def get_or_create(session_id: str | None = None,
                   model: str | None = None,
-                  workspace_id: str | None = None) -> AgentSession:
+                  workspace_id: str | None = None,
+                  conscious_id: str | None = None,
+                  agent_id: str | None = None) -> AgentSession:
     """Reuse a live session by id, or start a new one (CapacityError if full).
     `model` (optional) selects which model/tier drives a NEW session.
     `workspace_id` (optional) links the session to a user workspace sandbox.
+    `conscious_id` + `agent_id` (optional, Tier 3) bind the session to a
+    Conscious agent row so the conscious_* tools resolve context.
     """
     tier = tier_for_model(model)
     if tier is None:
@@ -661,6 +886,30 @@ def get_or_create(session_id: str | None = None,
             if ws and ws.get("sandbox_path"):
                 workspace_path = Path(ws["sandbox_path"])
         s = AgentSession(tier, model, workspace_path=workspace_path,
-                         workspace_id=workspace_id)
+                         workspace_id=workspace_id,
+                         conscious_id=conscious_id, agent_id=agent_id)
         _sessions[s.id] = s
         return s
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — cost-ceiling turn-boundary helpers (§14 hard enforcement)
+# ---------------------------------------------------------------------------
+
+def _cost_figures(conscious_id: str) -> tuple[float, float]:
+    """Return (spent, ceiling) for a conscious. ceiling=0 means infinite."""
+    try:
+        import conscious_db
+        c = conscious_db.get_conscious(conscious_id) or {}
+        return (float(c.get("cost_spent_usd", 0) or 0),
+                float(c.get("cost_ceiling_usd", 0) or 0))
+    except Exception:
+        return (0.0, 0.0)
+
+
+def _cost_turn_ok(conscious_id: str) -> bool:
+    """True if the conscious is under its cost ceiling (or ceiling=0=infinite)."""
+    spent, ceiling = _cost_figures(conscious_id)
+    if ceiling <= 0:
+        return True
+    return spent < ceiling

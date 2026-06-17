@@ -58,6 +58,11 @@ def _migrate(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE workspaces ADD COLUMN source_branches TEXT")
     except sqlite3.OperationalError:
         pass
+    # Phase 3 — last_synced_at on conscious (for stale HF Dataset sync detection)
+    try:
+        db.execute("ALTER TABLE conscious ADD COLUMN last_synced_at TEXT")
+    except sqlite3.OperationalError:
+        pass
     db.commit()
 
 
@@ -125,6 +130,136 @@ CREATE TABLE IF NOT EXISTS registry (
 CREATE INDEX IF NOT EXISTS idx_workspaces_user ON workspaces(user_id);
 CREATE INDEX IF NOT EXISTS idx_push_logs_workspace ON push_logs(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_registry_indexed ON registry(indexed_at);
+
+-- ===========================================================================
+-- Tier 3 — Conscious: Multi-Agent Shared-Brain Architecture (Phase 1)
+-- 7 new tables, all prefixed conscious_. See TIER3_PLAN.md §9 for the spec.
+-- FK ordering note: conscious_proposal is defined BEFORE conscious_blackboard_entry
+-- because the latter references proposal(id). SQLite allows forward refs within
+-- the same executescript as long as the referenced table exists by the time the
+-- script finishes — confirmed safe.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS conscious (
+    id                    TEXT PRIMARY KEY,
+    workspace_id          TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    owner_user_id         TEXT NOT NULL REFERENCES users(id),
+    title                 TEXT NOT NULL DEFAULT 'Untitled Conscious',
+    goal                  TEXT NOT NULL DEFAULT '',
+    orchestrator_agent_id TEXT,
+    cost_ceiling_usd      REAL NOT NULL DEFAULT 0,
+    cost_spent_usd        REAL NOT NULL DEFAULT 0,
+    brain_commit_policy   TEXT NOT NULL DEFAULT 'on' CHECK (brain_commit_policy IN ('on','off')),
+    graphiti_enabled      INTEGER NOT NULL DEFAULT 0,
+    max_agents            INTEGER NOT NULL DEFAULT 8,
+    status                TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused','archived')),
+    last_synced_at        TEXT,                          -- Phase 3: last HF Dataset brain sync timestamp (null = never)
+    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_conscious_workspace ON conscious(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_conscious_owner ON conscious(owner_user_id);
+
+CREATE TABLE IF NOT EXISTS conscious_agent (
+    id                TEXT PRIMARY KEY,
+    conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+    role              TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    tier              TEXT NOT NULL CHECK (tier IN ('claude','open')),
+    status            TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running','waiting','done','failed')),
+    worktree_path     TEXT,
+    branch            TEXT,
+    parent_agent_id   TEXT REFERENCES conscious_agent(id),
+    subscribed_events TEXT NOT NULL DEFAULT '[]',
+    is_orchestrator   INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_conscious_agent_conscious ON conscious_agent(conscious_id);
+CREATE INDEX IF NOT EXISTS idx_conscious_agent_orchestrator ON conscious_agent(conscious_id, is_orchestrator);
+
+-- conscious_proposal is defined BEFORE conscious_blackboard_entry (forward FK).
+CREATE TABLE IF NOT EXISTS conscious_proposal (
+    id                      TEXT PRIMARY KEY,
+    conscious_id            TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+    proposer_agent_id       TEXT NOT NULL REFERENCES conscious_agent(id),
+    section                 TEXT NOT NULL,
+    key                     TEXT NOT NULL,
+    value                   TEXT NOT NULL,
+    reason                  TEXT NOT NULL DEFAULT '',
+    status                  TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','committed','rejected','expired')),
+    committed_by_agent_id   TEXT REFERENCES conscious_agent(id),
+    rejection_reason        TEXT,
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_proposal_conscious ON conscious_proposal(conscious_id, status);
+
+CREATE TABLE IF NOT EXISTS conscious_blackboard_entry (
+    id                      TEXT PRIMARY KEY,
+    conscious_id            TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+    section                 TEXT NOT NULL,
+    key                     TEXT NOT NULL,
+    value                   TEXT NOT NULL,
+    author_agent_id         TEXT NOT NULL REFERENCES conscious_agent(id),
+    committed_by_agent_id   TEXT NOT NULL REFERENCES conscious_agent(id),
+    proposal_id             TEXT REFERENCES conscious_proposal(id),
+    version                 INTEGER NOT NULL,
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(conscious_id, section, key, version)
+);
+CREATE INDEX IF NOT EXISTS idx_bb_conscious ON conscious_blackboard_entry(conscious_id);
+CREATE INDEX IF NOT EXISTS idx_bb_section_key ON conscious_blackboard_entry(conscious_id, section, key, version);
+
+CREATE TABLE IF NOT EXISTS conscious_drawer_entry (
+    id                TEXT PRIMARY KEY,
+    conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+    invoke_id         TEXT NOT NULL,
+    from_agent_id     TEXT NOT NULL REFERENCES conscious_agent(id),
+    to_agent_id       TEXT NOT NULL REFERENCES conscious_agent(id),
+    kind              TEXT NOT NULL CHECK (kind IN ('invoke','delegate')),
+    task              TEXT NOT NULL,
+    inputs            TEXT NOT NULL DEFAULT '{}',
+    result            TEXT NOT NULL DEFAULT '',
+    result_path       TEXT,
+    files_path        TEXT,
+    status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','done','failed','timeout')),
+    started_at        TEXT,
+    completed_at      TEXT,
+    error             TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_drawer_conscious ON conscious_drawer_entry(conscious_id, status);
+CREATE INDEX IF NOT EXISTS idx_drawer_to_agent ON conscious_drawer_entry(to_agent_id, status);
+
+CREATE TABLE IF NOT EXISTS conscious_message (
+    id              TEXT PRIMARY KEY,
+    conscious_id    TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+    from_agent_id   TEXT NOT NULL REFERENCES conscious_agent(id),
+    to_agent_id     TEXT,
+    body            TEXT NOT NULL,
+    read_at         TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_msg_conscious ON conscious_message(conscious_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_msg_to_agent ON conscious_message(to_agent_id, read_at);
+
+CREATE TABLE IF NOT EXISTS conscious_task (
+    id                TEXT PRIMARY KEY,
+    conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+    title             TEXT NOT NULL,
+    description       TEXT NOT NULL DEFAULT '',
+    assignee_agent_id TEXT REFERENCES conscious_agent(id),
+    status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','claimed','in_progress','done','failed','blocked')),
+    depends_on        TEXT NOT NULL DEFAULT '[]',
+    cost_ceiling_usd  REAL,
+    cost_spent_usd    REAL NOT NULL DEFAULT 0,
+    claimed_at        TEXT,
+    completed_at      TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_conscious ON conscious_task(conscious_id, status);
 """
 
 

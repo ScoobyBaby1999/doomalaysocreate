@@ -3,6 +3,11 @@
 Persists the SQLite DB to a private HF Dataset so data survives Space rebuilds.
 Also provides HF OAuth helpers so users can authorize dataset access.
 
+Tier 3 extension: also persists the ``.brain/`` folder for each active
+Conscious workspace as ``brains/<workspace_id>.tar.gz`` (one tarball per
+workspace, uploaded every 120s alongside ``loom.db``; re-downloaded on boot).
+See TIER3_PLAN.md §7.2 for the spec.
+
 Env vars required:
     HF_CLIENT_ID       — HF OAuth App client ID
     HF_CLIENT_SECRET   — HF OAuth App client secret
@@ -14,8 +19,10 @@ Env vars optional:
 """
 from __future__ import annotations
 
+import io
 import json
 import os
+import tarfile
 import threading
 import time
 import urllib.error
@@ -121,11 +128,13 @@ def exchange_hf_code(code: str, redirect_uri: str = "") -> dict:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:400]
-        raise RuntimeError(f"HF token exchange failed (HTTP {exc.code}): {detail}") from exc
+        detail = exc.read().decode(errors="replace")[:200]
+        # don't include the full response — it may contain tokens (audit H4)
+        raise RuntimeError(f"HF token exchange failed (HTTP {exc.code})") from exc
     token = data.get("access_token", "").strip()
     if not token:
-        raise RuntimeError(f"HF token exchange returned no access_token: {data}")
+        # log only the keys present, not the values (which may contain tokens)
+        raise RuntimeError(f"HF token exchange returned no access_token (keys: {list(data.keys())})")
     return data
 
 
@@ -204,7 +213,7 @@ def _hf_token_for_user(user_id: str) -> str:
         try:
             _refresh_hf_token(user_id, user)
         except Exception as exc:
-            print(f"[dataset_persistence] token refresh failed: {exc}", flush=True)
+            print(f"[dataset_persistence] token refresh failed: {type(exc).__name__}", flush=True)
     user = db.get_user(user_id)
     return crypto.decrypt_token(user["hf_token_encrypted"])
 
@@ -285,6 +294,11 @@ def init_persistence(user_id: str) -> None:
 
     Ensures the private dataset repo exists, downloads the latest DB,
     and starts the periodic upload scheduler.
+
+    Tier 3 extension: after the DB download, also restores every active
+    Conscious's ``.brain/`` folder (§7.4). If the workspace sandbox doesn't
+    exist (Space was rebuilt), it's recreated from the workspace's
+    ``source_repo`` via the existing token-safe ``_clone_repo`` (Tier 1).
     """
     global _current_hf_token
     token = _hf_token_for_user(user_id)
@@ -310,6 +324,8 @@ def init_persistence(user_id: str) -> None:
             raise
 
     _download_db(token, ds_name)
+    # Tier 3 — restore .brain/ folders for all active Conscious workspaces.
+    _restore_all_brains(token, ds_name)
     _start_upload_scheduler(token, ds_name)
 
 
@@ -346,11 +362,16 @@ def upload_db(token: str, ds_name: str) -> None:
             commit_message="auto-sync loom.db",
         )
     except HfHubHTTPError as exc:
-        print(f"[dataset_persistence] upload failed: {exc}", flush=True)
+        print(f"[dataset_persistence] upload failed: {type(exc).__name__}", flush=True)
 
 
 def _start_upload_scheduler(token: str, ds_name: str, interval: int = 120) -> None:
-    """Start a daemon thread that uploads the DB every ``interval`` seconds."""
+    """Start a daemon thread that uploads the DB every ``interval`` seconds.
+
+    Tier 3 extension: also uploads every active Conscious's ``.brain/`` folder
+    (one tarball per workspace). Single-threaded; no new locks. Failures in
+    one workspace don't block others (each wrapped in try/except, logged).
+    """
     global _upload_scheduler
     if _upload_scheduler is not None:
         return
@@ -363,13 +384,232 @@ def _start_upload_scheduler(token: str, ds_name: str, interval: int = 120) -> No
                 upload_db(token, ds_name)
             except Exception:
                 pass
+            # Tier 3 — also sync brains
+            try:
+                _upload_all_brains(token, ds_name)
+            except Exception as exc:
+                print(f"[dataset_persistence] brain sync failed: {type(exc).__name__}", flush=True)
 
     _upload_scheduler = threading.Thread(target=loop, daemon=True)
     _upload_scheduler.start()
 
 
+# ---------------------------------------------------------------------------
+# Tier 3 — .brain/ folder sync (§7.2, §7.4)
+# ---------------------------------------------------------------------------
+
+BRAIN_SYNC_INTERVAL_S = 120  # same as DB; shares the scheduler
+
+
+def _tar_brain(brain_path: Path) -> bytes:
+    """Pack a .brain/ folder into a tar.gz bytes blob. Skips if path missing."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        tar.add(str(brain_path), arcname=".brain")
+    return buf.getvalue()
+
+
+def _untar_brain(blob: bytes, dest_workspace: Path) -> None:
+    """Extract a tar.gz brain blob into ``dest_workspace`` (.brain/ lands there).
+
+    Phase 5 security: uses ``filter='data'`` (Python 3.12+) to prevent
+    path-traversal via malicious tarball entries (audit L4). On older Pythons
+    where the filter param doesn't exist, falls back to manual member
+    validation.
+    """
+    buf = io.BytesIO(blob)
+    with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+        try:
+            # Python 3.12+ — built-in data filter blocks path traversal
+            tar.extractall(str(dest_workspace), filter="data")
+        except TypeError:
+            # older Python — manual validation: reject members with .. or abs paths
+            dest = dest_workspace.resolve()
+            for member in tar.getmembers():
+                member_path = (dest_workspace / member.name).resolve()
+                if not str(member_path).startswith(str(dest)):
+                    raise RuntimeError(f"tar member escapes dest: {member.name}")
+            tar.extractall(str(dest_workspace))
+
+
+def upload_brain(token: str, ds_name: str, workspace_id: str,
+                 brain_path: Path) -> None:
+    """Upload the .brain/ folder for one workspace to the HF Dataset.
+
+    Packs .brain/ as a tar.gz, uploads as ``brains/<workspace_id>.tar.gz``.
+    Idempotent: overwrites the previous upload. Skips if brain_path missing.
+
+    Per TIER3_PLAN §7.2: one tarball per workspace per 120s tick (not per-file)
+    to keep HF Dataset upload calls bounded.
+
+    Phase 3: after a successful upload, stamps ``conscious.last_synced_at`` for
+    every active conscious in this workspace so the API can surface stale
+    syncs (>10min) — TIER3_PLAN §17 risk mitigation.
+
+    Phase 5 security: scans .brain/ for known secret patterns BEFORE upload.
+    If secrets are found, the upload is REFUSED (TIER3_PLAN §17: "refuse to
+    commit if any file in .brain/ matches a secret pattern"). This is the
+    second defense layer — commit_brain scans first, this scans before HF.
+    """
+    if not brain_path.is_dir():
+        return
+    # Security: scan for secrets before uploading to HF (audit C1)
+    try:
+        import brain as _brain_mod
+        findings = _brain_mod.scan_for_secrets(brain_path)
+        if findings:
+            print(f"[dataset_persistence] BRAIN UPLOAD BLOCKED for {workspace_id}: "
+                  f"{len(findings)} secret(s) detected in .brain/", flush=True)
+            return  # refuse to upload
+    except Exception:
+        pass  # scan failure must never block — but log it
+    try:
+        blob = _tar_brain(brain_path)
+    except Exception as exc:
+        print(f"[dataset_persistence] tar brain failed for {workspace_id}: "
+              f"{type(exc).__name__}",  # don't leak details (audit H4)
+              flush=True)
+        return
+    from huggingface_hub import upload_file
+    from huggingface_hub.utils import HfHubHTTPError
+    try:
+        upload_file(
+            path_or_fileobj=blob,
+            path_in_repo=f"brains/{workspace_id}.tar.gz",
+            repo_id=ds_name,
+            repo_type="dataset",
+            token=token,
+            commit_message=f"auto-sync brain {workspace_id}",
+        )
+    except HfHubHTTPError as exc:
+        print(f"[dataset_persistence] brain upload failed for {workspace_id}: {type(exc).__name__}",
+              flush=True)
+        return
+    # Phase 3 — stamp last_synced_at on every active conscious in this workspace
+    try:
+        import conscious_db
+        now = conscious_db._iso_now()
+        with _db_write_lock_for_sync():
+            _db_for_sync().execute(
+                "UPDATE conscious SET last_synced_at = ?, updated_at = ? "
+                "WHERE workspace_id = ? AND status = 'active'",
+                (now, now, workspace_id))
+            _db_for_sync().commit()
+    except Exception as exc:
+        print(f"[dataset_persistence] stamp last_synced_at failed for {workspace_id}: {type(exc).__name__}",
+              flush=True)
+
+
+# Phase 3 — local helpers to avoid circular import of db._write_lock at module
+# load time. conscious_db imports db, and dataset_persistence imports
+# conscious_db lazily inside functions; these helpers mirror that pattern.
+def _db_for_sync():
+    import db as _db
+    return _db._db()
+
+
+def _db_write_lock_for_sync():
+    import db as _db
+    return _db._write_lock
+
+
+def download_brain(token: str, ds_name: str, workspace_id: str,
+                   dest_workspace: Path) -> None:
+    """Download and extract ``brains/<workspace_id>.tar.gz`` into dest_workspace.
+
+    No-op if the file doesn't exist in the dataset (first run for that workspace).
+    """
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError
+    try:
+        path = hf_hub_download(
+            repo_id=ds_name,
+            filename=f"brains/{workspace_id}.tar.gz",
+            token=token,
+            repo_type="dataset",
+        )
+    except (RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError, OSError):
+        return  # first run — no brain yet
+    try:
+        with open(path, "rb") as f:
+            blob = f.read()
+        dest_workspace.mkdir(parents=True, exist_ok=True)
+        _untar_brain(blob, dest_workspace)
+    except Exception as exc:
+        print(f"[dataset_persistence] brain extract failed for {workspace_id}: {type(exc).__name__}",
+              flush=True)
+
+
+def _upload_all_brains(token: str, ds_name: str) -> None:
+    """Walk all active Conscious workspaces and upload each .brain/ folder."""
+    try:
+        import conscious_db
+        items = conscious_db.list_active_conscious_workspaces()
+    except Exception:
+        return  # conscious tables not initialized yet
+    for item in items:
+        ws_id = item["workspace_id"]
+        sandbox = item.get("sandbox_path") or ""
+        if not sandbox:
+            continue
+        brain_path = Path(sandbox) / ".brain"
+        try:
+            upload_brain(token, ds_name, ws_id, brain_path)
+        except Exception as exc:
+            print(f"[dataset_persistence] brain upload error for {ws_id}: {type(exc).__name__}",
+                  flush=True)
+            continue
+
+
+def _restore_all_brains(token: str, ds_name: str) -> None:
+    """On boot, restore .brain/ for every Conscious in the restored DB.
+
+    For each Conscious row: if the workspace sandbox doesn't exist, recreate
+    it from the workspace's source_repo via Tier 1's token-safe ``_clone_repo``
+    (in github_integration); then extract the brain tarball into it.
+    """
+    try:
+        import conscious_db
+        items = conscious_db.list_active_conscious_workspaces()
+    except Exception:
+        return  # conscious tables not initialized
+    for item in items:
+        ws_id = item["workspace_id"]
+        sandbox = item.get("sandbox_path") or ""
+        if not sandbox:
+            continue
+        sandbox_path = Path(sandbox)
+        try:
+            if not sandbox_path.is_dir():
+                # recreate the workspace from source_repo (Tier 1 token-safe clone)
+                ws = db.get_workspace(ws_id)
+                if ws and ws.get("source_repo") and ws.get("user_id"):
+                    try:
+                        import github_integration
+                        github_integration._clone_repo(
+                            ws["user_id"], ws["source_repo"],
+                            branch=ws.get("source_branch"),
+                            dest=str(sandbox_path),
+                            branches=None)
+                    except Exception as exc:
+                        print(f"[dataset_persistence] workspace re-clone failed "
+                              f"for {ws_id}: {type(exc).__name__}", flush=True)
+                        continue
+                else:
+                    continue
+            download_brain(token, ds_name, ws_id, sandbox_path)
+        except Exception as exc:
+            print(f"[dataset_persistence] brain restore error for {ws_id}: {type(exc).__name__}",
+                  flush=True)
+            continue
+
+
 def shutdown_upload() -> None:
-    """Signal the upload scheduler to stop and do one final upload."""
+    """Signal the upload scheduler to stop and do one final upload.
+
+    Tier 3: also does a final brain sync so the latest brain state survives
+    a Space rebuild.
+    """
     global _upload_scheduler
     _shutdown_event.set()
     if _upload_scheduler is not None:
@@ -381,5 +621,6 @@ def shutdown_upload() -> None:
             info = get_hf_user(_current_hf_token)
             ds_name = dataset_name(info.get("name", ""))
             upload_db(_current_hf_token, ds_name)
+            _upload_all_brains(_current_hf_token, ds_name)
         except Exception:
             pass
