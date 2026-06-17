@@ -52,10 +52,38 @@ jobs:
           mkdir space/app
           cp -r frontend/. space/app/
           rm -rf space/app/.git space/app/node_modules space/app/dist
-          # the multi-stage Dockerfile + Space README replace the API-only ones
           cp backend/critique-service/deploy/Dockerfile space/Dockerfile
           cp backend/critique-service/deploy/README.space.md space/README.md
+          cp backend/critique-service/deploy/.dockerignore space/.dockerignore
+          mkdir -p space/glm-bridge
+          if [ -f frontend/mini-services/glm-bridge/index.ts ]; then
+            cp -r frontend/mini-services/glm-bridge/* space/glm-bridge/
+          else
+            echo '{"name":"glm-bridge","version":"1.0.0","type":"module","dependencies":{"z-ai-web-dev-sdk":"latest"}}' > space/glm-bridge/package.json
+            cat > space/glm-bridge/index.ts << 'EOF'
+          import { serve } from "bun";
+          serve({
+            port: 3030,
+            async fetch(req) {
+              if (req.method === "OPTIONS") return new Response(null, { headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" } });
+              if (req.method === "GET" && new URL(req.url).pathname === "/health") return Response.json({ status: "ok" });
+              if (req.method !== "POST" || new URL(req.url).pathname !== "/chat") return Response.json({ error: "use POST /chat" }, { status: 404 });
+              try {
+                const { messages, model } = await req.json();
+                const ZAI = (await import("z-ai-web-dev-sdk")).default;
+                const zai = await ZAI.create();
+                const c = await zai.chat.completions.create({ model: model || "glm-5.2", messages, thinking: { type: "disabled" } });
+                return Response.json({ content: c.choices?.[0]?.message?.content || "", model: "glm-5.2" });
+              } catch (e) {
+                return Response.json({ content: `[error] ${e}`, error: String(e) });
+              }
+            },
+          });
+          console.log("[glm-bridge] port 3030");
+          EOF
+          fi
           ls space
+          ls space/glm-bridge
 
       - name: Push to Space
         env:
