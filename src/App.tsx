@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Brain } from "lucide-react";
 import { useSettings, saveSettings, loadSettings } from "./state/settings";
 import { Chat } from "./screens/Chat";
 import { SettingsScreen } from "./screens/SettingsScreen";
@@ -157,7 +156,11 @@ export default function App() {
           >
             {t === "conscious" ? (
               <>
-                <Brain className="w-4 h-4" />
+                {/* Brain icon — inline SVG, no dependency */}
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+                  <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+                </svg>
                 <span className="text-[10px]">Conscious</span>
               </>
             ) : (
