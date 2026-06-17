@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react";
+import { Brain } from "lucide-react";
 import { useSettings, saveSettings, loadSettings } from "./state/settings";
 import { Chat } from "./screens/Chat";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { AgentScreen } from "./screens/AgentScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
+import { ConsciousScreen } from "./screens/ConsciousScreen";
 import { exchangeGitHubCode, exchangeHFCode } from "./api/github";
 import { getJWTSub } from "./lib/jwt";
 import type { Settings } from "./api/panel";
 
-type Tab = "chat" | "agent" | "workspaces" | "settings";
+type Tab = "chat" | "agent" | "conscious" | "workspaces" | "settings";
 
 export default function App() {
   const [settings, setSettings] = useSettings();
@@ -135,6 +137,8 @@ export default function App() {
           <Chat settings={settings} />
         ) : tab === "agent" ? (
           <AgentScreen settings={settings} />
+        ) : tab === "conscious" ? (
+          <ConsciousScreen settings={settings} />
         ) : tab === "workspaces" ? (
           <WorkspaceScreen settings={settings} onChange={setSettings} />
         ) : (
@@ -143,15 +147,22 @@ export default function App() {
       </main>
 
       <nav className="flex border-t border-border">
-        {(["chat", "agent", "workspaces", "settings"] as Tab[]).map((t) => (
+        {(["chat", "agent", "conscious", "workspaces", "settings"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`flex-1 py-2 text-sm capitalize ${
+            className={`flex-1 py-2 text-sm capitalize flex flex-col items-center gap-0.5 ${
               tab === t ? "text-accent" : "text-muted"
             }`}
           >
-            {t}
+            {t === "conscious" ? (
+              <>
+                <Brain className="w-4 h-4" />
+                <span className="text-[10px]">Conscious</span>
+              </>
+            ) : (
+              t
+            )}
           </button>
         ))}
       </nav>
