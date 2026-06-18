@@ -12,6 +12,7 @@ the caller); body is the parsed JSON dict (or {} for GETs).
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -25,8 +26,37 @@ import db as _dbmod
 # ---------------------------------------------------------------------------
 
 def handle_request(method: str, raw_path: str, body: dict | None,
-                   headers: dict, user_id: str | None) -> tuple[int, dict]:
-    """Route a /api/conscious/* request. Returns (status, json_body)."""
+                   headers: dict, raw_jwt: str | None,
+                   pre_verified_user_id: str | None = None) -> tuple[int, dict]:
+    """Route a /api/conscious/* request. Returns (status, json_body).
+
+    Auth (Fix 1 + Fix 5 + server-side sessions):
+    - pre_verified_user_id: if set (from session cookie), use directly.
+      No JWT verification needed — the session already proved identity.
+    - raw_jwt: if pre_verified_user_id is None, verify the JWT to extract
+      user_id. If None → playground mode (no workspace, no git, GLM only).
+    - If raw_jwt is present but invalid → 401 (re-authenticate with GitHub).
+    Layer 1 (rotation secret or session) is already verified by the caller.
+    """
+    # Determine user_id: session (pre-verified) > JWT > None (playground)
+    if pre_verified_user_id:
+        user_id = pre_verified_user_id
+    elif raw_jwt:
+        try:
+            import jwt_auth
+            payload = jwt_auth.verify_jwt(raw_jwt, expected_aud=os.environ.get("SPACE_HOST", ""))
+            if not payload:
+                payload = jwt_auth.verify_jwt(raw_jwt, expected_aud=os.environ.get("SPACE_ID", ""))
+            if not payload:
+                return 401, {"error": "invalid or expired GitHub session — please re-authenticate"}
+            user_id = payload.get("sub")
+            if not user_id:
+                return 401, {"error": "invalid session — no user identity"}
+        except Exception:
+            return 401, {"error": "invalid or expired GitHub session — please re-authenticate"}
+    else:
+        user_id = None  # playground mode
+
     path = urlsplit(raw_path).path.rstrip("/")
     qs = parse_qs(urlsplit(raw_path).query)
     body = body or {}
@@ -113,45 +143,30 @@ def handle_request(method: str, raw_path: str, body: dict | None,
 def _check_ownership(cid: str, user_id: str | None) -> tuple[bool, dict | None]:
     """Return (ok, error_response). ok=False means send the error_response.
 
-    Phase 6: if user_id is None (no GitHub auth), auto-provision a default
-    user + workspace so the conscious system works without GitHub (like the
-    chat panel). The default user owns all conscious instances in this mode.
+    Fix 1: user_id=None means playground mode — NO workspace access.
+    - If user_id is None and the conscious is in a real workspace → 401
+      (need GitHub auth for workspace operations).
+    - If user_id is None and the conscious is a playground conscious (no
+      workspace) → allowed (playground mode).
+    - If user_id is present → check ownership as before.
     """
-    if not user_id:
-        # Phase 6: no GitHub auth — auto-provision a default user
-        user_id = _ensure_default_user()
     c = conscious_db.get_conscious(cid)
     if not c:
         return False, (404, {"error": "conscious not found"})
+    # Playground mode: allow access to playground conscious (no workspace)
+    if user_id is None:
+        ws = _dbmod.get_workspace(c["workspace_id"]) if c.get("workspace_id") else None
+        if ws and ws.get("sandbox_path") and ws["sandbox_path"] != "/tmp/conscious-default":
+            # This conscious belongs to a real workspace — need GitHub auth
+            return False, (401, {"error": "GitHub auth required — link your GitHub account to access workspace agents"})
+        # Playground conscious (or default workspace) — allow
+        return True, None
+    # User is authenticated — check ownership
     if c["owner_user_id"] != user_id:
-        # also allow if the workspace belongs to the user (defense in depth)
         ws = _dbmod.get_workspace(c["workspace_id"])
         if not ws or ws["user_id"] != user_id:
             return False, (403, {"error": "not your conscious"})
     return True, None
-
-
-_DEFAULT_USER_ID = "conscious-default-user"
-
-
-def _ensure_default_user() -> str:
-    """Phase 6: create a default user + workspace if they don't exist.
-    Used when no GitHub auth is provided (like the chat panel)."""
-    try:
-        user = _dbmod.get_user(_DEFAULT_USER_ID)
-        if not user:
-            _dbmod.upsert_user(user_id=_DEFAULT_USER_ID)
-        # ensure a default workspace exists
-        ws = _dbmod.get_workspace("conscious-default-workspace")
-        if not ws:
-            _dbmod.create_workspace(
-                _DEFAULT_USER_ID,
-                title="Default Conscious Workspace",
-                sandbox_path="/tmp/conscious-default",
-            )
-        return _DEFAULT_USER_ID
-    except Exception:
-        return _DEFAULT_USER_ID
 
 
 # ---------------------------------------------------------------------------
@@ -159,24 +174,36 @@ def _ensure_default_user() -> str:
 # ---------------------------------------------------------------------------
 
 def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
-    # Phase 6: if no user_id, auto-provision a default user + workspace
-    if not user_id:
-        user_id = _ensure_default_user()
+    """Create a conscious. If user_id is None (playground mode), create a
+    playground conscious with no workspace and no git worktrees. If user_id
+    is present, create in the specified workspace (requires ownership)."""
     workspace_id = str(body.get("workspace_id", "")).strip()
-    if not workspace_id:
-        # Phase 6: use the default workspace if none specified
-        workspace_id = "conscious-default-workspace"
-        _ensure_default_user()  # ensure the workspace exists
-    ws = _dbmod.get_workspace(workspace_id)
-    if not ws:
-        # auto-create the workspace if it doesn't exist
-        if workspace_id == "conscious-default-workspace":
-            _ensure_default_user()
-            ws = _dbmod.get_workspace(workspace_id)
+    if user_id is None:
+        # Playground mode: no workspace, no git. GLM agents only.
+        # Use a fixed playground workspace ID so list/get work.
+        workspace_id = "conscious-playground"
+        # Ensure the playground workspace exists
+        ws = _dbmod.get_workspace(workspace_id)
+        if not ws:
+            try:
+                _dbmod.create_workspace(
+                    "conscious-playground-user",
+                    title="Playground",
+                    sandbox_path="/tmp/conscious-playground",
+                )
+            except Exception:
+                pass
+        owner_user_id = "conscious-playground-user"
+    else:
+        # Authenticated mode: use the real workspace
+        if not workspace_id:
+            return 400, {"error": "workspace_id is required"}
+        ws = _dbmod.get_workspace(workspace_id)
         if not ws:
             return 404, {"error": "workspace not found"}
-    if ws["user_id"] != user_id:
-        return 403, {"error": "not your workspace"}
+        if ws["user_id"] != user_id:
+            return 403, {"error": "not your workspace"}
+        owner_user_id = user_id
     # cap conscious per workspace (TIER3_PLAN.md §13)
     existing = conscious_db.list_conscious(workspace_id)
     if len(existing) >= 4:
@@ -190,7 +217,7 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
     max_agents = int(body.get("max_agents", 8) or 8)
 
     c = conscious_db.create_conscious(
-        workspace_id=workspace_id, owner_user_id=user_id, title=title, goal=goal,
+        workspace_id=workspace_id, owner_user_id=owner_user_id, title=title, goal=goal,
         cost_ceiling_usd=cost_ceiling, brain_commit_policy=policy,
         max_agents=max_agents)
     # init .brain/ in the workspace sandbox
@@ -229,21 +256,17 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
 
 
 def _list_conscious(workspace_id: str, user_id: str | None) -> tuple[int, dict]:
-    # Phase 6: if no user_id, use default
-    if not user_id:
-        user_id = _ensure_default_user()
-    if not workspace_id:
-        workspace_id = "conscious-default-workspace"
-    ws = _dbmod.get_workspace(workspace_id)
-    if not ws:
-        # auto-create if it's the default
-        if workspace_id == "conscious-default-workspace":
-            _ensure_default_user()
-            ws = _dbmod.get_workspace(workspace_id)
-        if not ws:
-            return 200, {"conscious": []}  # empty list, not an error
-    if ws["user_id"] != user_id:
-        return 403, {"error": "not your workspace"}
+    """List conscious instances. Playground mode (user_id=None) lists
+    playground conscious only. Authenticated mode lists the user's workspace."""
+    if user_id is None:
+        # Playground mode: list playground conscious
+        workspace_id = "conscious-playground"
+    else:
+        if not workspace_id:
+            return 400, {"error": "workspace_id query param is required"}
+        ws = _dbmod.get_workspace(workspace_id)
+        if not ws or ws["user_id"] != user_id:
+            return 403, {"error": "not your workspace"}
     items = conscious_db.list_conscious(workspace_id)
     return 200, {"conscious": items}
 

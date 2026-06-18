@@ -41,6 +41,11 @@ def init_db() -> None:
     db.commit()
     # schema migrations for existing databases
     _migrate(db)
+    # cleanup expired sessions on boot
+    try:
+        cleanup_expired_sessions()
+    except Exception:
+        pass
 
 
 def _migrate(db: sqlite3.Connection) -> None:
@@ -130,6 +135,23 @@ CREATE TABLE IF NOT EXISTS registry (
 CREATE INDEX IF NOT EXISTS idx_workspaces_user ON workspaces(user_id);
 CREATE INDEX IF NOT EXISTS idx_push_logs_workspace ON push_logs(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_registry_indexed ON registry(indexed_at);
+
+-- Server-side sessions (Fix 7 + server-side sessions phase)
+-- Replaces localStorage JWT storage with HttpOnly cookie + server-side session.
+-- The jwt_payload_json stores the full JWT payload (including encrypted
+-- GitHub/HF tokens) so the backend can reconstruct user identity without
+-- the JWT ever touching the client after the one-time exchange.
+CREATE TABLE IF NOT EXISTS sessions (
+    id              TEXT PRIMARY KEY,               -- session_id (random, not the JWT)
+    user_id         TEXT NOT NULL REFERENCES users(id),
+    jwt_payload     TEXT NOT NULL,                  -- JSON: the full JWT payload (encrypted tokens inside)
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at      TEXT NOT NULL,                  -- 7 days from creation
+    revoked         INTEGER NOT NULL DEFAULT 0,     -- 1 = revoked (logout)
+    last_used_at    TEXT                            -- updated on each request (for idle timeout)
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at, revoked);
 
 -- ===========================================================================
 -- Tier 3 — Conscious: Multi-Agent Shared-Brain Architecture (Phase 1)
@@ -537,3 +559,106 @@ def list_public_workspaces(*, page: int = 1, per_page: int = 20,
 
 def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# ---------------------------------------------------------------------------
+# Server-side sessions (Fix 7 + server-side sessions phase)
+# ---------------------------------------------------------------------------
+
+SESSION_DURATION_DAYS = 7
+SESSION_IDLE_TIMEOUT_HOURS = 48  # session expires if not used for 48 hours
+
+def create_session(user_id: str, jwt_payload: dict) -> dict:
+    """Create a new server-side session. Returns the session row.
+    The jwt_payload is stored as JSON (contains encrypted provider tokens)."""
+    import secrets as _secrets
+    import json as _json
+    sid = _secrets.token_urlsafe(32)
+    now = _iso_now()
+    # compute expiry: 7 days from now
+    import time as _time
+    from datetime import datetime, timezone, timedelta
+    exp_dt = datetime.now(timezone.utc) + timedelta(days=SESSION_DURATION_DAYS)
+    expires_at = exp_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _write_lock:
+        _db().execute(
+            "INSERT INTO sessions (id, user_id, jwt_payload, created_at, "
+            "expires_at, revoked, last_used_at) VALUES (?,?,?,?,?,?,?)",
+            (sid, user_id, _json.dumps(jwt_payload), now, expires_at, 0, now))
+        _db().commit()
+    return get_session(sid) or {}
+
+
+def get_session(session_id: str) -> dict | None:
+    """Get a session by ID. Returns None if not found, expired, or revoked.
+    Also checks the idle timeout (last_used_at must be within 48 hours)."""
+    import json as _json
+    row = _db().execute(
+        "SELECT * FROM sessions WHERE id = ? AND revoked = 0",
+        (session_id,)).fetchone()
+    if not row:
+        return None
+    s = dict(row)
+    # check absolute expiry
+    import time as _time
+    try:
+        exp = _time.mktime(_time.strptime(s["expires_at"], "%Y-%m-%dT%H:%M:%SZ"))
+        if _time.time() > exp:
+            return None
+    except Exception:
+        return None
+    # check idle timeout
+    if s.get("last_used_at"):
+        try:
+            last = _time.mktime(_time.strptime(s["last_used_at"], "%Y-%m-%dT%H:%M:%SZ"))
+            if _time.time() - last > SESSION_IDLE_TIMEOUT_HOURS * 3600:
+                return None
+        except Exception:
+            pass
+    # parse the JWT payload
+    try:
+        s["payload"] = _json.loads(s["jwt_payload"])
+    except Exception:
+        s["payload"] = {}
+    return s
+
+
+def touch_session(session_id: str) -> None:
+    """Update last_used_at to now (called on every authenticated request)."""
+    with _write_lock:
+        _db().execute(
+            "UPDATE sessions SET last_used_at = ? WHERE id = ?",
+            (_iso_now(), session_id))
+        _db().commit()
+
+
+def revoke_session(session_id: str) -> None:
+    """Revoke a session (logout)."""
+    with _write_lock:
+        _db().execute(
+            "UPDATE sessions SET revoked = 1 WHERE id = ?",
+            (session_id,))
+        _db().commit()
+
+
+def revoke_all_user_sessions(user_id: str) -> int:
+    """Revoke all sessions for a user (e.g., password change, security incident).
+    Returns the number of sessions revoked."""
+    with _write_lock:
+        cur = _db().execute(
+            "UPDATE sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0",
+            (user_id,))
+        _db().commit()
+        return cur.rowcount
+
+
+def cleanup_expired_sessions() -> int:
+    """Delete sessions that have expired. Call periodically (e.g., on each
+    init_db or via a scheduler). Returns the number deleted."""
+    now = _iso_now()
+    with _write_lock:
+        cur = _db().execute(
+            "DELETE FROM sessions WHERE expires_at < ? OR revoked = 1",
+            (now,))
+        _db().commit()
+        return cur.rowcount

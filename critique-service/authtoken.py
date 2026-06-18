@@ -22,10 +22,12 @@ import time
 # (set CRITIQUE_ROTATION_SECRET); for maximum safety set ONLY the rotation secret so no
 # standing token exists.
 
-#   default window: 1 hour. Shorter = tighter blast radius; the grace window covers skew.
-TOKEN_WINDOW_S = int(os.environ.get("TOKEN_WINDOW_S", "3600"))
-#   how many past windows still validate (grace). 1 => current + previous accepted.
-TOKEN_GRACE_WINDOWS = int(os.environ.get("TOKEN_GRACE_WINDOWS", "1"))
+#   default window: 6 hours. Shorter = tighter blast radius; the grace window
+#   covers clock skew. 6 hours with grace=2 means a token is valid for up to
+#   18 hours (current + 2 previous windows), tolerating hours of clock drift.
+TOKEN_WINDOW_S = int(os.environ.get("TOKEN_WINDOW_S", "21600"))
+#   how many past windows still validate (grace). 2 => current + 2 previous.
+TOKEN_GRACE_WINDOWS = int(os.environ.get("TOKEN_GRACE_WINDOWS", "2"))
 
 
 def _window_index(now: float, window_s: int) -> int:
