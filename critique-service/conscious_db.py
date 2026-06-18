@@ -167,7 +167,7 @@ def spawn_agent(*, conscious_id: str, role: str, model: str, tier: str,
         db.execute(
             "INSERT INTO conscious_agent (id, conscious_id, role, model, tier, "
             "status, worktree_path, branch, parent_agent_id, subscribed_events, "
-            "is_orchestrator, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "is_orchestrator, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (aid, conscious_id, role, model, tier, "idle",
              None, None, parent_agent_id, subs, int(bool(is_orchestrator)),
              now, now))
