@@ -111,7 +111,7 @@ export interface ConsciousContext {
 export class ConsciousClient {
   constructor(private settings: Settings) {}
 
-  private async bearer(windowsBack = 0): Promise<string> {
+  async bearer(windowsBack = 0): Promise<string> {
     if (this.settings.rotationSecret) return deriveToken(this.settings.rotationSecret, windowsBack);
     return this.settings.token;
   }
@@ -120,6 +120,7 @@ export class ConsciousClient {
     const base = this.settings.baseUrl || "";
     return fetch(base + path, {
       ...init,
+      credentials: "same-origin", // Fix 7: send session cookie
       headers: {
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),

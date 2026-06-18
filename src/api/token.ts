@@ -4,7 +4,7 @@
 // one self-expires when the window rolls. The server also accepts the previous window's
 // token, so pass windowsBack=1 to retry across a boundary / small clock skew.
 
-const WINDOW_S = 3600; // must match the server's TOKEN_WINDOW_S
+const WINDOW_S = 21600; // must match the server's TOKEN_WINDOW_S (6 hours)
 
 export async function deriveToken(secret: string, windowsBack = 0): Promise<string> {
   if (!crypto?.subtle) {

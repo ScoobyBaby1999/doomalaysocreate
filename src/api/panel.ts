@@ -106,6 +106,7 @@ export class PanelClient {
   private fetchWith(token: string, path: string, init?: RequestInit): Promise<Response> {
     return fetch(this.settings.baseUrl + path, {
       ...init,
+      credentials: "same-origin", // Fix 7: send session cookie
       headers: {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),

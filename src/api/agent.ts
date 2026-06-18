@@ -59,20 +59,22 @@ export class AgentClient {
   constructor(private settings: Settings) {}
 
   private async bearer(windowsBack = 0): Promise<string> {
-    if (this.settings.githubSessionId) return this.settings.githubSessionId;
+    // Fix 2: rotationSecret ALWAYS takes precedence (Layer 1: service auth).
+    // The JWT goes in X-JWT (Layer 2: user identity), NEVER as the bearer.
     if (this.settings.rotationSecret) return deriveToken(this.settings.rotationSecret, windowsBack);
     return this.settings.token;
   }
 
   private fetchWith(token: string, path: string, init?: RequestInit): Promise<Response> {
-    return fetch(this.settings.baseUrl + path, {
-      ...init,
-      headers: {
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(init?.headers || {}),
-      },
-    });
+    // Fix 2: send X-JWT when githubSessionId is set (Layer 2: user identity).
+    // Same pattern as conscious.ts.
+    const headers: Record<string, string> = {
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(this.settings.githubSessionId ? { "X-JWT": this.settings.githubSessionId } : {}),
+      ...((init?.headers as Record<string, string>) || {}),
+    };
+    return fetch(this.settings.baseUrl + path, { ...init, credentials: "same-origin", headers });
   }
 
   /** Authenticated fetch with a single 401 retry on the previous token window. */
@@ -106,7 +108,8 @@ export class AgentClient {
 
   /** Start a new session, or continue an existing one if sessionId is given.
    *  `model` selects which model/tier drives a NEW session.
-   *  `workspaceId` links the agent to a user workspace sandbox. */
+   *  `workspaceId` links the agent to a user workspace sandbox.
+   *  Fix 2: X-JWT is now sent globally by fetchWith() — no need to set it here. */
   send(message: string, sessionId?: string, model?: string, workspaceId?: string) {
     const body: Record<string, unknown> = { message };
     if (sessionId) body.session_id = sessionId;

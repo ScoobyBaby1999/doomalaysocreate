@@ -117,6 +117,7 @@ export class GitHubClient {
     const token = this.sessionId;
     return fetch(this.settings.baseUrl + path, {
       ...init,
+      credentials: "same-origin", // Fix 7: send session cookie
       headers: {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -352,6 +353,7 @@ export async function exchangeGitHubCode(
 ): Promise<{ session_id: string; next?: string }> {
   const r = await fetch(
     `${baseUrl}/api/auth/github/proxy-exchange?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    { credentials: "same-origin" },
   );
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
@@ -374,6 +376,7 @@ export async function exchangeHFCode(
 ): Promise<{ session_id: string }> {
   const r = await fetch(
     `${baseUrl}/api/auth/hf/proxy-exchange?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    { credentials: "same-origin" },
   );
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
