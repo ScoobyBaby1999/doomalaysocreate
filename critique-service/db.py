@@ -82,6 +82,55 @@ def _migrate(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE conscious ADD COLUMN last_synced_at TEXT")
     except sqlite3.OperationalError:
         pass
+    # Tier 3 Phase 6 — the conscious_agent table has a CHECK constraint on tier
+    # that only allows ('claude','open'). We need to add 'zai' but SQLite can't
+    # ALTER a CHECK constraint. Workaround: recreate the table without the
+    # constraint (SQLite CHECK constraints are not enforced on existing rows
+    # when the constraint is removed via table rebuild, but INSERTs with new
+    # values will still be rejected by the old constraint). The cleanest fix
+    # is to drop + recreate the table if the constraint is too restrictive,
+    # but that loses data. Instead, we use a pragma to disable FK enforcement,
+    # rename the old table, create the new one, copy data, and drop the old.
+    try:
+        # Test if 'zai' is accepted by trying an insert + rollback
+        db.execute("BEGIN")
+        db.execute("INSERT INTO conscious_agent (id, conscious_id, role, model, tier) "
+                   "VALUES ('__test_zai__', '__test__', 'test', 'test', 'zai')")
+        db.execute("ROLLBACK")
+    except sqlite3.OperationalError:
+        # 'zai' is rejected — need to rebuild the table
+        try:
+            db.execute("ROLLBACK")
+        except:
+            pass
+        try:
+            db.execute("PRAGMA foreign_keys=OFF")
+            db.execute("ALTER TABLE conscious_agent RENAME TO conscious_agent_old")
+            db.execute("""CREATE TABLE conscious_agent (
+                id                TEXT PRIMARY KEY,
+                conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+                role              TEXT NOT NULL,
+                model             TEXT NOT NULL,
+                tier              TEXT NOT NULL CHECK (tier IN ('claude','open','zai')),
+                status            TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running','waiting','done','failed')),
+                worktree_path     TEXT,
+                branch            TEXT,
+                parent_agent_id   TEXT REFERENCES conscious_agent(id),
+                subscribed_events TEXT NOT NULL DEFAULT '[]',
+                is_orchestrator   INTEGER NOT NULL DEFAULT 0,
+                created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+            )""")
+            db.execute("INSERT INTO conscious_agent SELECT * FROM conscious_agent_old")
+            db.execute("DROP TABLE conscious_agent_old")
+            db.execute("PRAGMA foreign_keys=ON")
+            print("[db] migrated conscious_agent table to support 'zai' tier", flush=True)
+        except Exception as exc:
+            print(f"[db] conscious_agent migration failed: {exc}", flush=True)
+            try:
+                db.execute("ROLLBACK")
+            except:
+                pass
     db.commit()
 
 
@@ -201,7 +250,7 @@ CREATE TABLE IF NOT EXISTS conscious_agent (
     conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
     role              TEXT NOT NULL,
     model             TEXT NOT NULL,
-    tier              TEXT NOT NULL CHECK (tier IN ('claude','open')),
+    tier              TEXT NOT NULL CHECK (tier IN ('claude','open','zai')),
     status            TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running','waiting','done','failed')),
     worktree_path     TEXT,
     branch            TEXT,
