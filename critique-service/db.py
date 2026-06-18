@@ -92,15 +92,24 @@ def _migrate(db: sqlite3.Connection) -> None:
     # but that loses data. Instead, we use a pragma to disable FK enforcement,
     # rename the old table, create the new one, copy data, and drop the old.
     try:
-        # Test if 'zai' is accepted by trying an insert + rollback
+        # Test if 'zai' is accepted by trying an insert + rollback.
+        # Disable FK enforcement during the test so the dummy conscious_id
+        # doesn't trigger a FK violation.
+        db.execute("PRAGMA foreign_keys=OFF")
         db.execute("BEGIN")
         db.execute("INSERT INTO conscious_agent (id, conscious_id, role, model, tier) "
                    "VALUES ('__test_zai__', '__test__', 'test', 'test', 'zai')")
         db.execute("ROLLBACK")
+        db.execute("PRAGMA foreign_keys=ON")
     except sqlite3.OperationalError:
-        # 'zai' is rejected — need to rebuild the table
+        # 'zai' is rejected (CHECK constraint) OR FK error — either way,
+        # re-enable FK and rebuild the table.
         try:
             db.execute("ROLLBACK")
+        except:
+            pass
+        try:
+            db.execute("PRAGMA foreign_keys=ON")
         except:
             pass
         try:
