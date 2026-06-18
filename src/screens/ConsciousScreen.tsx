@@ -142,7 +142,10 @@ export function ConsciousScreen({ settings, workspaceId }: {
   settings: Settings; workspaceId?: string;
 }) {
   const client = useRef(new ConsciousClient(settings));
-  const wsId = workspaceId || "demo-workspace";
+  // Fix 3: use the real workspaceId from App (the GitHub-linked workspace).
+  // If undefined (no GitHub), the backend enters playground mode (no workspace,
+  // no git worktrees, GLM agents only). No more "demo-workspace" hack.
+  const wsId = workspaceId || "";
 
   const [conscious, setConscious] = useState<Conscious | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -158,7 +161,29 @@ export function ConsciousScreen({ settings, workspaceId }: {
   const init = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const list = await client.current.listConscious(wsId);
+      // Fix 3: if no workspaceId given, try to discover one from the backend.
+      // The backend's /api/workspaces endpoint returns the user's workspaces
+      // (requires GitHub auth via X-JWT, which ConsciousClient sends).
+      let effectiveWsId = wsId;
+      if (!effectiveWsId) {
+        try {
+          const wsResp = await fetch(`${settings.baseUrl || ""}/api/workspaces`, {
+            credentials: "same-origin",
+            headers: {
+              Authorization: `Bearer ${await client.current.bearer()}`,
+              ...(settings.githubSessionId ? { "X-JWT": settings.githubSessionId } : {}),
+            },
+          });
+          if (wsResp.ok) {
+            const wsData = await wsResp.json();
+            if (wsData.workspaces && wsData.workspaces.length > 0) {
+              effectiveWsId = wsData.workspaces[0].id;
+            }
+          }
+        } catch {}
+      }
+      // If still no workspace, the backend enters playground mode
+      const list = await client.current.listConscious(effectiveWsId);
       if (list.conscious.length > 0) {
         const c = list.conscious[0];
         const detail = await client.current.getConscious(c.id);
