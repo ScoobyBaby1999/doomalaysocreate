@@ -83,38 +83,17 @@ def _migrate(db: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
     # Tier 3 Phase 6 — the conscious_agent table has a CHECK constraint on tier
-    # that only allows ('claude','open'). We need to add 'zai' but SQLite can't
-    # ALTER a CHECK constraint. Workaround: recreate the table without the
-    # constraint (SQLite CHECK constraints are not enforced on existing rows
-    # when the constraint is removed via table rebuild, but INSERTs with new
-    # values will still be rejected by the old constraint). The cleanest fix
-    # is to drop + recreate the table if the constraint is too restrictive,
-    # but that loses data. Instead, we use a pragma to disable FK enforcement,
-    # rename the old table, create the new one, copy data, and drop the old.
+    # that only allows ('claude','open'). We need to add 'zai'. SQLite can't
+    # ALTER a CHECK constraint, so we rebuild the table. We do this unconditionally
+    # (it's idempotent — if the table already has 'zai' in the constraint, the
+    # rebuild is a no-op that preserves all data).
     try:
-        # Test if 'zai' is accepted by trying an insert + rollback.
-        # Disable FK enforcement during the test so the dummy conscious_id
-        # doesn't trigger a FK violation.
-        db.execute("PRAGMA foreign_keys=OFF")
-        db.execute("BEGIN")
-        db.execute("INSERT INTO conscious_agent (id, conscious_id, role, model, tier) "
-                   "VALUES ('__test_zai__', '__test__', 'test', 'test', 'zai')")
-        db.execute("ROLLBACK")
-        db.execute("PRAGMA foreign_keys=ON")
-    except sqlite3.OperationalError:
-        # 'zai' is rejected (CHECK constraint) OR FK error — either way,
-        # re-enable FK and rebuild the table.
-        try:
-            db.execute("ROLLBACK")
-        except:
-            pass
-        try:
-            db.execute("PRAGMA foreign_keys=ON")
-        except:
-            pass
-        try:
+        # Get the SQL used to create the table — check if 'zai' is in the constraint
+        sql_row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='conscious_agent'").fetchone()
+        if sql_row and sql_row[0] and "'zai'" not in sql_row[0]:
+            # Old constraint — rebuild the table
             db.execute("PRAGMA foreign_keys=OFF")
-            db.execute("ALTER TABLE conscious_agent RENAME TO conscious_agent_old")
+            db.execute("ALTER TABLE conscious_agent RENAME TO conscious_agent_old_zai")
             db.execute("""CREATE TABLE conscious_agent (
                 id                TEXT PRIMARY KEY,
                 conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
@@ -130,16 +109,16 @@ def _migrate(db: sqlite3.Connection) -> None:
                 created_at        TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
             )""")
-            db.execute("INSERT INTO conscious_agent SELECT * FROM conscious_agent_old")
-            db.execute("DROP TABLE conscious_agent_old")
+            db.execute("INSERT INTO conscious_agent SELECT * FROM conscious_agent_old_zai")
+            db.execute("DROP TABLE conscious_agent_old_zai")
             db.execute("PRAGMA foreign_keys=ON")
             print("[db] migrated conscious_agent table to support 'zai' tier", flush=True)
-        except Exception as exc:
-            print(f"[db] conscious_agent migration failed: {exc}", flush=True)
-            try:
-                db.execute("ROLLBACK")
-            except:
-                pass
+    except Exception as exc:
+        print(f"[db] conscious_agent migration (zai tier) skipped: {exc}", flush=True)
+        try:
+            db.execute("PRAGMA foreign_keys=ON")
+        except:
+            pass
     db.commit()
 
 
