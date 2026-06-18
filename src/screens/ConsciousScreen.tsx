@@ -142,9 +142,10 @@ export function ConsciousScreen({ settings, workspaceId }: {
   settings: Settings; workspaceId?: string;
 }) {
   const client = useRef(new ConsciousClient(settings));
-  // The effective workspace ID — discovered from the backend or passed as a prop.
-  // Stored in state so all functions (init, createConscious, etc.) can use it.
   const [effectiveWsId, setEffectiveWsId] = useState(workspaceId || "");
+  const [workspaces, setWorkspaces] = useState<Array<{ id: string; title: string; source_repo?: string }>>([]);
+  const [showWsPicker, setShowWsPicker] = useState(false);
+  const [repoUrl, setRepoUrl] = useState("");
 
   const [conscious, setConscious] = useState<Conscious | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -157,52 +158,102 @@ export function ConsciousScreen({ settings, workspaceId }: {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const init = useCallback(async () => {
+  const fetchWorkspaces = useCallback(async () => {
+    try {
+      const wsResp = await fetch(`${settings.baseUrl || ""}/api/workspaces`, {
+        credentials: "same-origin",
+        headers: {
+          Authorization: `Bearer ${await client.current.bearer()}`,
+          ...(settings.githubSessionId ? { "X-JWT": settings.githubSessionId } : {}),
+        },
+      });
+      if (wsResp.ok) {
+        const wsData = await wsResp.json();
+        const wsList = wsData.workspaces || wsData || [];
+        if (Array.isArray(wsList)) {
+          setWorkspaces(wsList.map((w: Record<string, unknown>) => ({
+            id: w.id as string,
+            title: w.title as string,
+            source_repo: w.source_repo as string | undefined,
+          })));
+        }
+      }
+    } catch {}
+  }, [settings]);
+
+  const createWorkspaceWithRepo = async () => {
+    if (!repoUrl.trim()) return;
+    try {
+      const resp = await fetch(`${settings.baseUrl || ""}/api/workspaces`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${await client.current.bearer()}`,
+          ...(settings.githubSessionId ? { "X-JWT": settings.githubSessionId } : {}),
+        },
+        body: JSON.stringify({
+          title: repoUrl.split("/").pop()?.replace(".git", "") || "Workspace",
+          source_repo: repoUrl.trim(),
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        const newWsId = data.workspace?.id || data.id || "";
+        if (newWsId) {
+          setEffectiveWsId(newWsId);
+          setShowWsPicker(false);
+          setRepoUrl("");
+          await fetchWorkspaces();
+          await init(newWsId);
+        }
+      } else {
+        const err = await resp.json().catch(() => ({ error: "failed" }));
+        setError(err.error || "Failed to create workspace");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const init = useCallback(async (wsIdOverride?: string) => {
     setLoading(true); setError(null);
     try {
-      // Discover the workspace ID from the backend if not passed as a prop.
-      let wsId = workspaceId || "";
+      let wsId = wsIdOverride || workspaceId || effectiveWsId;
+      // Fetch workspaces list for the picker
+      await fetchWorkspaces();
       if (!wsId) {
-        try {
-          const wsResp = await fetch(`${settings.baseUrl || ""}/api/workspaces`, {
-            credentials: "same-origin",
-            headers: {
-              Authorization: `Bearer ${await client.current.bearer()}`,
-              ...(settings.githubSessionId ? { "X-JWT": settings.githubSessionId } : {}),
-            },
-          });
-          if (wsResp.ok) {
-            const wsData = await wsResp.json();
-            // The backend returns { workspaces: [...] } or just [...]
-            const workspaces = wsData.workspaces || wsData || [];
-            if (Array.isArray(workspaces) && workspaces.length > 0) {
-              wsId = workspaces[0].id;
+        // Auto-discover or create a default workspace
+        if (workspaces.length > 0) {
+          wsId = workspaces[0].id;
+        } else {
+          // Create a default workspace (no repo)
+          try {
+            const resp = await fetch(`${settings.baseUrl || ""}/api/workspaces`, {
+              method: "POST",
+              credentials: "same-origin",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${await client.current.bearer()}`,
+                ...(settings.githubSessionId ? { "X-JWT": settings.githubSessionId } : {}),
+              },
+              body: JSON.stringify({ title: "Conscious Workspace" }),
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              wsId = data.workspace?.id || data.id || "";
+              await fetchWorkspaces();
             }
-          }
-        } catch {}
+          } catch {}
+        }
       }
-      // If still no workspace, try creating one (so conscious has somewhere to live)
-      if (!wsId) {
-        try {
-          const createWsResp = await fetch(`${settings.baseUrl || ""}/api/workspaces`, {
-            method: "POST",
-            credentials: "same-origin",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${await client.current.bearer()}`,
-              ...(settings.githubSessionId ? { "X-JWT": settings.githubSessionId } : {}),
-            },
-            body: JSON.stringify({ title: "Conscious Workspace" }),
-          });
-          if (createWsResp.ok) {
-            const wsData = await createWsResp.json();
-            wsId = wsData.workspace?.id || wsData.id || "";
-          }
-        } catch {}
-      }
-      // Store the discovered/created workspace ID in state
       setEffectiveWsId(wsId);
-      // List conscious instances for this workspace (or empty → playground mode)
+      if (!wsId) {
+        // No workspace available — show the picker
+        setShowWsPicker(true);
+        setLoading(false);
+        return;
+      }
       const list = await client.current.listConscious(wsId);
       if (list.conscious.length > 0) {
         const c = list.conscious[0];
@@ -212,7 +263,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
       } else { await createConscious(wsId); }
     } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
     finally { setLoading(false); }
-  }, [workspaceId]);
+  }, [workspaceId, effectiveWsId, workspaces]);
 
   useEffect(() => { init(); }, [init]);
 
@@ -290,18 +341,81 @@ export function ConsciousScreen({ settings, workspaceId }: {
           </div>
           <div>
             <div className="text-sm font-semibold text-text">{conscious?.title || "Conscious"}</div>
-            <div className="text-[10px] text-muted">{agents.length} agent{agents.length !== 1 ? "s" : ""} · GLM 5.2</div>
+            <div className="text-[10px] text-muted">
+              {agents.length} agent{agents.length !== 1 ? "s" : ""} · GLM 5.2
+              {workspaces.length > 0 && (
+                <button onClick={() => setShowWsPicker(true)}
+                  className="ml-2 text-accent underline">
+                  {workspaces.find(w => w.id === effectiveWsId)?.title || "switch"}
+                </button>
+              )}
+            </div>
           </div>
         </div>
-        <button onClick={() => setShowDrawer(true)}
-          className="w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
-          title="View outputs">
-          <Icon.Inbox size={16} />
-          {drawer.length > 0 && (
-            <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-accent text-[9px] text-white flex items-center justify-center">{drawer.length}</span>
+        <div className="flex items-center gap-2">
+          {workspaces.length === 0 && (
+            <button onClick={() => setShowWsPicker(true)}
+              className="text-[10px] text-accent px-2 py-1 rounded-lg bg-accent/10">
+              + Add Repo
+            </button>
           )}
-        </button>
+          <button onClick={() => setShowDrawer(true)}
+            className="w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
+            title="View outputs">
+            <Icon.Inbox size={16} />
+            {drawer.length > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-accent text-[9px] text-white flex items-center justify-center">{drawer.length}</span>
+            )}
+          </button>
+        </div>
       </div>
+
+      {/* workspace picker modal */}
+      {showWsPicker && (
+        <>
+          <div className="fixed inset-0 bg-black/50 z-40" onClick={() => setShowWsPicker(false)} />
+          <div className="fixed bottom-0 left-0 right-0 bg-surface rounded-t-2xl border-t border-border z-50 flex flex-col"
+            style={{ maxHeight: "70vh", paddingBottom: "env(safe-area-inset-bottom)" }}>
+            <div className="flex justify-center pt-2 pb-1"><div className="w-10 h-1 rounded-full bg-border" /></div>
+            <div className="flex items-center justify-between px-4 py-2 border-b border-border">
+              <span className="text-sm font-semibold text-text">Workspaces</span>
+              <button onClick={() => setShowWsPicker(false)} className="w-8 h-8 rounded-lg bg-surface2 flex items-center justify-center text-muted"><Icon.X size={16} /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+              {workspaces.map((ws) => (
+                <button key={ws.id} onClick={() => {
+                  setEffectiveWsId(ws.id);
+                  setShowWsPicker(false);
+                  init(ws.id);
+                }}
+                  className={`w-full text-left rounded-lg border p-3 ${ws.id === effectiveWsId ? "border-accent bg-accent/10" : "border-border bg-surface2"}`}>
+                  <div className="text-sm font-medium text-text">{ws.title}</div>
+                  {ws.source_repo && <div className="text-[10px] text-muted truncate">{ws.source_repo}</div>}
+                </button>
+              ))}
+              {/* Create workspace with repo URL */}
+              <div className="rounded-lg border border-dashed border-border p-3 space-y-2">
+                <div className="text-xs font-medium text-muted">Clone a new repo:</div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={repoUrl}
+                    onChange={(e) => setRepoUrl(e.target.value)}
+                    placeholder="https://github.com/user/repo"
+                    className="flex-1 h-9 rounded-lg bg-surface2 border border-border text-sm text-text px-3 outline-none focus:border-accent"
+                    onKeyDown={(e) => { if (e.key === "Enter") createWorkspaceWithRepo(); }}
+                  />
+                  <button onClick={createWorkspaceWithRepo}
+                    disabled={!repoUrl.trim()}
+                    className="h-9 px-3 rounded-lg bg-accent text-white text-sm disabled:opacity-50">
+                    Clone
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* error bar */}
       {error && (
