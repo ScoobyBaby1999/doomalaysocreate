@@ -1,14 +1,15 @@
 /**
- * GLM Bridge — a tiny Node.js/Bun HTTP service that wraps the z-ai-web-dev-sdk
- * so the Python backend can use the FREE, rate-limited GLM 5.2 model.
+ * GLM Bridge — wraps z-ai-web-dev-sdk for the Python backend.
  *
- * The Python backend (critique-service) can't use z-ai-web-dev-sdk directly
- * (it's a Node.js package). This bridge exposes a simple HTTP API:
+ * Endpoints:
+ *   POST /chat    { messages, model?, tools? }  →  { content, model, tool_results }
+ *   GET  /health  →  { status, model, tools }
  *
- *   POST /chat  { messages, model? }  →  { content, model }
+ * Tools supported (via z-ai-web-dev-sdk built-in functions):
+ *   - web_search: search the web for real-time info
+ *   - page_reader: read/extract content from a URL
  *
- * The Python backend's conscious_tools.py calls this bridge for "zai" tier
- * agents instead of going through LiteLLM (which requires a paid API key).
+ * The Python backend calls this for "zai" tier agents. Free + rate-limited.
  *
  * Port: 3030 (fixed, per the mini-services convention)
  * Auth: none (internal only — the Python backend is the only caller)
@@ -17,10 +18,11 @@ import { serve } from "bun";
 
 const PORT = 3030;
 
+const AVAILABLE_TOOLS = ["web_search", "page_reader"];
+
 serve({
   port: PORT,
   async fetch(req) {
-    // CORS + health check
     if (req.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -32,7 +34,12 @@ serve({
     }
 
     if (req.method === "GET" && new URL(req.url).pathname === "/health") {
-      return Response.json({ status: "ok", model: "glm-5.2", port: PORT });
+      return Response.json({
+        status: "ok",
+        model: "glm-5.2",
+        port: PORT,
+        tools: AVAILABLE_TOOLS,
+      });
     }
 
     if (req.method !== "POST" || new URL(req.url).pathname !== "/chat") {
@@ -40,37 +47,85 @@ serve({
     }
 
     try {
-      const { messages, model } = await req.json();
+      const { messages, model, tools } = await req.json() as {
+        messages: Array<{ role: string; content: string }>;
+        model?: string;
+        tools?: string[]; // ["web_search", "page_reader"]
+      };
 
       if (!messages || !Array.isArray(messages)) {
         return Response.json({ error: "messages array required" }, { status: 400 });
       }
 
-      // Dynamic import — the SDK may not be installed in all environments
       const ZAI = (await import("z-ai-web-dev-sdk")).default;
       const zai = await ZAI.create();
 
       const completion = await zai.chat.completions.create({
         model: model || "glm-5.2",
         messages,
-        thinking: { type: "disabled" },
+        thinking: { type: "disabled" as const },
       });
 
       const content = completion.choices?.[0]?.message?.content || "(no response)";
 
+      // If tools were requested, run them based on the model's response.
+      // The z-ai-web-dev-sdk doesn't support automatic tool calling in the
+      // chat completions API, so we do a simple heuristic: if the model's
+      // response contains "search:" or "read:", we run the corresponding
+      // function and append the results.
+      const toolResults: Array<{ tool: string; query: string; result: unknown }> = [];
+
+      if (tools && Array.isArray(tools) && tools.length > 0) {
+        // Check if the model wants to search the web
+        const searchMatch = content.match(/(?:search|look up|find):\s*(.+)/i);
+        if (searchMatch && tools.includes("web_search")) {
+          try {
+            const query = searchMatch[1].trim();
+            const results = await zai.functions.invoke("web_search", {
+              query,
+              num: 5,
+            });
+            toolResults.push({ tool: "web_search", query, result: results });
+          } catch (e) {
+            toolResults.push({
+              tool: "web_search",
+              query: searchMatch[1].trim(),
+              result: { error: String(e) },
+            });
+          }
+        }
+
+        // Check if the model wants to read a URL
+        const urlMatch = content.match(/(?:read|fetch|visit):\s*(https?:\/\/[^\s]+)/i);
+        if (urlMatch && tools.includes("page_reader")) {
+          try {
+            const url = urlMatch[1].trim();
+            const result = await zai.functions.invoke("page_reader", { url });
+            toolResults.push({ tool: "page_reader", query: url, result });
+          } catch (e) {
+            toolResults.push({
+              tool: "page_reader",
+              query: urlMatch[1].trim(),
+              result: { error: String(e) },
+            });
+          }
+        }
+      }
+
       return Response.json({
         content,
         model: model || "glm-5.2",
+        tool_results: toolResults.length > 0 ? toolResults : undefined,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[glm-bridge] error:", msg);
       return Response.json(
         { error: msg, content: `[GLM bridge error] ${msg}` },
-        { status: 200 } // 200 so the caller still gets a response
+        { status: 200 },
       );
     }
   },
 });
 
-console.log(`[glm-bridge] listening on port ${PORT} — GLM 5.2 (free, rate-limited)`);
+console.log(`[glm-bridge] listening on port ${PORT} — GLM 5.2 + tools: ${AVAILABLE_TOOLS.join(", ")}`);
