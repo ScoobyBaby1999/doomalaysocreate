@@ -128,12 +128,22 @@ def generate_jwt(
 # ---------------------------------------------------------------------------
 # Verification
 # ---------------------------------------------------------------------------
-def verify_jwt(token: str, expected_aud: str | None = None) -> dict | None:
+def verify_jwt(token: str, expected_aud: str | None = None,
+               allow_any_aud: bool = False) -> dict | None:
     """Verify a JWT.  Returns payload dict or None if invalid/expired/misaddressed.
 
     When ``expected_aud`` is None the SPACE_ID env var is used as the
     expected audience.  When both are empty the aud claim is not checked
     (not recommended).
+
+    ``allow_any_aud=True`` skips the audience check entirely — the signature
+    + expiry are still verified.  This is the fallback for multi-Space
+    deployments where the MAIN space (scoobybaby1999-loom) issues the JWT
+    with ``aud=<main-space-host>`` but a USER space verifies it against its
+    own host.  Without this, the user space would reject every JWT from the
+    main space → 401 → the workspace panel logs out on every open.
+    Security note: this is safe because the JWT is HMAC-signed with the
+    shared JWT_SECRET — a valid signature proves a trusted space issued it.
     """
     if not token or "." not in token:
         return None
@@ -150,6 +160,8 @@ def verify_jwt(token: str, expected_aud: str | None = None) -> dict | None:
     exp = payload.get("exp")
     if not exp or exp < time.time():
         return None
+    if allow_any_aud:
+        return payload
     aud = payload.get("aud")
     if aud:
         want = expected_aud or _DEFAULT_AUD

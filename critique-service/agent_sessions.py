@@ -117,11 +117,12 @@ def agent_models() -> list[dict]:
     """Every model the agent can actually run right now, for the picker UI.
     Only lists a model when BOTH its key and its tier's SDK are present.
 
-    Phase 6: GLM 5.2 Free is ALWAYS available (via the GLM bridge at
-    localhost:3030) — no API key needed, rate-limited only.
+    The free GLM 5.2 (zai tier) is ALWAYS listed when the bridge is reachable
+    — no API key required. It's the default when nothing else is configured so
+    the agent panel never silently falls back to the MockAdapter echo.
     """
     out: list[dict] = []
-    default_model = os.environ.get("AGENT_MODEL", "claude-opus-4-8")
+    default_model = os.environ.get("AGENT_MODEL", "")
     if os.environ.get("ANTHROPIC_API_KEY", "").strip() and _installed("claude_agent_sdk"):
         for model, label in _CLAUDE_MODELS:
             out.append({"tier": "claude", "provider": "Anthropic", "model": model,
@@ -133,11 +134,20 @@ def agent_models() -> list[dict]:
                 seen.add(model)
                 out.append({"tier": "open", "provider": label, "model": model,
                             "label": label, "default": False})
-    # Phase 6: GLM 5.2 Free — always available via the GLM bridge
-    out.append({"tier": "zai", "provider": "Z.ai (Free)", "model": "glm-5.2",
-                "label": "GLM 5.2 (Free)", "default": len(out) == 0})
+    # Free GLM 5.2 via the z-ai-web-dev-sdk bridge — no API key needed, so it's
+    # always offered when the bridge is up. This is the tier the user picks
+    # when they see "GLM 5.2 (free)" in the agent panel model dropdown.
+    if _glm_bridge_available():
+        out.append({"tier": "zai", "provider": "Z.ai (free)", "model": "glm-5.2-free",
+                    "label": "GLM 5.2 (free)", "default": False})
     if out and not any(m["default"] for m in out):
-        out[0]["default"] = True
+        # Prefer free GLM as the default over mock when no AGENT_MODEL is set,
+        # so a fresh Space with no API keys still gets real AI responses.
+        zai = next((m for m in out if m["tier"] == "zai"), None)
+        if zai:
+            zai["default"] = True
+        else:
+            out[0]["default"] = True
     return out
 
 
@@ -161,8 +171,8 @@ def agent_tier() -> str | None:
     """Which agent tier this Space can actually run: "claude" | "open" | "zai" | None.
 
     Requires BOTH a key and the matching SDK installed — so /health never
-    advertises a tier the worker can't start. "zai" (free GLM via the bridge)
-    is always available as a fallback.
+    advertises a tier the worker can't start. The "zai" tier (free GLM via
+    the bridge) needs no API key — only a reachable bridge on port 3030.
     """
     forced = os.environ.get("AGENT_FORCE_TIER", "").strip().lower()
     if forced in ("claude", "open", "mock", "zai"):
@@ -171,7 +181,13 @@ def agent_tier() -> str | None:
         return "claude"
     if _pick_open_llm() is not None and _open_sdk_installed():
         return "open"
-    return "zai"  # Free GLM via the bridge — always available
+    # Free GLM via the bridge — the fallback that gives every Space real AI
+    # even with zero API keys configured. Without this, a keyless Space would
+    # resolve to None and the agent panel would 500 ("no agent tier available")
+    # or silently use the MockAdapter echo.
+    if _glm_bridge_available():
+        return "zai"
+    return None
 
 
 def _clip(text: object, limit: int = MAX_EVENT_CHARS) -> str:
@@ -203,7 +219,12 @@ class BaseAdapter:
 
 
 class MockAdapter(BaseAdapter):
-    """Plumbing test double: echoes and fakes one tool round-trip."""
+    """Plumbing test double: echoes and fakes one tool round-trip.
+
+    Only used when AGENT_FORCE_TIER=mock or no real tier is available. Real
+    GLM (free) is provided by ZaiAdapter below — the agent panel never falls
+    back to mock silently when the bridge is reachable.
+    """
 
     def __init__(self, workspace: Path, workspace_id: str | None = None,
                  system_prompt: str | None = None):
@@ -214,6 +235,136 @@ class MockAdapter(BaseAdapter):
         emit({"type": "tool_result", "tool": "Echo", "text": f"echo: {user_msg}",
               "is_error": False})
         emit({"type": "assistant", "text": f"(mock) you said: {user_msg}"})
+
+
+# --------------------------------------------------------------------------
+# ZaiAdapter — FREE GLM 5.2 via the z-ai-web-dev-sdk.
+# Two call paths (subprocess CLI first, HTTP bridge fallback):
+#   1. glm-chat.mjs — a standalone Node script that reads messages JSON from
+#      stdin and prints {content} to stdout. Most robust: each call is a fresh
+#      process, no persistent server to crash. (A persistent HTTP bridge inside
+#      Bun's serve() crashed silently on real calls — the process died with no
+#      error, reverting the agent panel to the MockAdapter echo.)
+#   2. HTTP bridge at localhost:3030 — kept as a fallback for environments
+#      where the subprocess is unavailable (e.g. the conscious system already
+#      runs the bridge). Both paths use the same z-ai-web-dev-sdk + glm-5.2.
+# --------------------------------------------------------------------------
+GLM_BRIDGE_URL = os.environ.get("GLM_BRIDGE_URL", "http://localhost:3030")
+GLM_BRIDGE_TIMEOUT_S = float(os.environ.get("GLM_BRIDGE_TIMEOUT_S", "120"))
+# Path to the standalone GLM chat script. Default assumes the critique-service
+# and mini-services dirs are siblings (the standard deploy layout).
+_GLM_CHAT_SCRIPT = os.environ.get(
+    "GLM_CHAT_SCRIPT",
+    str(Path(__file__).resolve().parent.parent / "mini-services" / "glm-bridge" / "glm-chat.mjs"))
+_GLM_NODE_BIN = os.environ.get("GLM_NODE_BIN", "node")
+
+
+def _glm_subprocess_available() -> bool:
+    """True if the glm-chat.mjs script exists on disk (the SDK is checked at call time)."""
+    return bool(_GLM_CHAT_SCRIPT) and Path(_GLM_CHAT_SCRIPT).is_file()
+
+
+def _glm_http_available() -> bool:
+    """Quick health check — is the GLM HTTP bridge reachable right now?"""
+    import urllib.request
+    try:
+        req = urllib.request.Request(f"{GLM_BRIDGE_URL}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _glm_bridge_available() -> bool:
+    """True if EITHER the subprocess script OR the HTTP bridge is usable.
+    The agent panel's 'zai' tier lights up whenever at least one path works."""
+    return _glm_subprocess_available() or _glm_http_available()
+
+
+def _glm_call_subprocess(messages: list[dict], model: str, timeout: float) -> str:
+    """Call glm-chat.mjs via subprocess: pipe messages JSON in, read {content} out."""
+    import subprocess
+    import json as _json
+    payload = _json.dumps({"messages": messages, "model": model})
+    proc = subprocess.run(
+        [_GLM_NODE_BIN, _GLM_CHAT_SCRIPT],
+        input=payload, capture_output=True, text=True, timeout=timeout)
+    # The script always writes JSON to stdout (even on error, so the caller
+    # gets a parseable response). stderr carries diagnostics.
+    try:
+        data = _json.loads(proc.stdout)
+    except Exception:
+        raise RuntimeError(f"glm-chat.mjs returned non-JSON: {proc.stdout[:200]!r} stderr={proc.stderr[:200]!r}")
+    return (data.get("content") or "").strip()
+
+
+def _glm_call_http(messages: list[dict], model: str, timeout: float) -> str:
+    """Call the HTTP bridge at localhost:3030/chat."""
+    import urllib.request
+    import json as _json
+    body = _json.dumps({"messages": messages, "model": model}).encode()
+    req = urllib.request.Request(
+        f"{GLM_BRIDGE_URL}/chat", data=body, method="POST",
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = _json.loads(r.read().decode())
+    return (data.get("content") or "").strip()
+
+
+class ZaiAdapter(BaseAdapter):
+    """Drives the agent panel with the FREE GLM 5.2 model.
+
+    No API key required — the z-ai-web-dev-sdk provides free, rate-limited
+    access. Tries the subprocess CLI first (most robust), falls back to the
+    HTTP bridge. Maintains an in-memory conversation for multi-turn context.
+    """
+
+    def __init__(self, workspace: Path, model: str | None = None,
+                 workspace_id: str | None = None, system_prompt: str | None = None):
+        super().__init__(workspace, workspace_id)
+        self.model = model or "glm-5.2"
+        self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
+        self.messages: list[dict] = []
+
+    def open(self) -> None:
+        # Seed the conversation with the system prompt. Both call paths forward
+        # the messages array directly to z-ai-web-dev-sdk's chat completions.
+        self.messages = [{"role": "system", "content": self.system_prompt}]
+
+    def turn(self, user_msg: str, emit) -> None:
+        import json as _json
+        self.messages.append({"role": "user", "content": user_msg})
+        content = ""
+        errors: list[str] = []
+        # Path 1: subprocess CLI (preferred — fresh process per call, no crash risk)
+        if _glm_subprocess_available():
+            try:
+                content = _glm_call_subprocess(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
+            except Exception as exc:
+                errors.append(f"subprocess: {type(exc).__name__}: {str(exc)[:160]}")
+        # Path 2: HTTP bridge (fallback — used when the script is missing or fails)
+        if not content and _glm_http_available():
+            try:
+                content = _glm_call_http(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
+            except Exception as exc:
+                errors.append(f"http: {type(exc).__name__}: {str(exc)[:160]}")
+        if not content:
+            if errors:
+                content = (f"[GLM error] Could not reach the free GLM model.\n\n"
+                           f"Attempted paths:\n" + "\n".join(f"  • {e}" for e in errors) +
+                           f"\n\nStart the bridge: cd mini-services/glm-bridge && node index.ts"
+                           f"\nor ensure the subprocess script exists at: {_GLM_CHAT_SCRIPT}")
+            else:
+                content = "(GLM returned an empty response — try rephrasing.)"
+        self.messages.append({"role": "assistant", "content": content})
+        emit({"type": "assistant", "text": content})
+
+    def interrupt(self) -> None:
+        # Synchronous call — nothing to cancel mid-flight.
+        pass
+
+    def close(self) -> None:
+        self.messages = []
 
 
 def _summarize_tool_input(name: str, tool_input: dict) -> str:
@@ -648,13 +799,7 @@ def _make_adapter(tier: str, workspace: Path, model: str | None = None,
     if tier == "open":
         return StrandsAdapter(workspace, model, workspace_id, system_prompt)
     if tier == "zai":
-        # GLM bridge — use the MockAdapter shell (it handles the session
-        # lifecycle) but the actual LLM calls go through the GLM bridge
-        # in conscious_tools._run_glm_bridge. For the agent panel, the
-        # Strands adapter with a custom model works too — but for simplicity
-        # we use MockAdapter which just echoes. The real agent panel GLM
-        # integration happens via the conscious invoke path.
-        return MockAdapter(workspace, workspace_id, system_prompt)
+        return ZaiAdapter(workspace, model, workspace_id, system_prompt)
     return MockAdapter(workspace, workspace_id, system_prompt)
 
 
@@ -665,8 +810,9 @@ def tier_for_model(model: str | None) -> str | None:
     if model.startswith("claude"):
         return "claude" if (os.environ.get("ANTHROPIC_API_KEY", "").strip()
                             and _installed("claude_agent_sdk")) else None
-    if model == "glm-5.2" or model.startswith("glm-5"):
-        return "zai"  # Free GLM via the bridge — always available
+    # The free GLM model routes to the zai tier (bridge on port 3030).
+    if model == "glm-5.2-free":
+        return "zai" if _glm_bridge_available() else None
     if any(m["model"] == model for m in agent_models()):
         return "open"
     return None

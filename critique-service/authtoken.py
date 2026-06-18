@@ -22,9 +22,11 @@ import time
 # (set CRITIQUE_ROTATION_SECRET); for maximum safety set ONLY the rotation secret so no
 # standing token exists.
 
-#   default window: 6 hours. Shorter = tighter blast radius; the grace window
-#   covers clock skew. 6 hours with grace=2 means a token is valid for up to
-#   18 hours (current + 2 previous windows), tolerating hours of clock drift.
+#   default window: 6 hours. Was 1 hour, but users who left the tab open
+#   overnight hit "missing or invalid bearer token" because the 1h window +
+#   1 grace (2h tolerance) had rolled past. 6h + grace=2 = 18h tolerance,
+#   which covers a full sleep cycle. The client (token.ts) MUST use the same
+#   WINDOW_S or token derivation diverges — keep them in sync.
 TOKEN_WINDOW_S = int(os.environ.get("TOKEN_WINDOW_S", "21600"))
 #   how many past windows still validate (grace). 2 => current + 2 previous.
 TOKEN_GRACE_WINDOWS = int(os.environ.get("TOKEN_GRACE_WINDOWS", "2"))

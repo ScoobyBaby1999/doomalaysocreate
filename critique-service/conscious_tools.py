@@ -342,16 +342,34 @@ def _run_glm_bridge(sub: dict, task: str, inputs: dict,
     ]
 
     try:
-        body = _json.dumps({"messages": messages, "model": "glm-5.2"}).encode()
-        req = _urlreq.Request(
-            "http://localhost:3030/chat",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with _urlreq.urlopen(req, timeout=120) as resp:
-            result = _json.loads(resp.read().decode())
-        response_text = result.get("content", "(no response from GLM bridge)")
+        response_text = ""
+        errors = []
+        # Path 1: subprocess CLI (most robust — fresh process per call, no
+        # persistent server to crash). The HTTP bridge inside Bun's serve()
+        # crashed silently on real calls in some environments.
+        try:
+            import agent_sessions as _as
+            if _as._glm_subprocess_available():
+                response_text = _as._glm_call_subprocess(messages, "glm-5.2", 120)
+        except Exception as exc:
+            errors.append(f"subprocess: {type(exc).__name__}: {str(exc)[:120]}")
+        # Path 2: HTTP bridge (fallback when subprocess is missing or failed)
+        if not response_text:
+            body = _json.dumps({"messages": messages, "model": "glm-5.2"}).encode()
+            req = _urlreq.Request(
+                "http://localhost:3030/chat",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with _urlreq.urlopen(req, timeout=120) as resp:
+                    result = _json.loads(resp.read().decode())
+                response_text = result.get("content", "")
+            except Exception as exc:
+                errors.append(f"http: {type(exc).__name__}: {str(exc)[:120]}")
+        if not response_text:
+            raise RuntimeError("GLM unavailable — " + "; ".join(errors))
     except Exception as exc:
         return (f"[GLM bridge error] {exc}\n\n(Falling back to simulated response.)",
                 [], "failed", str(exc))

@@ -1530,15 +1530,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "empty bearer token"})
             return None
 
+        # Strict audience check first (same-space JWTs). If that fails, retry
+        # with allow_any_aud — the JWT is still signature-verified, so it was
+        # issued by a trusted space (the main loom Space in the proxy flow).
+        # Without this fallback, a JWT minted by the main Space is rejected by
+        # every user Space → 401 → the workspace panel logs out on every open
+        # even though the user just authenticated.
         payload = jwt_auth.verify_jwt(token, expected_aud=self._space_host())
+        if not payload:
+            payload = jwt_auth.verify_jwt(token, allow_any_aud=True)
         if not payload:
             self._send_json(401, {"error": "invalid or expired session token"})
             return None
 
         user_id = payload["sub"]
 
-        # If the user row is missing (DB wiped), reconstruct it from the JWT.
-        # The encrypted tokens are opaque but valid as long as the JWT is valid.
+        # If the user row is missing (DB wiped on Space restart), reconstruct
+        # it from the JWT payload. The encrypted tokens are opaque but valid
+        # as long as the JWT is valid. If the JWT carries NO encrypted tokens
+        # (e.g. an older JWT, or an HF-only session whose tokens weren't
+        # embedded), we still create a minimal user row so the user can use
+        # the UI — GitHub-API routes (repos/clone/push) will return a clear
+        # "GitHub not connected" error instead of a 401 that logs them out.
         user = db.get_user(user_id)
         if not user:
             github_id = payload.get("github_id")
@@ -1548,13 +1561,10 @@ class Handler(BaseHTTPRequestHandler):
             hf_token_enc = payload.get("hf_token_enc")
             has_github = github_id and github_token_enc
             has_hf = hf_id and hf_token_enc
-            if not (has_github or has_hf):
-                self._send_json(401, {"error": "incomplete session - please re-authenticate"})
-                return None
             db.upsert_user(
                 user_id=user_id,
                 github_id=github_id if has_github else None,
-                github_username=github_username if has_github else None,
+                github_username=github_username if (has_github or github_username) else None,
                 github_token_encrypted=github_token_enc if has_github else None,
                 hf_id=hf_id if has_hf else None,
                 hf_token_encrypted=hf_token_enc if has_hf else None,
@@ -1585,26 +1595,31 @@ class Handler(BaseHTTPRequestHandler):
         if not jwt:
             self._send_json(403, {"error": "GitHub auth required — link your GitHub account"})
             return None
+        # Strict audience checks first (try both SPACE_HOST and SPACE_ID), then
+        # fall back to allow_any_aud so a JWT minted by the main loom Space is
+        # accepted by user Spaces in the proxy flow. Signature is still verified.
         payload = jwt_auth.verify_jwt(jwt, expected_aud=os.environ.get("SPACE_HOST", ""))
         if not payload:
             payload = jwt_auth.verify_jwt(jwt, expected_aud=os.environ.get("SPACE_ID", ""))
         if not payload:
+            payload = jwt_auth.verify_jwt(jwt, allow_any_aud=True)
+        if not payload:
             self._send_json(403, {"error": "invalid or expired GitHub session"})
             return None
         user_id = payload["sub"]
-        # reconstruct user row if missing (DB wiped) — same logic as _require_user
+        # reconstruct user row if missing (DB wiped) — same logic as _require_user.
+        # If the JWT has no encrypted GitHub token, still create a minimal row;
+        # the workspace ownership check passes, and GitHub-API operations will
+        # surface a clear "not connected" error rather than a hard 403.
         user = db.get_user(user_id)
         if not user:
             github_id = payload.get("github_id")
             github_token_enc = payload.get("github_token_enc")
-            if not (github_id and github_token_enc):
-                self._send_json(403, {"error": "incomplete GitHub session — please re-authenticate"})
-                return None
             db.upsert_user(
                 user_id=user_id,
-                github_id=github_id,
+                github_id=github_id if github_id else None,
                 github_username=payload.get("github_username"),
-                github_token_encrypted=github_token_enc,
+                github_token_encrypted=github_token_enc if github_id and github_token_enc else None,
             )
         return user_id
 
