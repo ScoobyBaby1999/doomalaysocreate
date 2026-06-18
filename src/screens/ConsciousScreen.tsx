@@ -142,10 +142,9 @@ export function ConsciousScreen({ settings, workspaceId }: {
   settings: Settings; workspaceId?: string;
 }) {
   const client = useRef(new ConsciousClient(settings));
-  // Fix 3: use the real workspaceId from App (the GitHub-linked workspace).
-  // If undefined (no GitHub), the backend enters playground mode (no workspace,
-  // no git worktrees, GLM agents only). No more "demo-workspace" hack.
-  const wsId = workspaceId || "";
+  // The effective workspace ID — discovered from the backend or passed as a prop.
+  // Stored in state so all functions (init, createConscious, etc.) can use it.
+  const [effectiveWsId, setEffectiveWsId] = useState(workspaceId || "");
 
   const [conscious, setConscious] = useState<Conscious | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -161,11 +160,9 @@ export function ConsciousScreen({ settings, workspaceId }: {
   const init = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      // Fix 3: if no workspaceId given, try to discover one from the backend.
-      // The backend's /api/workspaces endpoint returns the user's workspaces
-      // (requires GitHub auth via X-JWT, which ConsciousClient sends).
-      let effectiveWsId = wsId;
-      if (!effectiveWsId) {
+      // Discover the workspace ID from the backend if not passed as a prop.
+      let wsId = workspaceId || "";
+      if (!wsId) {
         try {
           const wsResp = await fetch(`${settings.baseUrl || ""}/api/workspaces`, {
             credentials: "same-origin",
@@ -176,31 +173,55 @@ export function ConsciousScreen({ settings, workspaceId }: {
           });
           if (wsResp.ok) {
             const wsData = await wsResp.json();
-            if (wsData.workspaces && wsData.workspaces.length > 0) {
-              effectiveWsId = wsData.workspaces[0].id;
+            // The backend returns { workspaces: [...] } or just [...]
+            const workspaces = wsData.workspaces || wsData || [];
+            if (Array.isArray(workspaces) && workspaces.length > 0) {
+              wsId = workspaces[0].id;
             }
           }
         } catch {}
       }
-      // If still no workspace, the backend enters playground mode
-      const list = await client.current.listConscious(effectiveWsId);
+      // If still no workspace, try creating one (so conscious has somewhere to live)
+      if (!wsId) {
+        try {
+          const createWsResp = await fetch(`${settings.baseUrl || ""}/api/workspaces`, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${await client.current.bearer()}`,
+              ...(settings.githubSessionId ? { "X-JWT": settings.githubSessionId } : {}),
+            },
+            body: JSON.stringify({ title: "Conscious Workspace" }),
+          });
+          if (createWsResp.ok) {
+            const wsData = await createWsResp.json();
+            wsId = wsData.workspace?.id || wsData.id || "";
+          }
+        } catch {}
+      }
+      // Store the discovered/created workspace ID in state
+      setEffectiveWsId(wsId);
+      // List conscious instances for this workspace (or empty → playground mode)
+      const list = await client.current.listConscious(wsId);
       if (list.conscious.length > 0) {
         const c = list.conscious[0];
         const detail = await client.current.getConscious(c.id);
         setConscious(detail.conscious); setAgents(detail.agents);
         await refreshData(c.id);
-      } else { await createConscious(); }
+      } else { await createConscious(wsId); }
     } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
     finally { setLoading(false); }
-  }, [wsId]);
+  }, [workspaceId]);
 
   useEffect(() => { init(); }, [init]);
 
-  const createConscious = async () => {
+  const createConscious = async (wsId?: string) => {
     setCreating(true);
     try {
       const r = await client.current.createConscious({
-        workspace_id: wsId, title: "Conscious Workspace",
+        workspace_id: wsId || effectiveWsId,
+        title: "Conscious Workspace",
         goal: "Multi-agent collaboration with GLM 5.2",
       });
       setConscious(r.conscious); setAgents(r.agents);
