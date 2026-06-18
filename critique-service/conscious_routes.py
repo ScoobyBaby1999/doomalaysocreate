@@ -368,8 +368,8 @@ def _route_agents(method: str, cid: str, sub: str, body: dict,
         tier = str(body.get("tier", "")).strip()
         if not role or not model or not tier:
             return 400, {"error": "role, model, tier are required"}
-        if tier not in ("claude", "open"):
-            return 400, {"error": "tier must be 'claude' or 'open'"}
+        if tier not in ("claude", "open", "zai"):
+            return 400, {"error": "tier must be 'claude', 'open', or 'zai'"}
         parent = body.get("parent_agent_id") or None
         agent = conscious_db.spawn_agent(
             conscious_id=cid, role=role, model=model, tier=tier,
