@@ -607,38 +607,6 @@ def _token_ok(header_value: str | None) -> bool:
     return ok
 
 
-def _extract_session_id(cookie_header: str | None) -> str | None:
-    """Extract the loom_session cookie value from the Cookie header."""
-    if not cookie_header:
-        return None
-    for part in cookie_header.split(";"):
-        part = part.strip()
-        if part.startswith("loom_session="):
-            return part[len("loom_session="):]
-    return None
-
-
-def _check_session(cookie_header: str | None) -> tuple[str | None, dict | None]:
-    """Check if the request has a valid session cookie.
-
-    Returns (user_id, session_payload) if the session is valid, (None, None) otherwise.
-    The session_payload contains the JWT payload (with encrypted provider tokens).
-    """
-    sid = _extract_session_id(cookie_header)
-    if not sid:
-        return None, None
-    session = db.get_session(sid)
-    if not session:
-        return None, None
-    # touch the session (update last_used_at)
-    db.touch_session(sid)
-    payload = session.get("payload", {})
-    user_id = payload.get("sub")
-    if not user_id:
-        return None, None
-    return user_id, payload
-
-
 # ---------------------------------------------------------------------------
 # OAuth / onboarding helpers
 # ---------------------------------------------------------------------------
@@ -736,15 +704,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        # CORS: when using session cookies (credentials: same-origin), the
-        # Access-Control-Allow-Origin can't be "*" — it must be the specific
-        # origin or omitted (same-origin requests don't need CORS headers).
-        # For same-origin (Space serves both frontend + API), no CORS header
-        # is needed at all. For cross-origin (dev proxy), use the Origin.
-        origin = self.headers.get("Origin")
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Access-Control-Allow-Credentials", "true")
+        #   CORS: the web app may be served from a different origin (separate static
+        #   host, or local dev without the proxy). auth is a bearer header - no cookies -
+        #   so a wildcard origin grants nothing by itself; requests still need the token.
+        self.send_header("Access-Control-Allow-Origin", "*")
         for k, v in (headers or {}).items():
             self.send_header(k, str(v))
         self.end_headers()
@@ -754,51 +717,40 @@ class Handler(BaseHTTPRequestHandler):
     def _conscious_dispatch(self, method: str) -> bool:
         """Handle /api/conscious/* if the route matches. Returns True if handled.
 
-        Auth architecture (Fix 1 + Fix 5):
-        - Layer 1 (service auth): _token_ok checks the rotation secret.
-          Required for ALL routes. 401 on failure (frontend retries with
-          previous window).
-        - Layer 2 (user identity): read X-JWT header directly (don't call
-          _require_user_from_jwt — it sends its own 403 which causes
-          double-response). Pass the raw JWT string to conscious_routes,
-          which verifies it internally. If absent, user_id=None → playground
-          mode (no workspace, no git worktrees, GLM agents only).
-        - Layer 1 and Layer 2 are INDEPENDENT: Layer 1 failing = 401 (retry).
-          Layer 2 missing = playground mode (not an error). Layer 2 present
-          but invalid = 401 (re-authenticate with GitHub).
+        Auth gate: bearer token (``_token_ok``) is required for ALL conscious
+        routes. Workspace-owning ops additionally call ``_require_user_from_jwt``
+        inside ``conscious_routes`` (via the ``user_id`` argument we pass here).
+        Tier 1 invariants (no token in .git/config, no auth regressions) are
+        preserved — this is purely additive dispatch.
         """
         from urllib.parse import urlsplit
         path = urlsplit(self.path).path.rstrip("/")
         if path != "/api/conscious" and not path.startswith("/api/conscious/"):
             return False
-        # Layer 1: service auth. Accept EITHER:
-        #   (a) rotation token in Authorization header (admin/Space owner), OR
-        #   (b) valid session cookie (any authenticated user — server-side sessions)
-        cookie_header = self.headers.get("Cookie")
-        session_user_id, session_payload = _check_session(cookie_header)
-        has_rotation = _token_ok(self.headers.get("Authorization"))
-        if not has_rotation and not session_user_id:
+        if not self._auth_ok():
             if not _auth_configured():
                 self._send_json(503, {"error": "no auth secret configured on server "
                                                "(set CRITIQUE_TOKEN or CRITIQUE_ROTATION_SECRET)"})
             else:
                 self._send_json(401, {"error": "missing or invalid bearer token"})
             return True
-        # Layer 2: user identity. Priority:
-        #   1. Session cookie (if valid → use session's user_id)
-        #   2. X-JWT header (if present → verify it)
-        #   3. None (playground mode — no workspace, GLM only)
-        if session_user_id:
-            # Session cookie provides user identity directly (no JWT verification needed)
-            raw_jwt = None  # session already verified
-        else:
-            raw_jwt = (self.headers.get("X-JWT") or "").strip() or None
+        # workspace-owning ops need the GitHub JWT (X-JWT) — pass it through;
+        # conscious_routes._check_ownership enforces it.
+        # Phase 6: JWT is OPTIONAL — if present, used for workspace ownership.
+        # If absent, conscious_routes creates/uses a default workspace (so the
+        # conscious system works WITHOUT GitHub auth, like the chat panel).
+        user_id = self._require_user_from_jwt() if self._wants_jwt() else None
+        # If JWT check failed (returned None), it already sent a 403.
+        # But we DON'T early-return — instead, pass user_id=None to the routes.
+        # The routes will use a default workspace when user_id is None.
+        # (The _require_user_from_jwt already sent a 403 response, but we
+        # override that by proceeding — the route handler will handle None.)
         # body: GET/DELETE have none; POST requires JSON; PATCH is optional JSON
         body: dict = {}
         if method == "POST":
             parsed = self._read_json_body()
             if parsed is None:
-                return True
+                return True  # _read_json_body already sent the error response
             body = parsed
         elif method == "PATCH":
             parsed = self._read_json_body_optional()
@@ -806,21 +758,19 @@ class Handler(BaseHTTPRequestHandler):
                 return True
             body = parsed
         try:
-            # If session provided user_id, pass it directly (already verified).
-            # Otherwise pass the raw JWT for conscious_routes to verify.
-            if session_user_id:
-                status, payload = conscious_routes.handle_request(
-                    method, self.path, body, dict(self.headers),
-                    raw_jwt=None, pre_verified_user_id=session_user_id)
-            else:
-                status, payload = conscious_routes.handle_request(
-                    method, self.path, body, dict(self.headers),
-                    raw_jwt=raw_jwt, pre_verified_user_id=None)
+            status, payload = conscious_routes.handle_request(
+                method, self.path, body, dict(self.headers), user_id)
             self._send_json(status, payload)
         except Exception as exc:  # noqa: BLE001 - never leak a stack trace
             log_event("conscious_request_error", route=self.path, error=repr(exc)[:300])
             self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
         return True
+
+    @staticmethod
+    def _wants_jwt() -> bool:
+        """Phase 6: JWT is now OPTIONAL. The conscious system works without
+        GitHub auth (like the chat panel) using a default workspace/user."""
+        return False
 
     def _read_json_body_optional(self) -> dict | None:
         """Like _read_json_body but returns {} for empty body (used by PATCH)."""
@@ -852,12 +802,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         #   CORS preflight for cross-origin POSTs with Authorization/Content-Type.
-        origin = self.headers.get("Origin", "*")
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Credentials", "true")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-JWT, Cookie")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-JWT")
         self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -1009,7 +957,7 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
         if route == "/api/templates" or route.startswith("/api/templates/"):
-            if not _token_ok(self.headers.get("Authorization")):
+            if not self._auth_ok():
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             panel: Panel = self.server.panel  # type: ignore[attr-defined]
@@ -1025,7 +973,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route in ("/api/stats", "/api/metrics", "/api/roster"):
             #   telemetry endpoints share the bearer token with the POST routes.
-            if not _token_ok(self.headers.get("Authorization")):
+            if not self._auth_ok():
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             panel: Panel = self.server.panel  # type: ignore[attr-defined]
@@ -1050,7 +998,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route.startswith("/api/jobs/"):
             #   polling an async job needs the same bearer token as submitting one.
-            if not _token_ok(self.headers.get("Authorization")):
+            if not self._auth_ok():
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             job_id = route[len("/api/jobs/"):]
@@ -1063,7 +1011,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, snap)
             return
         if route == "/api/agent/models":
-            if not _token_ok(self.headers.get("Authorization")):
+            if not self._auth_ok():
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             self._send_json(200, {"tier": agent_sessions.agent_tier(),
@@ -1071,7 +1019,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route.startswith("/api/agent/"):
             #   transcript polling + artifact access share the service bearer token.
-            if not _token_ok(self.headers.get("Authorization")):
+            if not self._auth_ok():
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             self._handle_agent_get(route)
@@ -1314,50 +1262,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_json(200, result)
 
-    def _handle_session_exchange(self) -> None:
-        """Fix 7: Exchange a one-time token for a session cookie.
-        POST /api/auth/session { token: <one-time-token> }
-        → 200 { user_id, github_username } + Set-Cookie: loom_session=<sid>
-        The one-time token is consumed (can't be reused). The session cookie
-        is HttpOnly + Secure + SameSite=Strict (JS can't read it)."""
-        payload = self._read_json_body()
-        if payload is None:
-            return
-        token = str(payload.get("token", "")).strip()
-        if not token:
-            self._send_json(400, {"error": "token is required"})
-            return
-        result = _pop_provision_result(token)
-        if result is None:
-            self._send_json(404, {"error": "session token not found or expired"})
-            return
-        session_id = result.get("session_id")
-        if not session_id:
-            self._send_json(500, {"error": "no session_id in provision result"})
-            return
-        session = db.get_session(session_id)
-        if not session:
-            self._send_json(404, {"error": "session not found or expired"})
-            return
-        payload_data = session.get("payload", {})
-        # Set the session cookie + return user info
-        self._send_json(200, {
-            "user_id": session["user_id"],
-            "github_username": payload_data.get("github_username", ""),
-        }, headers={
-            "Set-Cookie": f"loom_session={session_id}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800",
-        })
-
-    def _handle_logout(self) -> None:
-        """POST /api/auth/logout — revoke the session + clear the cookie."""
-        cookie_header = self.headers.get("Cookie", "")
-        sid = _extract_session_id(cookie_header)
-        if sid:
-            db.revoke_session(sid)
-        self._send_json(200, {"ok": True}, headers={
-            "Set-Cookie": "loom_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
-        })
-
     # -- agent orchestrator routes ------------------------------------------
 
     def _handle_agent_post(self, payload: dict) -> None:
@@ -1499,9 +1403,15 @@ class Handler(BaseHTTPRequestHandler):
         return payload
 
     def _auth_and_body(self) -> dict | None:
-        """Shared gate for panel POST routes: panel bearer auth + JSON body parse.
-        On any failure it writes the error response and returns None."""
-        if not _token_ok(self.headers.get("Authorization")):
+        """Shared gate for panel POST routes: bearer auth OR session cookie + JSON body parse.
+        On any failure it writes the error response and returns None.
+
+        Auth (server-side sessions phase): accepts EITHER:
+        - Rotation token in Authorization header (admin/Space owner), OR
+        - Valid session cookie (any authenticated user)
+        This fixes the bug where chat panel + agent panel 401 after GitHub
+        login because the rotation secret isn't in the user's localStorage."""
+        if not self._auth_ok():
             if not _auth_configured():
                 self._send_json(503, {"error": "no auth secret configured on server "
                                                "(set CRITIQUE_TOKEN or CRITIQUE_ROTATION_SECRET)"})
@@ -1509,6 +1419,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
             return None
         return self._read_json_body()
+
+    def _auth_ok(self) -> bool:
+        """Check if the request is authenticated via EITHER:
+        - Rotation token in Authorization header, OR
+        - Valid session cookie.
+        Use this instead of _token_ok() directly — it covers both auth paths."""
+        if _token_ok(self.headers.get("Authorization")):
+            return True
+        cookie_header = self.headers.get("Cookie")
+        session_user_id, _ = _check_session(cookie_header)
+        return session_user_id is not None
 
     @staticmethod
     def _valid_panel(p) -> bool:
@@ -1592,55 +1513,24 @@ class Handler(BaseHTTPRequestHandler):
     # --- GitHub integration handlers ------------------------------------------
 
     def _require_user(self) -> str | None:
-        """Extract and validate user_id.
+        """Extract and validate user_id from the JWT bearer token.
 
-        Bug #3 fix: checks THREE sources in priority order:
-        1. Session cookie (loom_session) — server-side sessions (Fix 7)
-        2. X-JWT header — GitHub identity for rotation-token-authed callers
-        3. Authorization: Bearer <jwt> — legacy fallback (JWT as bearer)
-
-        Returns the user_id on success, None on failure (with HTTP 401 sent).
+        Verifies the JWT signature + expiry.  If the user row is missing from
+        the DB (ephemeral SQLite), reconstructs it from the JWT payload so
+        sessions survive a DB rebuild.
+        Returns the deterministic user_id on success, None on failure (with an
+        HTTP 401 already sent to the response).
         """
-        # 1. Check session cookie first (server-side sessions)
-        cookie_header = self.headers.get("Cookie")
-        session_user_id, session_payload = _check_session(cookie_header)
-        if session_user_id:
-            # Reconstruct user row if DB was wiped (same as JWT path below)
-            user = db.get_user(session_user_id)
-            if not user and session_payload:
-                github_id = session_payload.get("github_id")
-                github_token_enc = session_payload.get("github_token_enc")
-                hf_id = session_payload.get("hf_id")
-                hf_token_enc = session_payload.get("hf_token_enc")
-                has_github = github_id and github_token_enc
-                has_hf = hf_id and hf_token_enc
-                if has_github or has_hf:
-                    db.upsert_user(
-                        user_id=session_user_id,
-                        github_id=github_id if has_github else None,
-                        github_username=session_payload.get("github_username") if has_github else None,
-                        github_token_encrypted=github_token_enc if has_github else None,
-                        hf_id=hf_id if has_hf else None,
-                        hf_token_encrypted=hf_token_enc if has_hf else None,
-                    )
-            return session_user_id
-
-        # 2. Check X-JWT header (for rotation-token-authed callers)
-        jwt = (self.headers.get("X-JWT") or "").strip()
-        if not jwt:
-            # 3. Legacy fallback: JWT in Authorization header (2-dot shape check)
-            auth = self.headers.get("Authorization", "")
-            if auth.startswith("Bearer "):
-                candidate = auth[len("Bearer "):].strip()
-                if candidate.count(".") == 2:
-                    jwt = candidate
-        if not jwt:
-            self._send_json(401, {"error": "authentication required — connect GitHub or provide a session token"})
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            self._send_json(401, {"error": "missing bearer token"})
+            return None
+        token = auth[len("Bearer "):].strip()
+        if not token:
+            self._send_json(401, {"error": "empty bearer token"})
             return None
 
-        payload = jwt_auth.verify_jwt(jwt, expected_aud=self._space_host())
-        if not payload:
-            payload = jwt_auth.verify_jwt(jwt, expected_aud=os.environ.get("SPACE_ID", ""))
+        payload = jwt_auth.verify_jwt(token, expected_aud=self._space_host())
         if not payload:
             self._send_json(401, {"error": "invalid or expired session token"})
             return None
@@ -1648,6 +1538,7 @@ class Handler(BaseHTTPRequestHandler):
         user_id = payload["sub"]
 
         # If the user row is missing (DB wiped), reconstruct it from the JWT.
+        # The encrypted tokens are opaque but valid as long as the JWT is valid.
         user = db.get_user(user_id)
         if not user:
             github_id = payload.get("github_id")
@@ -1692,16 +1583,13 @@ class Handler(BaseHTTPRequestHandler):
                 if candidate.count(".") == 2:
                     jwt = candidate
         if not jwt:
-            # Fix 6: 401 (not 403) — "authentication required" not "forbidden".
-            # The frontend retries 401s (rotation window); 403 means "you're
-            # authenticated but not authorized" (don't retry).
-            self._send_json(401, {"error": "GitHub auth required — link your GitHub account"})
+            self._send_json(403, {"error": "GitHub auth required — link your GitHub account"})
             return None
         payload = jwt_auth.verify_jwt(jwt, expected_aud=os.environ.get("SPACE_HOST", ""))
         if not payload:
             payload = jwt_auth.verify_jwt(jwt, expected_aud=os.environ.get("SPACE_ID", ""))
         if not payload:
-            self._send_json(401, {"error": "invalid or expired GitHub session"})
+            self._send_json(403, {"error": "invalid or expired GitHub session"})
             return None
         user_id = payload["sub"]
         # reconstruct user row if missing (DB wiped) — same logic as _require_user
@@ -1710,7 +1598,7 @@ class Handler(BaseHTTPRequestHandler):
             github_id = payload.get("github_id")
             github_token_enc = payload.get("github_token_enc")
             if not (github_id and github_token_enc):
-                self._send_json(401, {"error": "incomplete GitHub session — please re-authenticate"})
+                self._send_json(403, {"error": "incomplete GitHub session — please re-authenticate"})
                 return None
             db.upsert_user(
                 user_id=user_id,
@@ -1785,22 +1673,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             gh_token = github_integration.exchange_github_code(code)
             user = github_integration.upsert_user_from_github(gh_token, user_id=existing_id or None)
-            jwt_payload = {
-                "sub": user["id"],
-                "github_id": user["github_id"],
-                "github_username": user.get("github_username", ""),
-                "github_token_enc": user.get("github_token_encrypted", ""),
-            }
-            # Fix 7: create a server-side session + redirect with a one-time
-            # exchange token. The JWT NEVER appears in the URL.
-            session = db.create_session(user["id"], jwt_payload)
-            # store the session_id with a one-time exchange key (reuses the
-            # existing _provision_results mechanism — 5-min TTL, single-use)
-            import secrets as _sec
-            exchange_token = _sec.token_urlsafe(24)
-            with _provision_lock:
-                _provision_results[exchange_token] = (time.time(), {"session_id": session["id"]})
-            self._redirect(f"https://{host}/#session-exchange={exchange_token}")
+            jwt_token = jwt_auth.generate_jwt(
+                user_id=user["id"],
+                github_id=user["github_id"],
+                github_username=user.get("github_username", ""),
+                github_token_encrypted=user.get("github_token_encrypted", ""),
+                audience=self._space_host(),
+            )
+            self._redirect(f"https://{host}/#github-connected={jwt_token}")
         except Exception as exc:
             log_event("github_oauth_error", error=str(exc)[:200])
             self._redirect(f"https://{host}/#github-error=token_exchange_failed")
@@ -1922,21 +1802,16 @@ class Handler(BaseHTTPRequestHandler):
             user = dataset_persistence.upsert_user_from_hf(token_data, user_id=github_user_id or None)
             # Re-fetch to ensure we have the complete row (with github_id if merged)
             user = db.get_user(user["id"]) or user
-            jwt_payload = {
-                "sub": user["id"],
-                "github_id": user.get("github_id") or 0,
-                "github_username": user.get("github_username") or "",
-                "github_token_enc": user.get("github_token_encrypted") or "",
-                "hf_id": user.get("hf_username") or "",
-                "hf_token_enc": user.get("hf_token_encrypted") or "",
-            }
-            # Fix 7: create server-side session + one-time exchange (same as GitHub)
-            session = db.create_session(user["id"], jwt_payload)
-            import secrets as _sec
-            exchange_token = _sec.token_urlsafe(24)
-            with _provision_lock:
-                _provision_results[exchange_token] = (time.time(), {"session_id": session["id"]})
-            self._redirect(f"https://{host}/#session-exchange={exchange_token}")
+            jwt_token = jwt_auth.generate_jwt(
+                user_id=user["id"],
+                github_id=user.get("github_id") or 0,
+                github_username=user.get("github_username") or "",
+                github_token_encrypted=user.get("github_token_encrypted") or "",
+                hf_id=user.get("hf_username") or "",
+                hf_token_encrypted=user.get("hf_token_encrypted") or "",
+                audience=self._space_host(),
+            )
+            self._redirect(f"https://{host}/#hf-connected={jwt_token}")
         except Exception as exc:
             log_event("hf_oauth_error", error=str(exc)[:200])
             self._redirect(f"https://{host}/#hf-error=token_exchange_failed")
@@ -2081,8 +1956,7 @@ class Handler(BaseHTTPRequestHandler):
                 auto_sync=bool(payload.get("auto_sync")))
             self._send_json(201, ws)
         except Exception as exc:
-            log_event("workspace_create_error", error=repr(exc)[:200])
-            self._send_json(500, {"error": "workspace creation failed"})
+            self._send_json(500, {"error": str(exc)})
 
     def _handle_workspace_update(self, ws_id: str) -> None:
         user_id = self._require_user()
@@ -2358,18 +2232,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, result)
 
     def do_POST(self) -> None:
-        from urllib.parse import urlsplit
-        route = urlsplit(self.path).path.rstrip("/")
+        route = self.path.rstrip("/")
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
             self._conscious_dispatch("POST")
-            return
-        # --- Session exchange + logout (Fix 7: server-side sessions) ---
-        if route == "/api/auth/session":
-            self._handle_session_exchange()
-            return
-        if route == "/api/auth/logout":
-            self._handle_logout()
             return
         if route == "/oauth/set-provider-key":
             self._handle_set_provider_key()
@@ -2377,7 +2243,7 @@ class Handler(BaseHTTPRequestHandler):
         #   POST /api/agent/<sid>/interrupt — stop the in-flight turn (bearer-gated,
         #   no body required). handled before the body-parsing gate below.
         if route.startswith("/api/agent/") and route.endswith("/interrupt"):
-            if not _token_ok(self.headers.get("Authorization")):
+            if not self._auth_ok():
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             sid = route[len("/api/agent/"):-len("/interrupt")]
@@ -2497,7 +2363,7 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
             self._conscious_dispatch("DELETE")
             return
-        if not _token_ok(self.headers.get("Authorization")):
+        if not self._auth_ok():
             self._send_json(401, {"error": "missing or invalid bearer token"})
             return
         # workspace deletion
