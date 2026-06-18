@@ -35,6 +35,7 @@ export default function App() {
     const hash = window.location.hash.slice(1);
     if (!hash) return;
     const params = new URLSearchParams(hash);
+    const sessionExchange = params.get("session-exchange");
     const githubId = params.get("github-connected");
     const githubCode = params.get("github-code");
     const githubError = params.get("github-error");
@@ -46,6 +47,36 @@ export default function App() {
     // Clear hash immediately
     history.replaceState(null, "", window.location.pathname + window.location.search);
 
+    // Fix 7: server-side session exchange — the JWT is NEVER in the URL.
+    // The one-time token is exchanged for a session cookie via POST.
+    if (sessionExchange) {
+      const base = settings.baseUrl || "";
+      fetch(base + "/api/auth/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: sessionExchange }),
+        credentials: "same-origin",  // send + receive cookies
+      }).then((r) => {
+        if (!r.ok) throw new Error("session exchange failed");
+        return r.json();
+      }).then((data) => {
+        // Session cookie is set by the server (HttpOnly — JS can't read it).
+        // We only store the username for display — NO JWT in localStorage.
+        const newSettings = {
+          ...settings,
+          githubUsername: data.github_username || "",
+          githubSessionId: "",  // cleared — session cookie handles auth now
+        };
+        saveSettings(newSettings);
+        setSettings(newSettings);
+        setTab("workspaces");
+      }).catch((e) => {
+        console.error("Session exchange failed:", e);
+      });
+      return;
+    }
+
+    // Legacy flows (back-compat for older backends that still use JWT-in-URL)
     if (githubId) {
       // Direct flow (main Space): session ID returned directly
       const ghSettings = { ...settings, githubSessionId: githubId };
