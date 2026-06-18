@@ -37,8 +37,22 @@ def _db() -> sqlite3.Connection:
 def init_db() -> None:
     """Create tables if they don't exist.  Runs migrations for existing tables."""
     db = _db()
-    db.executescript(SCHEMA)
-    db.commit()
+    try:
+        db.executescript(SCHEMA)
+        db.commit()
+    except Exception as exc:
+        # If the bulk executescript fails (e.g., a syntax error in one table
+        # definition on an older DB), try creating each table individually
+        # so one failure doesn't block all tables.
+        print(f"[db] init_db executescript failed, trying individual: {exc}", flush=True)
+        for stmt in SCHEMA.split(";"):
+            stmt = stmt.strip()
+            if stmt and not stmt.startswith("--"):
+                try:
+                    db.execute(stmt)
+                except Exception:
+                    pass  # table/column already exists or syntax issue — skip
+        db.commit()
     # schema migrations for existing databases
     _migrate(db)
     # cleanup expired sessions on boot

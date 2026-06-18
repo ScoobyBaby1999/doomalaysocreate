@@ -2081,7 +2081,8 @@ class Handler(BaseHTTPRequestHandler):
                 auto_sync=bool(payload.get("auto_sync")))
             self._send_json(201, ws)
         except Exception as exc:
-            self._send_json(500, {"error": str(exc)})
+            log_event("workspace_create_error", error=repr(exc)[:200])
+            self._send_json(500, {"error": "workspace creation failed"})
 
     def _handle_workspace_update(self, ws_id: str) -> None:
         user_id = self._require_user()
