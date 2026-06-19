@@ -21,11 +21,43 @@ from pathlib import Path
 from typing import Any, Callable
 
 # --- config -----------------------------------------------------------------
-# debug/ folder lives next to critique-service/ (writable on HF Spaces)
-_DEBUG_DIR = Path(os.environ.get(
-    "LOOM_DEBUG_DIR",
-    str(Path(__file__).resolve().parent.parent / "debug")))
-_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+# debug/ folder — try multiple locations until we find a writable one.
+# On HF Spaces, /app/ is the app dir but its parent (/) is NOT writable.
+# Falls back to /tmp/loom-debug or ~/.loom-debug if the default isn't writable.
+# The directory is best-effort — if no writable location is found, disk logging
+# is disabled and only stderr emits (logging never crashes the app).
+def _resolve_debug_dir() -> Path:
+    """Find a writable directory for debug logs. Tries in order:
+    1. LOOM_DEBUG_DIR env var (explicit override)
+    2. <app>/debug (next to critique-service/)
+    3. /tmp/loom-debug (always writable on HF Spaces)
+    4. ~/.loom-debug (home directory)
+    Returns the first writable one, or a dummy path if none work."""
+    candidates = []
+    env_dir = os.environ.get("LOOM_DEBUG_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
+    # Default: next to the critique-service package
+    candidates.append(Path(__file__).resolve().parent.parent / "debug")
+    # Fallbacks (always writable on HF Spaces / Linux containers)
+    candidates.append(Path("/tmp/loom-debug"))
+    candidates.append(Path.home() / ".loom-debug")
+    for c in candidates:
+        try:
+            c.mkdir(parents=True, exist_ok=True)
+            # Verify it's actually writable by creating a test file
+            test_file = c / ".write_test"
+            test_file.write_text("ok")
+            test_file.unlink()
+            return c
+        except (OSError, PermissionError):
+            continue
+    # None worked — return a dummy path (disk logging will fail silently,
+    # stderr logging still works). This prevents the startup crash.
+    return Path("/tmp/loom-debug-fallback")
+
+_DEBUG_DIR = _resolve_debug_dir()
+_DISK_ENABLED = _DEBUG_DIR.exists() and os.environ.get("LOOM_DEBUG", "1").strip() not in ("0", "false", "no", "")
 
 # combined rolling log (everything in one file for grepping)
 _COMBINED_LOG = _DEBUG_DIR / "current.jsonl"
@@ -41,9 +73,8 @@ _CATEGORY_FILES = {
     "http": _DEBUG_DIR / "http.log",
 }
 
-# set LOOM_DEBUG=0 to disable disk logging (stderr still emits)
-_DISK_ENABLED = os.environ.get("LOOM_DEBUG", "1").strip() not in ("0", "false", "no", "")
-# set LOOM_STDERR=0 to silence stderr (disk still writes)
+# _DISK_ENABLED is set above (line 60) — also checks if the dir is writable.
+# set LOOM_STDERR=0 to silence stderr (disk still writes if enabled)
 _STDERR_ENABLED = os.environ.get("LOOM_STDERR", "1").strip() not in ("0", "false", "no", "")
 
 # max log file size before rotation (1 MB per category)
