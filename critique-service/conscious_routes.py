@@ -12,7 +12,6 @@ the caller); body is the parsed JSON dict (or {} for GETs).
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -26,37 +25,8 @@ import db as _dbmod
 # ---------------------------------------------------------------------------
 
 def handle_request(method: str, raw_path: str, body: dict | None,
-                   headers: dict, raw_jwt: str | None,
-                   pre_verified_user_id: str | None = None) -> tuple[int, dict]:
-    """Route a /api/conscious/* request. Returns (status, json_body).
-
-    Auth (Fix 1 + Fix 5 + server-side sessions):
-    - pre_verified_user_id: if set (from session cookie), use directly.
-      No JWT verification needed — the session already proved identity.
-    - raw_jwt: if pre_verified_user_id is None, verify the JWT to extract
-      user_id. If None → playground mode (no workspace, no git, GLM only).
-    - If raw_jwt is present but invalid → 401 (re-authenticate with GitHub).
-    Layer 1 (rotation secret or session) is already verified by the caller.
-    """
-    # Determine user_id: session (pre-verified) > JWT > None (playground)
-    if pre_verified_user_id:
-        user_id = pre_verified_user_id
-    elif raw_jwt:
-        try:
-            import jwt_auth
-            payload = jwt_auth.verify_jwt(raw_jwt, expected_aud=os.environ.get("SPACE_HOST", ""))
-            if not payload:
-                payload = jwt_auth.verify_jwt(raw_jwt, expected_aud=os.environ.get("SPACE_ID", ""))
-            if not payload:
-                return 401, {"error": "invalid or expired GitHub session — please re-authenticate"}
-            user_id = payload.get("sub")
-            if not user_id:
-                return 401, {"error": "invalid session — no user identity"}
-        except Exception:
-            return 401, {"error": "invalid or expired GitHub session — please re-authenticate"}
-    else:
-        user_id = None  # playground mode
-
+                   headers: dict, user_id: str | None) -> tuple[int, dict]:
+    """Route a /api/conscious/* request. Returns (status, json_body)."""
     path = urlsplit(raw_path).path.rstrip("/")
     qs = parse_qs(urlsplit(raw_path).query)
     body = body or {}
@@ -143,30 +113,60 @@ def handle_request(method: str, raw_path: str, body: dict | None,
 def _check_ownership(cid: str, user_id: str | None) -> tuple[bool, dict | None]:
     """Return (ok, error_response). ok=False means send the error_response.
 
-    Fix 1: user_id=None means playground mode — NO workspace access.
-    - If user_id is None and the conscious is in a real workspace → 401
-      (need GitHub auth for workspace operations).
-    - If user_id is None and the conscious is a playground conscious (no
-      workspace) → allowed (playground mode).
-    - If user_id is present → check ownership as before.
+    Phase 6: if user_id is None (no GitHub auth), auto-provision a default
+    user + workspace so the conscious system works without GitHub (like the
+    chat panel). The default user owns all conscious instances in this mode.
     """
+    if not user_id:
+        # Phase 6: no GitHub auth — auto-provision a default user
+        user_id = _ensure_default_user()
     c = conscious_db.get_conscious(cid)
     if not c:
         return False, (404, {"error": "conscious not found"})
-    # Playground mode: allow access to playground conscious (no workspace)
-    if user_id is None:
-        ws = _dbmod.get_workspace(c["workspace_id"]) if c.get("workspace_id") else None
-        if ws and ws.get("sandbox_path") and ws["sandbox_path"] != "/tmp/conscious-default":
-            # This conscious belongs to a real workspace — need GitHub auth
-            return False, (401, {"error": "GitHub auth required — link your GitHub account to access workspace agents"})
-        # Playground conscious (or default workspace) — allow
-        return True, None
-    # User is authenticated — check ownership
     if c["owner_user_id"] != user_id:
+        # also allow if the workspace belongs to the user (defense in depth)
         ws = _dbmod.get_workspace(c["workspace_id"])
         if not ws or ws["user_id"] != user_id:
             return False, (403, {"error": "not your conscious"})
     return True, None
+
+
+_DEFAULT_USER_ID = "conscious-default-user"
+
+
+def _ensure_default_user() -> str | None:
+    """Create a default user + workspace if they don't exist.
+    Used when no GitHub auth is provided (like the chat panel).
+    Returns the default user_id on success, or None on failure.
+
+    CRITICAL: Previously this silently swallowed ALL exceptions and returned
+    _DEFAULT_USER_ID anyway — even if the user row was never created. That
+    caused IntegrityError downstream when create_conscious tried to INSERT
+    with a non-existent owner_user_id (FK violation). Now it returns None
+    on failure so the caller can return a proper error."""
+    try:
+        user = _dbmod.get_user(_DEFAULT_USER_ID)
+        if not user:
+            _dbmod.upsert_user(user_id=_DEFAULT_USER_ID)
+        # ensure a default workspace exists
+        ws = _dbmod.get_workspace("conscious-default-workspace")
+        if not ws:
+            _dbmod.create_workspace(
+                _DEFAULT_USER_ID,
+                title="Default Conscious Workspace",
+                sandbox_path="/tmp/conscious-default",
+            )
+        return _DEFAULT_USER_ID
+    except Exception as exc:
+        # Log the error — don't silently swallow it. Return None so the caller
+        # knows the default user couldn't be created.
+        try:
+            import debug_log
+            debug_log.derror("conscious", "_ensure_default_user",
+                             f"failed to create default user: {exc}")
+        except Exception:
+            pass
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -174,36 +174,28 @@ def _check_ownership(cid: str, user_id: str | None) -> tuple[bool, dict | None]:
 # ---------------------------------------------------------------------------
 
 def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
-    """Create a conscious. If user_id is None (playground mode), create a
-    playground conscious with no workspace and no git worktrees. If user_id
-    is present, create in the specified workspace (requires ownership)."""
+    # If no user_id (no JWT), auto-provision a default user + workspace.
+    # _ensure_default_user now returns None on failure (was silently swallowing).
+    if not user_id:
+        user_id = _ensure_default_user()
+        if not user_id:
+            return 500, {"error": "Failed to create default user. Check server logs — this is likely a database initialization issue."}
     workspace_id = str(body.get("workspace_id", "")).strip()
-    if user_id is None:
-        # Playground mode: no workspace, no git. GLM agents only.
-        # Use a fixed playground workspace ID so list/get work.
-        workspace_id = "conscious-playground"
-        # Ensure the playground workspace exists
-        ws = _dbmod.get_workspace(workspace_id)
+    if not workspace_id:
+        workspace_id = "conscious-default-workspace"
+    ws = _dbmod.get_workspace(workspace_id)
+    if not ws:
+        # auto-create the workspace if it doesn't exist
+        if workspace_id == "conscious-default-workspace":
+            uid = _ensure_default_user()
+            if not uid:
+                return 500, {"error": "Failed to create default workspace."}
+            ws = _dbmod.get_workspace(workspace_id)
         if not ws:
-            try:
-                _dbmod.create_workspace(
-                    "conscious-playground-user",
-                    title="Playground",
-                    sandbox_path="/tmp/conscious-playground",
-                )
-            except Exception:
-                pass
-        owner_user_id = "conscious-playground-user"
-    else:
-        # Authenticated mode: use the real workspace
-        if not workspace_id:
-            return 400, {"error": "workspace_id is required"}
-        ws = _dbmod.get_workspace(workspace_id)
-        if not ws:
-            return 404, {"error": "workspace not found"}
-        if ws["user_id"] != user_id:
-            return 403, {"error": "not your workspace"}
-        owner_user_id = user_id
+            return 404, {"error": f"workspace '{workspace_id}' not found and could not be created"}
+    # Ownership check: skip if using the default user/workspace (they always match)
+    if ws["user_id"] != user_id and not (workspace_id == "conscious-default-workspace"):
+        return 403, {"error": "not your workspace"}
     # cap conscious per workspace (TIER3_PLAN.md §13)
     existing = conscious_db.list_conscious(workspace_id)
     if len(existing) >= 4:
@@ -216,57 +208,95 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
         policy = "on"
     max_agents = int(body.get("max_agents", 8) or 8)
 
-    c = conscious_db.create_conscious(
-        workspace_id=workspace_id, owner_user_id=owner_user_id, title=title, goal=goal,
-        cost_ceiling_usd=cost_ceiling, brain_commit_policy=policy,
-        max_agents=max_agents)
+    # Wrap DB operations in try/except to catch IntegrityError and give a
+    # useful message instead of "internal error: IntegrityError".
+    try:
+        c = conscious_db.create_conscious(
+            workspace_id=workspace_id, owner_user_id=user_id, title=title, goal=goal,
+            cost_ceiling_usd=cost_ceiling, brain_commit_policy=policy,
+            max_agents=max_agents)
+    except Exception as exc:
+        try:
+            import debug_log
+            debug_log.derror("conscious", "_create_conscious",
+                             f"create_conscious failed: {exc}",
+                             data={"workspace_id": workspace_id, "user_id": user_id})
+        except Exception:
+            pass
+        return 500, {"error": f"Failed to create conscious: {type(exc).__name__}: {str(exc)[:200]}"}
+
     # init .brain/ in the workspace sandbox
     from pathlib import Path
     sandbox = Path(ws["sandbox_path"])
     sandbox.mkdir(parents=True, exist_ok=True)
-    bp = _brain.init_brain(sandbox, c)
+    try:
+        bp = _brain.init_brain(sandbox, c)
+    except Exception as exc:
+        try:
+            import debug_log
+            debug_log.derror("conscious", "_create_conscious",
+                             f"init_brain failed: {exc}")
+        except Exception:
+            pass
+        bp = sandbox / ".brain"  # fallback path
 
-    # spawn orchestrator agent (Phase 1: DB row only, no worktree)
+    # spawn orchestrator agent
     orch_model = str(body.get("orchestrator_model", "")).strip()
     if not orch_model:
-        # default to claude-opus if claude tier available, else open default
         try:
             import agent_sessions
             tier = agent_sessions.agent_tier()
             if tier == "claude":
                 orch_model = "claude-opus-4-8"
-            elif tier == "open":
+            elif tier in ("open", "zai"):
                 models = agent_sessions.agent_models()
-                orch_model = models[0]["model"] if models else "groq/llama-3.3-70b-versatile"
+                orch_model = models[0]["model"] if models else "glm-5.2-free"
             else:
-                orch_model = "claude-opus-4-8"  # placeholder; Phase 2 picks real
+                orch_model = "glm-5.2-free"  # default to free GLM
         except Exception:
-            orch_model = "claude-opus-4-8"
-    tier = "claude" if orch_model.startswith("claude") else "open"
-    agent = conscious_db.spawn_agent(
-        conscious_id=c["id"], role="orchestrator", model=orch_model, tier=tier,
-        is_orchestrator=True, subscribed_events=["proposal.*", "task.*", "drawer.*", "message.*"])
-    conscious_db.set_orchestrator(c["id"], agent["id"])
+            orch_model = "glm-5.2-free"
+    tier = "claude" if orch_model.startswith("claude") else ("zai" if "glm" in orch_model else "open")
+    try:
+        agent = conscious_db.spawn_agent(
+            conscious_id=c["id"], role="orchestrator", model=orch_model, tier=tier,
+            is_orchestrator=True, subscribed_events=["proposal.*", "task.*", "drawer.*", "message.*"])
+        conscious_db.set_orchestrator(c["id"], agent["id"])
+    except Exception as exc:
+        try:
+            import debug_log
+            debug_log.derror("conscious", "_create_conscious",
+                             f"spawn_agent/set_orchestrator failed: {exc}")
+        except Exception:
+            pass
+        # Don't fail the whole request — the conscious was created, just without
+        # an orchestrator. The user can spawn agents manually.
     c = conscious_db.get_conscious(c["id"]) or {}
 
     # regenerate CONSCIOUS.md with the orchestrator
     agents = conscious_db.list_agents(c["id"])
-    _brain.regenerate_conscious_md(bp, c, agents, [], [], [])
+    try:
+        _brain.regenerate_conscious_md(bp, c, agents, [], [], [])
+    except Exception:
+        pass  # non-critical
     return 201, {"conscious": c, "brain_path": str(bp)}
 
 
 def _list_conscious(workspace_id: str, user_id: str | None) -> tuple[int, dict]:
-    """List conscious instances. Playground mode (user_id=None) lists
-    playground conscious only. Authenticated mode lists the user's workspace."""
-    if user_id is None:
-        # Playground mode: list playground conscious
-        workspace_id = "conscious-playground"
-    else:
-        if not workspace_id:
-            return 400, {"error": "workspace_id query param is required"}
-        ws = _dbmod.get_workspace(workspace_id)
-        if not ws or ws["user_id"] != user_id:
-            return 403, {"error": "not your workspace"}
+    # Phase 6: if no user_id, use default
+    if not user_id:
+        user_id = _ensure_default_user()
+    if not workspace_id:
+        workspace_id = "conscious-default-workspace"
+    ws = _dbmod.get_workspace(workspace_id)
+    if not ws:
+        # auto-create if it's the default
+        if workspace_id == "conscious-default-workspace":
+            _ensure_default_user()
+            ws = _dbmod.get_workspace(workspace_id)
+        if not ws:
+            return 200, {"conscious": []}  # empty list, not an error
+    if ws["user_id"] != user_id:
+        return 403, {"error": "not your workspace"}
     items = conscious_db.list_conscious(workspace_id)
     return 200, {"conscious": items}
 
@@ -368,8 +398,8 @@ def _route_agents(method: str, cid: str, sub: str, body: dict,
         tier = str(body.get("tier", "")).strip()
         if not role or not model or not tier:
             return 400, {"error": "role, model, tier are required"}
-        if tier not in ("claude", "open", "zai"):
-            return 400, {"error": "tier must be 'claude', 'open', or 'zai'"}
+        if tier not in ("claude", "open"):
+            return 400, {"error": "tier must be 'claude' or 'open'"}
         parent = body.get("parent_agent_id") or None
         agent = conscious_db.spawn_agent(
             conscious_id=cid, role=role, model=model, tier=tier,

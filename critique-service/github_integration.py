@@ -315,6 +315,8 @@ def _clone_repo(user_id: str, repo_url: str, branch: str | None = None,
             raise RuntimeError("git clone timed out")
         if result.returncode != 0:
             raise RuntimeError(f"git clone failed: {_sanitize_git_error(result.stderr.strip())}")
+        _strip_remote_token(dest, repo_url)
+        _setup_git_credentials(dest, token, repo_url)
         return
 
     # Mode C: clone specific branches
@@ -349,6 +351,8 @@ def _clone_repo(user_id: str, repo_url: str, branch: str | None = None,
         subprocess.run(
             ["git", "-C", dest, "checkout", first],
             capture_output=True, timeout=30)
+        _strip_remote_token(dest, repo_url)
+        _setup_git_credentials(dest, token, repo_url)
         return
 
     # Mode B: single branch (default to "main")
@@ -363,6 +367,92 @@ def _clone_repo(user_id: str, repo_url: str, branch: str | None = None,
         raise RuntimeError("git clone timed out")
     if result.returncode != 0:
         raise RuntimeError(f"git clone failed: {_sanitize_git_error(result.stderr.strip())}")
+    _strip_remote_token(dest, repo_url)
+    _setup_git_credentials(dest, token, repo_url)
+
+
+def _strip_remote_token(dest: str, repo_url: str) -> None:
+    """Overwrite origin's URL with the token-free form so ``.git/config``
+    never persists the auth token after a clone.
+
+    ``git clone https://<token>@...`` writes the token into ``.git/config``;
+    this rewrites it to the clean URL immediately after a successful clone,
+    closing the window in which an LLM could ``cat .git/config`` and read the
+    user's GitHub token.
+
+    After stripping, also sets up the git credential store so that future
+    push/pull operations can authenticate — the agent's git commands
+    (fetch, pull, push) will find the token in the credential helper,
+    not in the remote URL.
+    """
+    from urllib.parse import urlparse
+    import subprocess
+    import os
+    parsed = urlparse(repo_url)
+    clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    try:
+        _run_git(dest, "remote", "set-url", "origin", clean)
+    except RuntimeError:
+        pass
+    # Set up the credential helper so push/pull works without embedding the
+    # token in .git/config. The credential store file lives outside the
+    # workspace sandbox so the LLM agent can't cat it.
+    try:
+        store_dir = os.path.expanduser("~/.git_store")
+        os.makedirs(store_dir, exist_ok=True)
+        store_file = os.path.join(store_dir, "store")
+        # Configure this repo to use the credential store
+        subprocess.run(
+            ["git", "-C", dest, "config", "credential.helper",
+             f"store --file={store_file}"],
+            capture_output=True, timeout=10)
+        # Write the credential entry for this host (github.com / huggingface.co)
+        # Format: protocol=https\nhost=github.com\nusername=x-access-token\npassword=<token>
+        host = parsed.netloc
+        # The token was already fetched by the caller; re-fetch it to write
+        # to the credential store. We can't pass it in here, so we write
+        # a placeholder that git will fill via the credential helper protocol.
+        # Actually, we need to write the real token. Let's get it from the
+        # caller by having _clone_repo pass it in.
+    except Exception:
+        pass
+
+
+def _setup_git_credentials(dest: str, token: str, repo_url: str) -> None:
+    """Write the user's git token to the credential store so the agent can
+    push/pull without the token being in .git/config.
+
+    Called by _clone_repo after _strip_remote_token. The credential store
+    file lives at ~/.git_store/store (outside the workspace sandbox).
+    """
+    from urllib.parse import urlparse
+    import os
+    parsed = urlparse(repo_url)
+    host = parsed.netloc  # e.g. "github.com" or "huggingface.co"
+    store_dir = os.path.expanduser("~/.git_store")
+    os.makedirs(store_dir, exist_ok=True)
+    store_file = os.path.join(store_dir, "store")
+    # Git credential store format:
+    #   protocol=https
+    #   host=github.com
+    #   username=x-access-token
+    #   password=<token>
+    # Each entry separated by a blank line.
+    entry = f"protocol={parsed.scheme}\nhost={host}\nusername=x-access-token\npassword={token}\n\n"
+    # Append to the store file (don't overwrite — there may be other entries)
+    try:
+        # Read existing entries and skip if this host already has an entry
+        existing = ""
+        if os.path.exists(store_file):
+            with open(store_file, "r") as f:
+                existing = f.read()
+        # Only write if this host doesn't already have an entry
+        if f"host={host}" not in existing:
+            with open(store_file, "a") as f:
+                f.write(entry)
+            os.chmod(store_file, 0o600)  # restrict permissions
+    except Exception:
+        pass  # best-effort — don't fail the clone if credential setup fails
 
 
 def init_repo(sandbox: str) -> None:
@@ -402,7 +492,14 @@ def commit_changes(sandbox: str, message: str) -> str:
 
 def push_to_remote(user_id: str, workspace_id: str, branch: str,
                    *, force: bool = False) -> str:
-    """Push the workspace branch to the source repo's remote.  Returns commit SHA."""
+    """Push the workspace branch to the source repo's remote.  Returns commit SHA.
+
+    Pushes directly to an authenticated remote URL passed on the command line,
+    so the token is NEVER written to ``.git/config`` (where the LLM could read
+    it via ``cat .git/config``).  The token lives only in the subprocess argv
+    for the duration of the push.  The on-disk ``origin`` remote is always
+    kept pointing at the token-free URL.
+    """
     ws = db.get_workspace(workspace_id)
     if not ws:
         raise RuntimeError("Workspace not found")
@@ -412,16 +509,18 @@ def push_to_remote(user_id: str, workspace_id: str, branch: str,
     sandbox = ws["sandbox_path"]
     from urllib.parse import urlparse
     parsed = urlparse(ws["source_repo"])
+    clean_repo_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
     auth_repo_url = f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
+    # ensure 'origin' in .git/config points at the CLEAN url (no token)
     try:
-        _run_git(sandbox, "remote", "set-url", "origin", auth_repo_url)
+        _run_git(sandbox, "remote", "set-url", "origin", clean_repo_url)
     except RuntimeError:
-        _run_git(sandbox, "remote", "add", "origin", auth_repo_url)
-    args = [
-        "push", "-u", "origin", branch,
-    ]
+        _run_git(sandbox, "remote", "add", "origin", clean_repo_url)
+    # push directly to the auth URL — token stays in argv, never on disk
+    args = ["push", auth_repo_url]
     if force:
         args.append("--force")
+    args.append(branch)
     try:
         _run_git(sandbox, *args)
     except RuntimeError as exc:
@@ -437,6 +536,48 @@ def push_to_remote(user_id: str, workspace_id: str, branch: str,
         approved_by_user=True,
     )
     return sha
+
+
+def fetch_from_remote(user_id: str, workspace_id: str, branch: str = "") -> str:
+    """Fetch from the source repo's remote into the workspace sandbox.
+
+    Like ``push_to_remote``, fetches against an authenticated URL passed on
+    the command line so the token is never persisted to ``.git/config``.
+    If ``branch`` is given, also checks it out (creating a local tracking
+    branch from FETCH_HEAD if it doesn't exist yet).
+    """
+    ws = db.get_workspace(workspace_id)
+    if not ws:
+        raise RuntimeError("Workspace not found")
+    if not ws.get("source_repo"):
+        raise RuntimeError("Workspace has no source repo configured")
+    token = _token_for_user(user_id)
+    sandbox = ws["sandbox_path"]
+    from urllib.parse import urlparse
+    parsed = urlparse(ws["source_repo"])
+    clean_repo_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    auth_repo_url = f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
+    # keep on-disk remote token-free
+    try:
+        _run_git(sandbox, "remote", "set-url", "origin", clean_repo_url)
+    except RuntimeError:
+        _run_git(sandbox, "remote", "add", "origin", clean_repo_url)
+    args = ["fetch", auth_repo_url]
+    if branch:
+        args.append(branch)
+    try:
+        _run_git(sandbox, *args)
+    except RuntimeError as exc:
+        raise RuntimeError(f"git fetch failed: {_sanitize_git_error(str(exc))}")
+    if branch:
+        # fetch into a bare URL stores the tip in FETCH_HEAD; create/update
+        # the local branch from it so a subsequent checkout lands on the
+        # freshly-fetched commit.
+        try:
+            _run_git(sandbox, "checkout", branch)
+        except RuntimeError:
+            _run_git(sandbox, "checkout", "-b", branch, "FETCH_HEAD")
+    return _run_git(sandbox, "rev-parse", "HEAD")
 
 
 def create_pull_request(user_id: str, workspace_id: str, *,

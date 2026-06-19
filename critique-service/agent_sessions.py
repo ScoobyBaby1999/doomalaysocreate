@@ -35,6 +35,34 @@ import time
 import uuid
 from pathlib import Path
 
+# --- debug_log: robust import with no-op fallback --------------------------
+# debug_log.py may be missing from the deployment (e.g. not pushed to the repo,
+# or the working directory doesn't include it in sys.path). If the import fails,
+# create a no-op dummy so the code doesn't crash — logging is best-effort.
+try:
+    import debug_log  # noqa: F401 — tries the real module first
+except ImportError:
+    class _NoOpDebugLog:
+        """No-op fallback when debug_log.py is not available.
+        All methods are fire-and-forget no-ops so logging never breaks anything."""
+        @staticmethod
+        def dlog(*a, **kw): pass
+        @staticmethod
+        def derror(*a, **kw): pass
+        @staticmethod
+        def dtimed(*a, **kw):
+            def deco(fn): return fn
+            return deco
+        @staticmethod
+        def log_startup_env(): pass
+        @staticmethod
+        def get_recent_logs(*a, **kw): return []
+        @staticmethod
+        def list_log_categories(*a, **kw): return {}
+        @staticmethod
+        def clear_logs(*a, **kw): return {}
+    debug_log = _NoOpDebugLog()  # type: ignore[assignment]
+
 AGENT_ROOT = Path(os.environ.get("AGENT_ROOT", "/tmp/agent"))
 SESSION_TTL_S = int(os.environ.get("AGENT_SESSION_TTL_S", "7200"))   # 2h idle
 MAX_SESSIONS = int(os.environ.get("AGENT_MAX_SESSIONS", "8"))        # RAM bound
@@ -293,7 +321,7 @@ def _glm_native_available() -> bool:
     """True if ANY provider env var is set (Python-native call path is usable)."""
     available = any(os.environ.get(p["env"], "").strip() for p in _GLM_PROVIDERS)
     try:
-        import debug_log
+        pass  # debug_log already imported at module level
         providers_set = [p["name"] for p in _GLM_PROVIDERS
                          if os.environ.get(p["env"], "").strip()]
         debug_log.dlog("glm", "_glm_native_available",
@@ -312,7 +340,7 @@ def _glm_call_native(messages: list[dict], model: str, timeout: float) -> str:
     import urllib.request
     import urllib.error
     import json as _json
-    import debug_log
+    pass  # debug_log already imported at module level
     # Normalize the model name: the agent panel sends "glm-5.2-free" but the
     # provider config checks against ["glm-5.2", "glm-5.1"]. Strip suffixes
     # like "-free", "-paid", etc. so the model matches the provider's list.
@@ -452,7 +480,7 @@ class ZaiAdapter(BaseAdapter):
         self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
         self.messages: list[dict] = []
         try:
-            import debug_log
+            pass  # debug_log already imported at module level
             debug_log.dlog("agent", "ZaiAdapter.__init__",
                            f"created adapter model={self.model}",
                            data={"model": self.model, "workspace_id": workspace_id})
@@ -462,7 +490,7 @@ class ZaiAdapter(BaseAdapter):
     def open(self) -> None:
         self.messages = [{"role": "system", "content": self.system_prompt}]
         try:
-            import debug_log
+            pass  # debug_log already imported at module level
             debug_log.dlog("agent", "ZaiAdapter.open", "adapter opened",
                            data={"model": self.model, "system_prompt_len": len(self.system_prompt)})
         except Exception:
@@ -470,7 +498,7 @@ class ZaiAdapter(BaseAdapter):
 
     def turn(self, user_msg: str, emit) -> None:
         import json as _json
-        import debug_log
+        pass  # debug_log already imported at module level
         self.messages.append({"role": "user", "content": user_msg})
         content = ""
         errors: list[str] = []

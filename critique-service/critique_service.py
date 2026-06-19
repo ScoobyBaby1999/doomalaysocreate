@@ -768,9 +768,17 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _wants_jwt() -> bool:
-        """Phase 6: JWT is now OPTIONAL. The conscious system works without
-        GitHub auth (like the chat panel) using a default workspace/user."""
-        return False
+        """JWT is OPTIONAL but PREFERRED. If the user has a GitHub/HF session
+        (X-JWT header or JWT-shaped Authorization bearer), use it — this gives
+        them their own conscious workspace tied to their identity. If no JWT,
+        the conscious system falls back to the default user/workspace.
+
+        Previously this was hardcoded `return False`, which forced EVERYONE
+        through the default-user path — causing IntegrityError when the default
+        user couldn't be created (the _ensure_default_user helper silently
+        swallowed the failure and returned a phantom user_id that didn't exist
+        in the DB, violating the FK on conscious.owner_user_id)."""
+        return True
 
     def _read_json_body_optional(self) -> dict | None:
         """Like _read_json_body but returns {} for empty body (used by PATCH)."""
