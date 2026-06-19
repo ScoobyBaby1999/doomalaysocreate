@@ -857,21 +857,6 @@ class Handler(BaseHTTPRequestHandler):
         return  # telemetry goes through oplog; suppress the stderr access log spam
 
     def do_GET(self) -> None:
-        try:
-            self._do_GET()
-        except Exception as exc:  # noqa: BLE001 — last-resort guard so a bug
-            # in any handler never leaves the connection hanging or crashes
-            # the worker thread. Without this, a NameError (like the
-            # _check_session bug) turns a clean 401 into an HTTP 500 that
-            # surfaces to the user as "internal error" with no route context.
-            try:
-                log_event("do_GET_unhandled", path=self.path,
-                          error=repr(exc)[:300])
-                self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
-            except Exception:
-                pass  # connection may already be closed
-
-    def _do_GET(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
@@ -1032,6 +1017,30 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"tier": agent_sessions.agent_tier(),
                                   "models": agent_sessions.agent_models()})
             return
+        if route == "/api/provider-keys/status":
+            # Returns which provider API keys are set as env vars on this Space.
+            # Used by the frontend SettingsScreen to show the visual indicator
+            # (green dot = key set, gray dot = key not set). Does NOT expose
+            # key values — just boolean presence. Bearer-gated like /agent/models.
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            _KEY_NAMES = [
+                "ANTHROPIC_API_KEY", "MOONSHOT_API_KEY", "OPENROUTER_API_KEY",
+                "CEREBRAS_API_KEY", "ZAI_API_KEY", "GEMINI_API_KEY",
+                "GOOGLE_API_KEY", "NVIDIA_API_KEY", "GITHUB_TOKEN",
+                "CF_API_TOKEN", "CF_ACCOUNT_ID", "TAVILY_API_KEY",
+                "PUTER_API_TOKEN", "SILICONFLOW_API_KEY",
+            ]
+            status = {}
+            for key in _KEY_NAMES:
+                val = os.environ.get(key, "").strip()
+                status[key] = {
+                    "set": bool(val),
+                    "preview": (val[:4] + "..." + val[-4:]) if len(val) > 12 else ("<set>" if val else ""),
+                }
+            self._send_json(200, {"keys": status})
+            return
         if route.startswith("/api/agent/"):
             #   transcript polling + artifact access share the service bearer token.
             if not self._auth_ok():
@@ -1102,6 +1111,10 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/api/auth/push-requests/"):
             req_id = route[len("/api/auth/push-requests/"):]
             self._handle_push_request_status(req_id)
+            return
+        # --- Debug log viewer (gated by rotation token or DEBUG_TOKEN) --------
+        if route == "/api/debug/logs" or route == "/api/debug/categories" or route == "/api/debug/clear":
+            self._handle_debug(route)
             return
         # -----------------------------------------------------------------------
         if not route.startswith("/api") and self._serve_static(urlsplit(self.path).path):
@@ -1437,32 +1450,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_ok(self) -> bool:
         """Check if the request is authenticated via EITHER:
-        - Rotation token / static token in Authorization header, OR
-        - Valid session cookie (if _check_session is implemented).
-
-        The cookie-session path is optional — if _check_session isn't
-        defined (it was a stub that was never wired up), we skip it
-        gracefully instead of crashing with a NameError that turns a
-        clean 401 into an HTTP 500. This was the root cause of the
-        "500 replaced the 401" bug: when the rotation token didn't match
-        (e.g. client/server window mismatch during an upgrade), _token_ok
-        returned False, then _check_session threw NameError → 500.
-        """
+        - Rotation token in Authorization header, OR
+        - Valid session cookie.
+        Use this instead of _token_ok() directly — it covers both auth paths."""
         if _token_ok(self.headers.get("Authorization")):
             return True
-        # Cookie-session auth is optional. Look up _check_session dynamically
-        # so a missing definition never crashes the auth gate.
         cookie_header = self.headers.get("Cookie")
-        if cookie_header:
-            checker = globals().get("_check_session")
-            if callable(checker):
-                try:
-                    session_user_id, _ = checker(cookie_header)
-                    if session_user_id:
-                        return True
-                except Exception:
-                    pass  # don't let a broken cookie check crash the gate
-        return False
+        session_user_id, _ = _check_session(cookie_header)
+        return session_user_id is not None
 
     @staticmethod
     def _valid_panel(p) -> bool:
@@ -1511,18 +1506,46 @@ class Handler(BaseHTTPRequestHandler):
         repo = str(payload.get("repo", "")).strip()
         key_name = str(payload.get("key_name", "")).strip()
         key_value = str(payload.get("key_value", "")).strip()
-        if not all([oauth_token, repo, key_name, key_value]):
-            self._send_json(400, {"error": "oauth_token, repo, key_name, key_value all required"})
-            return
         # allowlist of safe provider keys (never allow setting auth secrets on the gateway)
         _ALLOWED = {
-            "NVIDIA_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
+            "NVIDIA_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
             "OPENROUTER_API_KEY", "CEREBRAS_API_KEY", "GITHUB_TOKEN",
             "CF_API_TOKEN", "CF_ACCOUNT_ID", "ZAI_API_KEY", "MOONSHOT_API_KEY",
             "TAVILY_API_KEY", "ANTHROPIC_API_KEY",
+            "PUTER_API_TOKEN", "SILICONFLOW_API_KEY",
         }
         if key_name not in _ALLOWED:
             self._send_json(400, {"error": f"key_name not allowed (must be one of {sorted(_ALLOWED)})"})
+            return
+        # --- Auth path 1: explicit oauth_token (onboarding wizard flow) -------
+        # --- Auth path 2: JWT auth → look up stored HF token (settings screen) -
+        if not oauth_token:
+            # No explicit oauth_token — try JWT auth. The settings screen uses
+            # this path: it sends the JWT in X-JWT, and we look up the user's
+            # stored HF token to set secrets on their Space.
+            user_id = self._require_user_from_jwt()
+            if not user_id:
+                return  # _require_user_from_jwt already sent 403
+            user = db.get_user(user_id)
+            if not user or not user.get("hf_token_encrypted"):
+                self._send_json(403, {"error": "No HF token linked — sign in with HuggingFace first"})
+                return
+            try:
+                import crypto as _crypto
+                oauth_token = _crypto.decrypt_token(user["hf_token_encrypted"])
+            except Exception as exc:
+                self._send_json(500, {"error": f"failed to decrypt HF token: {type(exc).__name__}"})
+                return
+            # Derive the repo from the HF username if not provided
+            if not repo:
+                hf_username = user.get("hf_username") or user.get("github_username") or ""
+                if hf_username:
+                    repo = f"{hf_username}/loom"
+            if not repo:
+                self._send_json(400, {"error": "repo required (couldn't derive from your HF username)"})
+                return
+        if not all([oauth_token, repo, key_name, key_value]):
+            self._send_json(400, {"error": "oauth_token (or JWT), repo, key_name, key_value all required"})
             return
         # verify the oauth token belongs to the repo owner
         try:
@@ -2279,18 +2302,43 @@ class Handler(BaseHTTPRequestHandler):
             page=page, per_page=per_page, sort=sort, search=search)
         self._send_json(200, result)
 
-    def do_POST(self) -> None:
-        try:
-            self._do_POST()
-        except Exception as exc:  # noqa: BLE001 — last-resort guard (same as do_GET)
-            try:
-                log_event("do_POST_unhandled", path=self.path,
-                          error=repr(exc)[:300])
-                self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
-            except Exception:
-                pass
+    def _handle_debug(self, route: str) -> None:
+        """Debug log viewer — gated by the rotation token OR DEBUG_TOKEN env var.
+        GET /api/debug/logs?cat=glm&tail=50&level=ERROR → recent log entries
+        GET /api/debug/categories → list log files + sizes
+        GET /api/debug/clear?cat=glm → clear a log file
+        Also accessible without auth if NO rotation secret is set (dev mode).
+        """
+        # Auth: require rotation token OR DEBUG_TOKEN (unless no auth configured)
+        debug_token = os.environ.get("DEBUG_TOKEN", "").strip()
+        authed = False
+        if not _auth_configured():
+            authed = True  # dev mode — no secret set
+        elif self._auth_ok():
+            authed = True
+        elif debug_token and self.headers.get("Authorization", "").endswith(debug_token):
+            authed = True
+        if not authed:
+            self._send_json(401, {"error": "debug endpoint requires auth token"})
+            return
+        from urllib.parse import parse_qs, urlsplit
+        import debug_log
+        qs = parse_qs(urlsplit(self.path).query)
+        if route == "/api/debug/categories":
+            self._send_json(200, debug_log.list_log_categories())
+            return
+        if route == "/api/debug/clear":
+            cat = qs.get("cat", [None])[0]
+            self._send_json(200, debug_log.clear_logs(cat))
+            return
+        # default: /api/debug/logs
+        cat = qs.get("cat", [None])[0]
+        tail = int(qs.get("tail", ["50"])[0])
+        level = qs.get("level", [None])[0]
+        logs = debug_log.get_recent_logs(category=cat, tail=tail, level=level)
+        self._send_json(200, {"count": len(logs), "logs": logs})
 
-    def _do_POST(self) -> None:
+    def do_POST(self) -> None:
         route = self.path.rstrip("/")
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
@@ -2416,17 +2464,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(201, {"saved": summary})
 
     def do_DELETE(self) -> None:
-        try:
-            self._do_DELETE()
-        except Exception as exc:  # noqa: BLE001 — last-resort guard (same as do_GET)
-            try:
-                log_event("do_DELETE_unhandled", path=self.path,
-                          error=repr(exc)[:300])
-                self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
-            except Exception:
-                pass
-
-    def _do_DELETE(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
@@ -2658,6 +2695,14 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 def main() -> int:
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", os.environ.get("APP_PORT", "7860")))
+
+    # Log all env var presence at startup so the user can verify their Space
+    # Secrets are detected (PUTER_API_TOKEN, ZAI_API_KEY, etc.)
+    try:
+        import debug_log
+        debug_log.log_startup_env()
+    except Exception:
+        pass
 
     panel = Panel()
     if not panel.providers:
