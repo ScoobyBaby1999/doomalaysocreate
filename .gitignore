@@ -11,3 +11,12 @@ tsconfig.tsbuildinfo
 __pycache__
 *.pyc
 *.pyo
+critique-service/data/
+app/
+.rotation_secret
+*.db
+mini-services/glm-bridge/.z-ai-config
+mini-services/glm-bridge/.z-ai-config.*.example
+!mini-services/glm-bridge/.z-ai-config.example
+!mini-services/glm-bridge/.z-ai-config.bigmodel.example
+mini-services/glm-bridge/node_modules/
