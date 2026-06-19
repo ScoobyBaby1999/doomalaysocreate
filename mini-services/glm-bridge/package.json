@@ -7,7 +7,6 @@
     "start": "node index.ts"
   },
   "dependencies": {
-    "@heyputer/puter.js": "^2.5.4",
     "z-ai-web-dev-sdk": "latest"
   }
 }
