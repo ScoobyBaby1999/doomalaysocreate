@@ -185,12 +185,29 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
         workspace_id = "conscious-default-workspace"
     ws = _dbmod.get_workspace(workspace_id)
     if not ws:
-        # auto-create the workspace if it doesn't exist
-        if workspace_id == "conscious-default-workspace":
-            uid = _ensure_default_user()
-            if not uid:
-                return 500, {"error": "Failed to create default workspace."}
+        # Auto-create the workspace if it doesn't exist.
+        # Previously this ONLY auto-created "conscious-default-workspace" — any
+        # other workspace_id (like "user-c7bb05356541d765" derived from the JWT)
+        # got a 404. Now we auto-create ANY workspace for the authenticated user.
+        try:
+            import os as _os
+            sandbox_root = _os.environ.get("LOOM_SANDBOX_ROOT", "/tmp/loom-sandboxes")
+            sandbox_path = f"{sandbox_root}/{workspace_id}"
+            _os.makedirs(sandbox_path, exist_ok=True)
+            _dbmod.create_workspace(
+                user_id,
+                title=f"Conscious Workspace ({workspace_id})",
+                sandbox_path=sandbox_path,
+                workspace_id=workspace_id,  # use the exact ID the client sent
+            )
             ws = _dbmod.get_workspace(workspace_id)
+        except Exception as exc:
+            try:
+                import debug_log
+                debug_log.derror("conscious", "_create_conscious",
+                                 f"failed to auto-create workspace '{workspace_id}': {exc}")
+            except Exception:
+                pass
         if not ws:
             return 404, {"error": f"workspace '{workspace_id}' not found and could not be created"}
     # Ownership check: skip if using the default user/workspace (they always match)

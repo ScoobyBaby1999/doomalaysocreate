@@ -37,29 +37,10 @@ def _db() -> sqlite3.Connection:
 def init_db() -> None:
     """Create tables if they don't exist.  Runs migrations for existing tables."""
     db = _db()
-    try:
-        db.executescript(SCHEMA)
-        db.commit()
-    except Exception as exc:
-        # If the bulk executescript fails (e.g., a syntax error in one table
-        # definition on an older DB), try creating each table individually
-        # so one failure doesn't block all tables.
-        print(f"[db] init_db executescript failed, trying individual: {exc}", flush=True)
-        for stmt in SCHEMA.split(";"):
-            stmt = stmt.strip()
-            if stmt and not stmt.startswith("--"):
-                try:
-                    db.execute(stmt)
-                except Exception:
-                    pass  # table/column already exists or syntax issue — skip
-        db.commit()
+    db.executescript(SCHEMA)
+    db.commit()
     # schema migrations for existing databases
     _migrate(db)
-    # cleanup expired sessions on boot
-    try:
-        cleanup_expired_sessions()
-    except Exception:
-        pass
 
 
 def _migrate(db: sqlite3.Connection) -> None:
@@ -82,43 +63,6 @@ def _migrate(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE conscious ADD COLUMN last_synced_at TEXT")
     except sqlite3.OperationalError:
         pass
-    # Tier 3 Phase 6 — the conscious_agent table has a CHECK constraint on tier
-    # that only allows ('claude','open'). We need to add 'zai'. SQLite can't
-    # ALTER a CHECK constraint, so we rebuild the table. We do this unconditionally
-    # (it's idempotent — if the table already has 'zai' in the constraint, the
-    # rebuild is a no-op that preserves all data).
-    try:
-        # Get the SQL used to create the table — check if 'zai' is in the constraint
-        sql_row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='conscious_agent'").fetchone()
-        if sql_row and sql_row[0] and "'zai'" not in sql_row[0]:
-            # Old constraint — rebuild the table
-            db.execute("PRAGMA foreign_keys=OFF")
-            db.execute("ALTER TABLE conscious_agent RENAME TO conscious_agent_old_zai")
-            db.execute("""CREATE TABLE conscious_agent (
-                id                TEXT PRIMARY KEY,
-                conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
-                role              TEXT NOT NULL,
-                model             TEXT NOT NULL,
-                tier              TEXT NOT NULL CHECK (tier IN ('claude','open','zai')),
-                status            TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running','waiting','done','failed')),
-                worktree_path     TEXT,
-                branch            TEXT,
-                parent_agent_id   TEXT REFERENCES conscious_agent(id),
-                subscribed_events TEXT NOT NULL DEFAULT '[]',
-                is_orchestrator   INTEGER NOT NULL DEFAULT 0,
-                created_at        TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
-            )""")
-            db.execute("INSERT INTO conscious_agent SELECT * FROM conscious_agent_old_zai")
-            db.execute("DROP TABLE conscious_agent_old_zai")
-            db.execute("PRAGMA foreign_keys=ON")
-            print("[db] migrated conscious_agent table to support 'zai' tier", flush=True)
-    except Exception as exc:
-        print(f"[db] conscious_agent migration (zai tier) skipped: {exc}", flush=True)
-        try:
-            db.execute("PRAGMA foreign_keys=ON")
-        except:
-            pass
     db.commit()
 
 
@@ -187,23 +131,6 @@ CREATE INDEX IF NOT EXISTS idx_workspaces_user ON workspaces(user_id);
 CREATE INDEX IF NOT EXISTS idx_push_logs_workspace ON push_logs(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_registry_indexed ON registry(indexed_at);
 
--- Server-side sessions (Fix 7 + server-side sessions phase)
--- Replaces localStorage JWT storage with HttpOnly cookie + server-side session.
--- The jwt_payload_json stores the full JWT payload (including encrypted
--- GitHub/HF tokens) so the backend can reconstruct user identity without
--- the JWT ever touching the client after the one-time exchange.
-CREATE TABLE IF NOT EXISTS sessions (
-    id              TEXT PRIMARY KEY,               -- session_id (random, not the JWT)
-    user_id         TEXT NOT NULL REFERENCES users(id),
-    jwt_payload     TEXT NOT NULL,                  -- JSON: the full JWT payload (encrypted tokens inside)
-    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at      TEXT NOT NULL,                  -- 7 days from creation
-    revoked         INTEGER NOT NULL DEFAULT 0,     -- 1 = revoked (logout)
-    last_used_at    TEXT                            -- updated on each request (for idle timeout)
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at, revoked);
-
 -- ===========================================================================
 -- Tier 3 — Conscious: Multi-Agent Shared-Brain Architecture (Phase 1)
 -- 7 new tables, all prefixed conscious_. See TIER3_PLAN.md §9 for the spec.
@@ -238,7 +165,7 @@ CREATE TABLE IF NOT EXISTS conscious_agent (
     conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
     role              TEXT NOT NULL,
     model             TEXT NOT NULL,
-    tier              TEXT NOT NULL CHECK (tier IN ('claude','open','zai')),
+    tier              TEXT NOT NULL CHECK (tier IN ('claude','open')),
     status            TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running','waiting','done','failed')),
     worktree_path     TEXT,
     branch            TEXT,
@@ -456,9 +383,13 @@ def create_workspace(user_id: str, *, title: str, source_repo: str | None = None
                      source_branches: list[str] | None = None,
                      visibility: str = "private",
                      description: str = "", auto_sync: bool = False,
-                     sandbox_path: str = "", hf_space_id: str | None = None) -> dict:
+                     sandbox_path: str = "", hf_space_id: str | None = None,
+                     workspace_id: str | None = None) -> dict:
     db = _db()
-    wid = _gen_id()
+    # Use the provided workspace_id, or generate a random one. The conscious
+    # system passes a specific ID (e.g. "user-c7bb05356541d765") so the
+    # workspace is stable across sessions and tied to the user's identity.
+    wid = workspace_id or _gen_id()
     now = _iso_now()
     branches_json = json.dumps(source_branches) if source_branches else None
     with _write_lock:
@@ -610,106 +541,3 @@ def list_public_workspaces(*, page: int = 1, per_page: int = 20,
 
 def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-# ---------------------------------------------------------------------------
-# Server-side sessions (Fix 7 + server-side sessions phase)
-# ---------------------------------------------------------------------------
-
-SESSION_DURATION_DAYS = 7
-SESSION_IDLE_TIMEOUT_HOURS = 48  # session expires if not used for 48 hours
-
-def create_session(user_id: str, jwt_payload: dict) -> dict:
-    """Create a new server-side session. Returns the session row.
-    The jwt_payload is stored as JSON (contains encrypted provider tokens)."""
-    import secrets as _secrets
-    import json as _json
-    sid = _secrets.token_urlsafe(32)
-    now = _iso_now()
-    # compute expiry: 7 days from now
-    import time as _time
-    from datetime import datetime, timezone, timedelta
-    exp_dt = datetime.now(timezone.utc) + timedelta(days=SESSION_DURATION_DAYS)
-    expires_at = exp_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    with _write_lock:
-        _db().execute(
-            "INSERT INTO sessions (id, user_id, jwt_payload, created_at, "
-            "expires_at, revoked, last_used_at) VALUES (?,?,?,?,?,?,?)",
-            (sid, user_id, _json.dumps(jwt_payload), now, expires_at, 0, now))
-        _db().commit()
-    return get_session(sid) or {}
-
-
-def get_session(session_id: str) -> dict | None:
-    """Get a session by ID. Returns None if not found, expired, or revoked.
-    Also checks the idle timeout (last_used_at must be within 48 hours)."""
-    import json as _json
-    row = _db().execute(
-        "SELECT * FROM sessions WHERE id = ? AND revoked = 0",
-        (session_id,)).fetchone()
-    if not row:
-        return None
-    s = dict(row)
-    # check absolute expiry
-    import time as _time
-    try:
-        exp = _time.mktime(_time.strptime(s["expires_at"], "%Y-%m-%dT%H:%M:%SZ"))
-        if _time.time() > exp:
-            return None
-    except Exception:
-        return None
-    # check idle timeout
-    if s.get("last_used_at"):
-        try:
-            last = _time.mktime(_time.strptime(s["last_used_at"], "%Y-%m-%dT%H:%M:%SZ"))
-            if _time.time() - last > SESSION_IDLE_TIMEOUT_HOURS * 3600:
-                return None
-        except Exception:
-            pass
-    # parse the JWT payload
-    try:
-        s["payload"] = _json.loads(s["jwt_payload"])
-    except Exception:
-        s["payload"] = {}
-    return s
-
-
-def touch_session(session_id: str) -> None:
-    """Update last_used_at to now (called on every authenticated request)."""
-    with _write_lock:
-        _db().execute(
-            "UPDATE sessions SET last_used_at = ? WHERE id = ?",
-            (_iso_now(), session_id))
-        _db().commit()
-
-
-def revoke_session(session_id: str) -> None:
-    """Revoke a session (logout)."""
-    with _write_lock:
-        _db().execute(
-            "UPDATE sessions SET revoked = 1 WHERE id = ?",
-            (session_id,))
-        _db().commit()
-
-
-def revoke_all_user_sessions(user_id: str) -> int:
-    """Revoke all sessions for a user (e.g., password change, security incident).
-    Returns the number of sessions revoked."""
-    with _write_lock:
-        cur = _db().execute(
-            "UPDATE sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0",
-            (user_id,))
-        _db().commit()
-        return cur.rowcount
-
-
-def cleanup_expired_sessions() -> int:
-    """Delete sessions that have expired. Call periodically (e.g., on each
-    init_db or via a scheduler). Returns the number deleted."""
-    now = _iso_now()
-    with _write_lock:
-        cur = _db().execute(
-            "DELETE FROM sessions WHERE expires_at < ? OR revoked = 1",
-            (now,))
-        _db().commit()
-        return cur.rowcount
