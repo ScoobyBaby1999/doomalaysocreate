@@ -1,0 +1,4 @@
+{
+  "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+  "apiKey": "YOUR_BIGMODEL_API_KEY_HERE"
+}
