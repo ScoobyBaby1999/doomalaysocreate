@@ -184,8 +184,6 @@ export function SettingsScreen({
 
   const field =
     "w-full bg-surface border border-border rounded-xl px-3 py-2 text-[15px] outline-none focus:border-accent";
-  const providerField =
-    "flex-1 bg-surface border border-border rounded-xl px-3 py-2 text-[13px] outline-none focus:border-accent min-w-0";
 
   const setCount = Object.values(keyStatuses).filter((s) => s.set).length;
 
