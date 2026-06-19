@@ -189,6 +189,7 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
         # Previously this ONLY auto-created "conscious-default-workspace" — any
         # other workspace_id (like "user-c7bb05356541d765" derived from the JWT)
         # got a 404. Now we auto-create ANY workspace for the authenticated user.
+        create_err = None
         try:
             import os as _os
             sandbox_root = _os.environ.get("LOOM_SANDBOX_ROOT", "/tmp/loom-sandboxes")
@@ -202,14 +203,20 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
             )
             ws = _dbmod.get_workspace(workspace_id)
         except Exception as exc:
+            create_err = f"{type(exc).__name__}: {str(exc)[:200]}"
             try:
                 import debug_log
                 debug_log.derror("conscious", "_create_conscious",
-                                 f"failed to auto-create workspace '{workspace_id}': {exc}")
+                                 f"failed to auto-create workspace '{workspace_id}': {exc}",
+                                 data={"workspace_id": workspace_id, "user_id": user_id,
+                                       "error": create_err})
             except Exception:
                 pass
         if not ws:
-            return 404, {"error": f"workspace '{workspace_id}' not found and could not be created"}
+            # Include the actual exception in the error message so the user
+            # can see WHAT failed (was silently swallowed before).
+            detail = f" (error: {create_err})" if create_err else ""
+            return 404, {"error": f"workspace '{workspace_id}' not found and could not be created{detail}"}
     # Ownership check: skip if using the default user/workspace (they always match)
     if ws["user_id"] != user_id and not (workspace_id == "conscious-default-workspace"):
         return 403, {"error": "not your workspace"}
