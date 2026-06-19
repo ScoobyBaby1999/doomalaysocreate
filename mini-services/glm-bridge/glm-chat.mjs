@@ -42,25 +42,34 @@ function resolveModel(requested) {
 }
 
 // --- Puter.js provider (FREE, default) ---
+// Calls Puter's OpenAI-compatible endpoint directly via fetch — NO NPM package
+// needed. This is the critical fix: the @heyputer/puter.js SDK requires
+// `npm install` on the HF Space, which doesn't always happen. By using plain
+// fetch to https://api.puter.com/puterai/openai/v1/chat/completions, the
+// bridge works with ZERO dependencies (Node 18+ has fetch built in).
 async function callPuter(messages, model) {
-  const puterModel = model.startsWith("z-ai/") ? model : `z-ai/${model}`;
-  const mod = await import("@heyputer/puter.js");
-  const puter = mod.puter || mod.default;
   const token = process.env.PUTER_API_TOKEN?.trim();
-  if (token && puter.setAuthToken) {
-    puter.setAuthToken(token);
-  }
-  // Wrap in a Promise we control so internal rejections don't escape.
-  // Puter.js sometimes fires promises outside the await chain.
-  return await new Promise((resolve, reject) => {
-    puter.ai.chat(messages, { model: puterModel })
-      .then((resp) => {
-        const content = typeof resp === "string" ? resp
-          : resp?.message?.content || resp?.content || resp?.text || String(resp);
-        resolve({ content, served_model: model });
-      })
-      .catch((e) => reject(new Error(`Puter: ${e.message || String(e)}`)));
+  if (!token) throw new Error("Puter: PUTER_API_TOKEN not set");
+  // Puter uses "z-ai/glm-5.2" format for model IDs on their OpenAI endpoint
+  const puterModel = model.startsWith("z-ai/") ? model : `z-ai/${model}`;
+  const url = "https://api.puter.com/puterai/openai/v1/chat/completions";
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`,
+    },
+    body: JSON.stringify({ model: puterModel, messages }),
   });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Puter API ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  return {
+    content: data.choices?.[0]?.message?.content || "(no response)",
+    served_model: data.model || model,
+  };
 }
 
 // --- OpenAI-compatible providers ---
