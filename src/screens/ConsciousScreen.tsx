@@ -1,12 +1,18 @@
 /**
  * ConsciousScreen — mobile-first multi-agent constellation UI.
  *
- * Architecture (rewritten clean — no infinite loops):
- * - init() runs ONCE on mount (uses a ref guard, not state deps)
- * - Workspace switching is an EXPLICIT user action (no auto-loop)
- * - No auto-creation of workspaces or conscious on load
- * - Clear error states with actionable messages
- * - Session cookie auth (no localStorage JWT needed)
+ * Agents are circles on an auto-layouted canvas. The orchestrator sits at
+ * center-top; sub-agents radiate below. Lines connect each agent to the
+ * orchestrator and pulse when agents communicate. Tapping a circle opens a
+ * bottom sheet with the agent's chat / invoke interface. A floating "+" adds
+ * a GLM 5.2 agent. A drawer icon opens the output list.
+ *
+ * Design goals:
+ * - Mobile-first: touch targets ≥56px, bottom sheet (native pattern), no drag
+ * - Minimal clicks: 1 tap to open agent, 1 tap to invoke, 1 tap to add agent
+ * - Visual communication: lines pulse on drawer events / proposals / merges
+ * - Works on any screen size: radial layout auto-scales
+ * - No external icon dependency — all icons are inline SVG
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ConsciousClient, ApiError } from "../api/conscious";
@@ -14,7 +20,7 @@ import type { Settings } from "../api/panel";
 import type { Agent, DrawerEntry, Conscious, Proposal } from "../api/conscious";
 
 // ---------------------------------------------------------------------------
-// inline SVG icons
+// inline SVG icons (no dependency)
 // ---------------------------------------------------------------------------
 
 const Icon = {
@@ -85,7 +91,7 @@ const Icon = {
 };
 
 // ---------------------------------------------------------------------------
-// layout
+// layout — radial auto-positioning (no drag needed)
 // ---------------------------------------------------------------------------
 
 interface NodePos { x: number; y: number; }
@@ -94,14 +100,26 @@ function layoutAgents(agents: Agent[]): Record<string, NodePos> {
   const orch = agents.find((a) => a.isOrchestrator === 1);
   const subs = agents.filter((a) => a.isOrchestrator !== 1);
   const pos: Record<string, NodePos> = {};
-  if (orch) pos[orch.id] = { x: 50, y: 18 };
+
+  if (orch) {
+    pos[orch.id] = { x: 50, y: 18 }; // center-top, percentage
+  }
+
   const radius = Math.min(35, Math.max(22, subs.length * 8));
   subs.forEach((a, i) => {
     const angle = (i / Math.max(subs.length, 1)) * Math.PI - Math.PI / 2;
-    pos[a.id] = { x: 50 + Math.sin(angle) * radius, y: 18 + Math.cos(angle) * radius * 1.3 + 10 };
+    pos[a.id] = {
+      x: 50 + Math.sin(angle) * radius,
+      y: 18 + Math.cos(angle) * radius * 1.3 + 10,
+    };
   });
+
   return pos;
 }
+
+// ---------------------------------------------------------------------------
+// status helpers
+// ---------------------------------------------------------------------------
 
 const STATUS_COLORS: Record<string, string> = {
   idle: "#8b95a3", running: "#5b8cff", waiting: "#f59e0b",
@@ -120,11 +138,23 @@ function StatusIcon({ status, size, color }: { status: string; size: number; col
 // main screen
 // ---------------------------------------------------------------------------
 
-interface WorkspaceInfo { id: string; title: string; source_repo?: string }
-
-export function ConsciousScreen({ settings }: { settings: Settings }) {
+export function ConsciousScreen({ settings, workspaceId }: {
+  settings: Settings; workspaceId?: string;
+}) {
   const client = useRef(new ConsciousClient(settings));
-  const initRan = useRef(false); // guard against double-init
+  // Use the user's JWT subject as the workspace ID so each user gets their own
+  // conscious workspace. Falls back to "demo-workspace" if no JWT is set.
+  // This fixes the bug where the conscious tab didn't recognize the user's
+  // GitHub connection — it was using a shared "demo-workspace" for everyone.
+  const wsId = workspaceId || (() => {
+    try {
+      if (settings.githubSessionId) {
+        const payload = JSON.parse(atob(settings.githubSessionId.split(".")[1]));
+        return `user-${payload.sub || "demo"}`;
+      }
+    } catch {}
+    return "demo-workspace";
+  })();
 
   const [conscious, setConscious] = useState<Conscious | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -135,154 +165,58 @@ export function ConsciousScreen({ settings }: { settings: Settings }) {
   const [pulseLines, setPulseLines] = useState<Record<string, number>>({});
   const [showDrawer, setShowDrawer] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
-  const [activeWsId, setActiveWsId] = useState("");
-  const [showWsPicker, setShowWsPicker] = useState(false);
-  const [repoUrl, setRepoUrl] = useState("");
-  const [needsAuth, setNeedsAuth] = useState(false);
+  const [creating, setCreating] = useState(false);
 
-  // --- helper: fetch with auth (session cookie OR rotation token) ---
-  const authFetch = useCallback(async (path: string, init?: RequestInit) => {
-    const base = settings.baseUrl || "";
-    const token = await client.current.bearer();
-    return fetch(base + path, {
-      ...init,
-      credentials: "same-origin",
-      headers: {
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        // Only send X-JWT if we actually have one (not empty string)
-        ...(settings.githubSessionId ? { "X-JWT": settings.githubSessionId } : {}),
-        ...((init?.headers as Record<string, string>) || {}),
-      },
-    });
-  }, [settings]);
-
-  // --- fetch workspaces (stored in state for the picker) ---
-  const fetchWorkspaces = useCallback(async () => {
-    try {
-      const resp = await authFetch("/api/workspaces");
-      if (resp.ok) {
-        const data = await resp.json();
-        const wsList = data.workspaces || data || [];
-        if (Array.isArray(wsList)) {
-          const mapped = wsList.map((w: Record<string, unknown>) => ({
-            id: w.id as string,
-            title: w.title as string,
-            source_repo: w.source_repo as string | undefined,
-          }));
-          setWorkspaces(mapped);
-          return mapped;
-        }
-      } else if (resp.status === 401) {
-        setNeedsAuth(true);
-      }
-    } catch {}
-    return [];
-  }, [authFetch]);
-
-  // --- load conscious for a workspace ---
-  const loadConscious = useCallback(async (wsId: string) => {
-    if (!wsId) return;
-    setLoading(true);
-    setError(null);
+  const init = useCallback(async () => {
+    setLoading(true); setError(null);
     try {
       const list = await client.current.listConscious(wsId);
       if (list.conscious.length > 0) {
         const c = list.conscious[0];
         const detail = await client.current.getConscious(c.id);
-        setConscious(detail.conscious);
-        setAgents(detail.agents);
-        // fetch drawer + proposals
-        try {
-          const [d, p] = await Promise.all([
-            client.current.listDrawer(c.id, { limit: 20 }),
-            client.current.listProposals(c.id, "pending"),
-          ]);
-          setDrawer(d.entries);
-          setProposals(p.proposals);
-        } catch {}
-      } else {
-        // No conscious yet — create one
-        const r = await client.current.createConscious({
-          workspace_id: wsId,
-          title: "Conscious Workspace",
-          goal: "Multi-agent collaboration with GLM 5.2",
-        });
-        setConscious(r.conscious);
-        setAgents(r.agents);
-      }
+        setConscious(detail.conscious); setAgents(detail.agents);
+        await refreshData(c.id);
+      } else { await createConscious(); }
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : String(e);
-      if (msg.includes("401") || msg.includes("auth") || msg.includes("session")) {
-        setNeedsAuth(true);
-      } else {
-        setError(msg);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // --- init: runs ONCE on mount ---
-  useEffect(() => {
-    if (initRan.current) return;
-    initRan.current = true;
-    (async () => {
-      setLoading(true);
-      const wsList = await fetchWorkspaces();
-      if (wsList.length > 0) {
-        setActiveWsId(wsList[0].id);
-        await loadConscious(wsList[0].id);
-      } else {
-        setLoading(false);
-        // No workspaces — show the picker so user can clone a repo
-        setShowWsPicker(true);
-      }
-    })();
-  }, [fetchWorkspaces, loadConscious]);
-
-  // --- switch workspace (explicit user action) ---
-  const switchWorkspace = async (wsId: string) => {
-    setActiveWsId(wsId);
-    setShowWsPicker(false);
-    setConscious(null);
-    setAgents([]);
-    setDrawer([]);
-    await loadConscious(wsId);
-  };
-
-  // --- clone a repo into a new workspace ---
-  const cloneRepo = async () => {
-    if (!repoUrl.trim()) return;
-    setError(null);
-    try {
-      const resp = await authFetch("/api/workspaces", {
-        method: "POST",
-        body: JSON.stringify({
-          title: repoUrl.split("/").pop()?.replace(".git", "") || "Workspace",
-          source_repo: repoUrl.trim(),
-        }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        const newWsId = data.workspace?.id || data.id || "";
-        if (newWsId) {
-          setRepoUrl("");
-          setShowWsPicker(false);
-          await fetchWorkspaces();
-          await switchWorkspace(newWsId);
+      if (e instanceof ApiError) {
+        if (e.status === 401) {
+          setError("Authentication error — check your rotation secret in Settings. This is NOT a GitHub connection issue.");
+        } else if (e.status === 403) {
+          setError("GitHub auth required for this action. Connect GitHub in the Workspaces tab.");
+        } else {
+          setError(e.message);
         }
       } else {
-        const err = await resp.json().catch(() => ({ error: "clone failed" }));
-        setError(err.error || "Failed to clone repo");
+        setError(String(e));
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
     }
+    finally { setLoading(false); }
+  }, [wsId]);
+
+  useEffect(() => { init(); }, [init]);
+
+  const createConscious = async () => {
+    setCreating(true);
+    try {
+      const r = await client.current.createConscious({
+        workspace_id: wsId, title: "Conscious Workspace",
+        goal: "Multi-agent collaboration with GLM 5.2",
+      });
+      setConscious(r.conscious); setAgents(r.agents);
+    } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
+    finally { setCreating(false); }
   };
 
-  // --- add a GLM agent ---
+  const refreshData = async (cid: string) => {
+    try {
+      const [d, p] = await Promise.all([
+        client.current.listDrawer(cid, { limit: 20 }),
+        client.current.listProposals(cid, "pending"),
+      ]);
+      setDrawer(d.entries); setProposals(p.proposals);
+    } catch {}
+  };
+
   const addAgent = async () => {
     if (!conscious) return;
     try {
@@ -290,62 +224,39 @@ export function ConsciousScreen({ settings }: { settings: Settings }) {
         role: "ai-engineer", model: "glm-5.2 (free)", tier: "zai",
       });
       setAgents((prev) => [...prev, r.agent]);
+      const orch = agents.find((a) => a.isOrchestrator === 1);
+      if (orch) setPulseLines((prev) => ({ ...prev, [`${orch.id}-${r.agent.id}`]: Date.now() }));
     } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
   };
 
-  // --- invoke an agent ---
   const invokeAgent = async (agent: Agent, task: string) => {
     if (!conscious) return;
     const orch = agents.find((a) => a.isOrchestrator === 1);
     if (!orch) return;
     try {
       setPulseLines((prev) => ({ ...prev, [`${orch.id}-${agent.id}`]: Date.now() }));
-      await client.current.invokeAgent(conscious.id, {
+      const r = await client.current.invokeAgent(conscious.id, {
         from_agent_id: orch.id, to_agent_id: agent.id, kind: "invoke", task,
       });
       setPulseLines((prev) => ({ ...prev, [`${agent.id}-${orch.id}`]: Date.now() }));
-      // refresh drawer
-      const d = await client.current.listDrawer(conscious.id, { limit: 20 });
-      setDrawer(d.entries);
+      await refreshData(conscious.id);
+      return r;
     } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
   };
 
-  // --- merge an agent's branch ---
   const mergeAgent = async (agent: Agent) => {
     if (!conscious) return;
     const orch = agents.find((a) => a.isOrchestrator === 1);
     if (!orch) return;
     try {
       await client.current.mergeAgentBranch(conscious.id, agent.id, orch.id);
-      const d = await client.current.listDrawer(conscious.id, { limit: 20 });
-      setDrawer(d.entries);
+      await refreshData(conscious.id);
     } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
   };
 
   const positions = layoutAgents(agents);
   const orch = agents.find((a) => a.isOrchestrator === 1);
   const subs = agents.filter((a) => a.isOrchestrator !== 1);
-  const activeWs = workspaces.find((w) => w.id === activeWsId);
-
-  // --- needs auth screen ---
-  if (needsAuth) {
-    return (
-      <div className="flex flex-col h-full bg-bg items-center justify-center px-8">
-        <div className="w-16 h-16 rounded-2xl bg-accent/20 flex items-center justify-center mb-4">
-          <Icon.Brain size={32} color="#5b8cff" />
-        </div>
-        <div className="text-lg font-semibold text-text mb-2">Connect GitHub</div>
-        <div className="text-sm text-muted text-center mb-6">
-          The Conscious system needs GitHub access to manage workspaces and git worktrees.
-          Tap the GitHub tab below to connect.
-        </div>
-        <button onClick={() => { setNeedsAuth(false); initRan.current = false; }}
-          className="px-4 py-2 rounded-xl bg-accent text-white text-sm">
-          Retry
-        </button>
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-col h-full bg-bg overflow-hidden relative">
@@ -357,29 +268,17 @@ export function ConsciousScreen({ settings }: { settings: Settings }) {
           </div>
           <div>
             <div className="text-sm font-semibold text-text">{conscious?.title || "Conscious"}</div>
-            <div className="text-[10px] text-muted">
-              {agents.length} agent{agents.length !== 1 ? "s" : ""} · GLM 5.2
-              {activeWs && (
-                <button onClick={() => setShowWsPicker(true)} className="ml-2 text-accent underline">
-                  {activeWs.title}
-                </button>
-              )}
-            </div>
+            <div className="text-[10px] text-muted">{agents.length} agent{agents.length !== 1 ? "s" : ""} · GLM 5.2</div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setShowWsPicker(true)}
-            className="text-[10px] text-accent px-2 py-1 rounded-lg bg-accent/10">
-            Workspaces
-          </button>
-          <button onClick={() => setShowDrawer(true)}
-            className="w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text relative">
-            <Icon.Inbox size={16} />
-            {drawer.length > 0 && (
-              <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-accent text-[9px] text-white flex items-center justify-center">{drawer.length}</span>
-            )}
-          </button>
-        </div>
+        <button onClick={() => setShowDrawer(true)}
+          className="w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
+          title="View outputs">
+          <Icon.Inbox size={16} />
+          {drawer.length > 0 && (
+            <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-accent text-[9px] text-white flex items-center justify-center">{drawer.length}</span>
+          )}
+        </button>
       </div>
 
       {/* error bar */}
@@ -392,17 +291,9 @@ export function ConsciousScreen({ settings }: { settings: Settings }) {
 
       {/* constellation canvas */}
       <div className="flex-1 relative overflow-hidden">
-        {loading ? (
+        {loading || creating ? (
           <div className="absolute inset-0 flex items-center justify-center">
             <Icon.Loader size={24} color="#5b8cff" />
-          </div>
-        ) : !conscious ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-8">
-            <Icon.Brain size={32} color="#8b95a3" />
-            <p className="text-sm text-muted mt-3">No conscious workspace loaded.</p>
-            <button onClick={() => setShowWsPicker(true)} className="mt-3 text-accent text-sm underline">
-              Select or clone a workspace
-            </button>
           </div>
         ) : (
           <>
@@ -421,6 +312,7 @@ export function ConsciousScreen({ settings }: { settings: Settings }) {
                 );
               })}
             </svg>
+
             <div className="absolute inset-0" style={{ zIndex: 2 }}>
               {agents.map((agent) => {
                 const pos = positions[agent.id]; if (!pos) return null;
@@ -432,58 +324,23 @@ export function ConsciousScreen({ settings }: { settings: Settings }) {
                 );
               })}
             </div>
+
             {agents.length <= 1 && (
               <div className="absolute bottom-24 left-1/2 -translate-x-1/2 text-center text-muted text-xs px-8">
                 Tap <span className="text-accent font-medium">+</span> to add a GLM 5.2 agent.
+                Each agent works in its own git worktree.
               </div>
             )}
           </>
         )}
-        {conscious && (
-          <button onClick={addAgent} disabled={loading}
-            className="absolute bottom-6 right-6 w-14 h-14 rounded-full bg-accent text-white flex items-center justify-center shadow-lg shadow-accent/30 hover:scale-105 active:scale-95 transition-transform disabled:opacity-50"
-            style={{ zIndex: 10 }}>
-            <Icon.Plus size={24} color="white" />
-          </button>
-        )}
+
+        <button onClick={addAgent} disabled={!conscious || loading}
+          className="absolute bottom-6 right-6 w-14 h-14 rounded-full bg-accent text-white flex items-center justify-center shadow-lg shadow-accent/30 hover:scale-105 active:scale-95 transition-transform disabled:opacity-50"
+          style={{ zIndex: 10 }} title="Add GLM 5.2 agent">
+          <Icon.Plus size={24} color="white" />
+        </button>
       </div>
 
-      {/* workspace picker */}
-      {showWsPicker && (
-        <>
-          <div className="fixed inset-0 bg-black/50 z-40" onClick={() => setShowWsPicker(false)} />
-          <div className="fixed bottom-0 left-0 right-0 bg-surface rounded-t-2xl border-t border-border z-50 flex flex-col"
-            style={{ maxHeight: "70vh", paddingBottom: "env(safe-area-inset-bottom)" }}>
-            <div className="flex justify-center pt-2 pb-1"><div className="w-10 h-1 rounded-full bg-border" /></div>
-            <div className="flex items-center justify-between px-4 py-2 border-b border-border">
-              <span className="text-sm font-semibold text-text">Workspaces</span>
-              <button onClick={() => setShowWsPicker(false)} className="w-8 h-8 rounded-lg bg-surface2 flex items-center justify-center text-muted"><Icon.X size={16} /></button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-3 space-y-2">
-              {workspaces.map((ws) => (
-                <button key={ws.id} onClick={() => switchWorkspace(ws.id)}
-                  className={`w-full text-left rounded-lg border p-3 ${ws.id === activeWsId ? "border-accent bg-accent/10" : "border-border bg-surface2"}`}>
-                  <div className="text-sm font-medium text-text">{ws.title}</div>
-                  {ws.source_repo && <div className="text-[10px] text-muted truncate">{ws.source_repo}</div>}
-                </button>
-              ))}
-              <div className="rounded-lg border border-dashed border-border p-3 space-y-2">
-                <div className="text-xs font-medium text-muted">Clone a new repo:</div>
-                <div className="flex gap-2">
-                  <input type="text" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)}
-                    placeholder="https://github.com/user/repo"
-                    className="flex-1 h-9 rounded-lg bg-surface2 border border-border text-sm text-text px-3 outline-none focus:border-accent"
-                    onKeyDown={(e) => { if (e.key === "Enter") cloneRepo(); }} />
-                  <button onClick={cloneRepo} disabled={!repoUrl.trim()}
-                    className="h-9 px-3 rounded-lg bg-accent text-white text-sm disabled:opacity-50">Clone</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* agent sheet */}
       {selectedAgent && conscious && (
         <AgentSheet agent={selectedAgent}
           drawer={drawer.filter((d) => d.toAgentId === selectedAgent.id)}
@@ -492,7 +349,6 @@ export function ConsciousScreen({ settings }: { settings: Settings }) {
           onMerge={() => mergeAgent(selectedAgent)} />
       )}
 
-      {/* drawer panel */}
       {showDrawer && (
         <DrawerPanel entries={drawer} agents={agents} onClose={() => setShowDrawer(false)} />
       )}
@@ -510,6 +366,7 @@ function AgentNode({ agent, pos, drawerCount, pendingProps, onTap }: {
   const isOrch = agent.isOrchestrator === 1;
   const color = STATUS_COLORS[agent.status] || "#8b95a3";
   const size = isOrch ? 72 : 56;
+
   return (
     <button onClick={onTap}
       className="absolute flex flex-col items-center gap-1 group"
@@ -519,8 +376,12 @@ function AgentNode({ agent, pos, drawerCount, pendingProps, onTap }: {
           background: isOrch ? "rgba(91,140,255,0.15)" : "rgba(20,24,29,0.9)",
           boxShadow: agent.status === "running" ? `0 0 12px ${color}40` : "none" }}>
         {isOrch ? <Icon.Brain size={28} color={color} /> : <StatusIcon status={agent.status} size={22} color={color} />}
-        {drawerCount > 0 && <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-emerald-500 text-[10px] text-white flex items-center justify-center font-bold">{drawerCount}</span>}
-        {pendingProps > 0 && <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-amber-500 text-[10px] text-white flex items-center justify-center font-bold">{pendingProps}</span>}
+        {drawerCount > 0 && (
+          <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-emerald-500 text-[10px] text-white flex items-center justify-center font-bold">{drawerCount}</span>
+        )}
+        {pendingProps > 0 && (
+          <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-amber-500 text-[10px] text-white flex items-center justify-center font-bold">{pendingProps}</span>
+        )}
       </div>
       <div className="text-center max-w-[80px]">
         <div className="text-[10px] font-medium text-text truncate">{agent.role}</div>
@@ -531,7 +392,7 @@ function AgentNode({ agent, pos, drawerCount, pendingProps, onTap }: {
 }
 
 // ---------------------------------------------------------------------------
-// AgentSheet
+// AgentSheet — bottom sheet
 // ---------------------------------------------------------------------------
 
 function AgentSheet({ agent, drawer, onClose, onInvoke, onMerge }: {
@@ -547,11 +408,12 @@ function AgentSheet({ agent, drawer, onClose, onInvoke, onMerge }: {
   const handleInvoke = async () => {
     if (!task.trim()) return;
     setBusy(true);
-    try { await onInvoke(task); setTask(""); } catch {} finally { setBusy(false); }
+    try { await onInvoke(task); setTask(""); } finally { setBusy(false); }
   };
+
   const handleMerge = async () => {
     setBusy(true);
-    try { await onMerge(); setMerged(true); } catch {} finally { setBusy(false); }
+    try { await onMerge(); setMerged(true); } finally { setBusy(false); }
   };
 
   return (
@@ -560,6 +422,7 @@ function AgentSheet({ agent, drawer, onClose, onInvoke, onMerge }: {
       <div className="fixed bottom-0 left-0 right-0 bg-surface rounded-t-2xl border-t border-border z-50 flex flex-col"
         style={{ maxHeight: "85vh", paddingBottom: "env(safe-area-inset-bottom)" }}>
         <div className="flex justify-center pt-2 pb-1"><div className="w-10 h-1 rounded-full bg-border" /></div>
+
         <div className="flex items-center justify-between px-4 py-2 border-b border-border">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-full flex items-center justify-center border-2"
@@ -573,12 +436,15 @@ function AgentSheet({ agent, drawer, onClose, onInvoke, onMerge }: {
           </div>
           <button onClick={onClose} className="w-8 h-8 rounded-lg bg-surface2 flex items-center justify-center text-muted"><Icon.X size={16} /></button>
         </div>
+
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {agent.worktreePath && (
             <div className="text-[10px] text-muted bg-surface2 rounded-lg p-2">
               <div>branch: <code className="text-text">{agent.branch}</code></div>
+              <div>worktree: <span className="text-text/70 truncate">{agent.worktreePath.split("/").slice(-2).join("/")}</span></div>
             </div>
           )}
+
           {!isOrch && (
             <div className="space-y-2">
               <div className="text-xs font-medium text-text">Give this agent a task:</div>
@@ -600,6 +466,7 @@ function AgentSheet({ agent, drawer, onClose, onInvoke, onMerge }: {
               </div>
             </div>
           )}
+
           {drawer.length > 0 && (
             <div className="space-y-2">
               <div className="text-xs font-medium text-text">Outputs ({drawer.length}):</div>
@@ -620,11 +487,12 @@ function AgentSheet({ agent, drawer, onClose, onInvoke, onMerge }: {
               ))}
             </div>
           )}
+
           {drawer.length === 0 && !isOrch && (
-            <div className="text-center text-muted text-xs py-4">No outputs yet. Invoke this agent with a task.</div>
+            <div className="text-center text-muted text-xs py-4">No outputs yet. Invoke this agent with a task to see results here.</div>
           )}
           {isOrch && (
-            <div className="text-center text-muted text-xs py-4">The orchestrator manages the brain.</div>
+            <div className="text-center text-muted text-xs py-4">The orchestrator manages the brain. Use other agents to do work, then merge their branches here.</div>
           )}
         </div>
       </div>
@@ -646,7 +514,7 @@ function DrawerPanel({ entries, agents, onClose }: {
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <div className="flex items-center gap-2">
             <Icon.Folder size={16} color="#5b8cff" />
-            <span className="text-sm font-semibold text-text">Outputs</span>
+            <span className="text-sm font-semibold text-text">All Outputs</span>
             <span className="text-[10px] text-muted">({entries.length})</span>
           </div>
           <button onClick={onClose} className="w-8 h-8 rounded-lg bg-surface2 flex items-center justify-center text-muted"><Icon.X size={16} /></button>
@@ -665,8 +533,10 @@ function DrawerPanel({ entries, agents, onClose }: {
                     <span className="text-[10px] text-muted">{fromAgent?.role || "?"} → {toAgent?.role || "?"}</span>
                   </div>
                   <div className="text-xs text-text/80 mb-1">{d.task}</div>
-                  <span className="text-[10px] px-2 py-0.5 rounded-full"
-                    style={{ background: `${STATUS_COLORS[d.status] || "#8b95a3"}20`, color: STATUS_COLORS[d.status] || "#8b95a3" }}>{d.status}</span>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-[10px] px-2 py-0.5 rounded-full"
+                      style={{ background: `${STATUS_COLORS[d.status] || "#8b95a3"}20`, color: STATUS_COLORS[d.status] || "#8b95a3" }}>{d.status}</span>
+                  </div>
                   {d.result && (
                     <pre className="text-[10px] text-muted whitespace-pre-wrap max-h-24 overflow-y-auto mt-2 font-mono">
                       {d.result.slice(0, 300)}{d.result.length > 300 ? "…" : ""}
