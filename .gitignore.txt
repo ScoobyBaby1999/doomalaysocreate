@@ -1,0 +1,20 @@
+
+# timemanager reference runtime data (keep source, drop user data)
+reference/timemanager/data/
+reference/timemanager/backend/outputs/
+
+# runtime job/metrics state (never commit)
+critique-service/data/
+app/
+
+.env
+.rotation_secret
+*.db
+__pycache__/
+
+# GLM bridge — real config has secrets, never push. Templates are safe.
+mini-services/glm-bridge/.z-ai-config
+mini-services/glm-bridge/.z-ai-config.*.example
+!mini-services/glm-bridge/.z-ai-config.example
+!mini-services/glm-bridge/.z-ai-config.bigmodel.example
+mini-services/glm-bridge/node_modules/
