@@ -59,22 +59,19 @@ export class AgentClient {
   constructor(private settings: Settings) {}
 
   private async bearer(windowsBack = 0): Promise<string> {
-    // Fix 2: rotationSecret ALWAYS takes precedence (Layer 1: service auth).
-    // The JWT goes in X-JWT (Layer 2: user identity), NEVER as the bearer.
     if (this.settings.rotationSecret) return deriveToken(this.settings.rotationSecret, windowsBack);
     return this.settings.token;
   }
 
   private fetchWith(token: string, path: string, init?: RequestInit): Promise<Response> {
-    // Fix 2: send X-JWT when githubSessionId is set (Layer 2: user identity).
-    // Same pattern as conscious.ts.
-    const headers: Record<string, string> = {
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(this.settings.githubSessionId ? { "X-JWT": this.settings.githubSessionId } : {}),
-      ...((init?.headers as Record<string, string>) || {}),
-    };
-    return fetch(this.settings.baseUrl + path, { ...init, credentials: "same-origin", headers });
+    return fetch(this.settings.baseUrl + path, {
+      ...init,
+      headers: {
+        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(init?.headers || {}),
+      },
+    });
   }
 
   /** Authenticated fetch with a single 401 retry on the previous token window. */
@@ -108,16 +105,23 @@ export class AgentClient {
 
   /** Start a new session, or continue an existing one if sessionId is given.
    *  `model` selects which model/tier drives a NEW session.
-   *  `workspaceId` links the agent to a user workspace sandbox.
-   *  Fix 2: X-JWT is now sent globally by fetchWith() — no need to set it here. */
+   *  `workspaceId` links the agent to a user workspace sandbox. */
   send(message: string, sessionId?: string, model?: string, workspaceId?: string) {
     const body: Record<string, unknown> = { message };
     if (sessionId) body.session_id = sessionId;
     if (model) body.model = model;
     if (workspaceId) body.workspace_id = workspaceId;
+    // When linking to a workspace, the backend additionally needs the caller's
+    // GitHub identity (JWT) for the ownership check. Send it in X-JWT so the
+    // Authorization header stays reserved for the service/rotation token.
+    const headers: Record<string, string> = {};
+    if (workspaceId && this.settings.githubSessionId) {
+      headers["X-JWT"] = this.settings.githubSessionId;
+    }
     return this.req<AgentStart>("/api/agent", {
       method: "POST",
       body: JSON.stringify(body),
+      headers,
     });
   }
 
