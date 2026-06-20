@@ -1463,14 +1463,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_ok(self) -> bool:
         """Check if the request is authenticated via EITHER:
-        - Rotation token in Authorization header, OR
-        - Valid session cookie.
-        Use this instead of _token_ok() directly — it covers both auth paths."""
+        - Rotation token / static token in Authorization header, OR
+        - Valid session cookie (if _check_session is implemented).
+
+        The cookie-session path is optional — if _check_session isn't
+        defined (it was a stub that was never wired up), we skip it
+        gracefully instead of crashing with a NameError that turns a
+        clean 401 into an HTTP 500. This was the root cause of the
+        "500 replaced the 401" bug: when the rotation token didn't match
+        (e.g. client/server window mismatch during an upgrade), _token_ok
+        returned False, then _check_session threw NameError → 500.
+        """
         if _token_ok(self.headers.get("Authorization")):
             return True
+        # Cookie-session auth is optional. Look up _check_session dynamically
+        # so a missing definition never crashes the auth gate.
         cookie_header = self.headers.get("Cookie")
-        session_user_id, _ = _check_session(cookie_header)
-        return session_user_id is not None
+        if cookie_header:
+            checker = globals().get("_check_session")
+            if callable(checker):
+                try:
+                    session_user_id, _ = checker(cookie_header)
+                    if session_user_id:
+                        return True
+                except Exception:
+                    pass  # don't let a broken cookie check crash the gate
+        return False
 
     @staticmethod
     def _valid_panel(p) -> bool:
