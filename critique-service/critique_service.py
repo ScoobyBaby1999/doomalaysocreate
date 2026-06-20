@@ -870,6 +870,16 @@ class Handler(BaseHTTPRequestHandler):
         return  # telemetry goes through oplog; suppress the stderr access log spam
 
     def do_GET(self) -> None:
+        try:
+            self._do_GET()
+        except Exception as exc:  # noqa: BLE001 — last-resort guard
+            try:
+                log_event("do_GET_unhandled", path=self.path, error=repr(exc)[:300])
+                self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
+            except Exception:
+                pass
+
+    def _do_GET(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
@@ -2370,6 +2380,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"count": len(logs), "logs": logs})
 
     def do_POST(self) -> None:
+        try:
+            self._do_POST()
+        except Exception as exc:  # noqa: BLE001 — last-resort guard
+            try:
+                log_event("do_POST_unhandled", path=self.path, error=repr(exc)[:300])
+                self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
+            except Exception:
+                pass
+
+    def _do_POST(self) -> None:
         route = self.path.rstrip("/")
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
@@ -2495,6 +2515,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(201, {"saved": summary})
 
     def do_DELETE(self) -> None:
+        try:
+            self._do_DELETE()
+        except Exception as exc:  # noqa: BLE001 — last-resort guard
+            try:
+                log_event("do_DELETE_unhandled", path=self.path, error=repr(exc)[:300])
+                self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
+            except Exception:
+                pass
+
+    def _do_DELETE(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
