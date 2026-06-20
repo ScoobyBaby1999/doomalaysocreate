@@ -142,19 +142,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
   settings: Settings; workspaceId?: string;
 }) {
   const client = useRef(new ConsciousClient(settings));
-  // Use the user's JWT subject as the workspace ID so each user gets their own
-  // conscious workspace. Falls back to "demo-workspace" if no JWT is set.
-  // This fixes the bug where the conscious tab didn't recognize the user's
-  // GitHub connection — it was using a shared "demo-workspace" for everyone.
-  const wsId = workspaceId || (() => {
-    try {
-      if (settings.githubSessionId) {
-        const payload = JSON.parse(atob(settings.githubSessionId.split(".")[1]));
-        return `user-${payload.sub || "demo"}`;
-      }
-    } catch {}
-    return "demo-workspace";
-  })();
+  const wsId = workspaceId || "demo-workspace";
 
   const [conscious, setConscious] = useState<Conscious | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -177,19 +165,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
         setConscious(detail.conscious); setAgents(detail.agents);
         await refreshData(c.id);
       } else { await createConscious(); }
-    } catch (e) {
-      if (e instanceof ApiError) {
-        if (e.status === 401) {
-          setError("Authentication error — check your rotation secret in Settings. This is NOT a GitHub connection issue.");
-        } else if (e.status === 403) {
-          setError("GitHub auth required for this action. Connect GitHub in the Workspaces tab.");
-        } else {
-          setError(e.message);
-        }
-      } else {
-        setError(String(e));
-      }
-    }
+    } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
     finally { setLoading(false); }
   }, [wsId]);
 
