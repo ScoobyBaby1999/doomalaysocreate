@@ -6,11 +6,12 @@ import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { AgentScreen } from "./screens/AgentScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
 import { ConsciousScreen } from "./screens/ConsciousScreen";
+import { DebugScreen } from "./screens/DebugScreen";
 import { exchangeGitHubCode, exchangeHFCode } from "./api/github";
 import { getJWTSub } from "./lib/jwt";
 import type { Settings } from "./api/panel";
 
-type Tab = "chat" | "agent" | "conscious" | "workspaces" | "settings";
+type Tab = "chat" | "agent" | "conscious" | "workspaces" | "settings" | "debug";
 
 export default function App() {
   const [settings, setSettings] = useSettings();
@@ -35,7 +36,6 @@ export default function App() {
     const hash = window.location.hash.slice(1);
     if (!hash) return;
     const params = new URLSearchParams(hash);
-    const sessionExchange = params.get("session-exchange");
     const githubId = params.get("github-connected");
     const githubCode = params.get("github-code");
     const githubError = params.get("github-error");
@@ -47,36 +47,6 @@ export default function App() {
     // Clear hash immediately
     history.replaceState(null, "", window.location.pathname + window.location.search);
 
-    // Fix 7: server-side session exchange — the JWT is NEVER in the URL.
-    // The one-time token is exchanged for a session cookie via POST.
-    if (sessionExchange) {
-      const base = settings.baseUrl || "";
-      fetch(base + "/api/auth/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: sessionExchange }),
-        credentials: "same-origin",  // send + receive cookies
-      }).then((r) => {
-        if (!r.ok) throw new Error("session exchange failed");
-        return r.json();
-      }).then((data) => {
-        // Session cookie is set by the server (HttpOnly — JS can't read it).
-        // We only store the username for display — NO JWT in localStorage.
-        const newSettings = {
-          ...settings,
-          githubUsername: data.github_username || "",
-          githubSessionId: "",  // cleared — session cookie handles auth now
-        };
-        saveSettings(newSettings);
-        setSettings(newSettings);
-        setTab("workspaces");
-      }).catch((e) => {
-        console.error("Session exchange failed:", e);
-      });
-      return;
-    }
-
-    // Legacy flows (back-compat for older backends that still use JWT-in-URL)
     if (githubId) {
       // Direct flow (main Space): session ID returned directly
       const ghSettings = { ...settings, githubSessionId: githubId };
@@ -171,28 +141,37 @@ export default function App() {
           <ConsciousScreen settings={settings} />
         ) : tab === "workspaces" ? (
           <WorkspaceScreen settings={settings} onChange={setSettings} />
+        ) : tab === "debug" ? (
+          <DebugScreen settings={settings} />
         ) : (
           <SettingsScreen settings={settings} onChange={setSettings} />
         )}
       </main>
 
-      <nav className="flex border-t border-border">
-        {(["chat", "agent", "conscious", "workspaces", "settings"] as Tab[]).map((t) => (
+      <nav className="flex border-t border-border overflow-x-auto">
+        {(["chat", "agent", "conscious", "workspaces", "settings", "debug"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`flex-1 py-2 text-sm capitalize flex flex-col items-center gap-0.5 ${
+            className={`flex-1 py-2 text-sm capitalize flex flex-col items-center gap-0.5 min-w-[55px] ${
               tab === t ? "text-accent" : "text-muted"
             }`}
           >
             {t === "conscious" ? (
               <>
-                {/* Brain icon — inline SVG, no dependency */}
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
                   <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
                 </svg>
-                <span className="text-[10px]">Conscious</span>
+                <span className="text-[10px]">Mind</span>
+              </>
+            ) : t === "debug" ? (
+              <>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/>
+                  <path d="M12 16v-4M12 8h.01"/>
+                </svg>
+                <span className="text-[10px]">Debug</span>
               </>
             ) : (
               t
