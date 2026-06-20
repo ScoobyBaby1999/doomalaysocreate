@@ -35,34 +35,6 @@ import time
 import uuid
 from pathlib import Path
 
-# --- debug_log: robust import with no-op fallback --------------------------
-# debug_log.py may be missing from the deployment (e.g. not pushed to the repo,
-# or the working directory doesn't include it in sys.path). If the import fails,
-# create a no-op dummy so the code doesn't crash — logging is best-effort.
-try:
-    import debug_log  # noqa: F401 — tries the real module first
-except ImportError:
-    class _NoOpDebugLog:
-        """No-op fallback when debug_log.py is not available.
-        All methods are fire-and-forget no-ops so logging never breaks anything."""
-        @staticmethod
-        def dlog(*a, **kw): pass
-        @staticmethod
-        def derror(*a, **kw): pass
-        @staticmethod
-        def dtimed(*a, **kw):
-            def deco(fn): return fn
-            return deco
-        @staticmethod
-        def log_startup_env(): pass
-        @staticmethod
-        def get_recent_logs(*a, **kw): return []
-        @staticmethod
-        def list_log_categories(*a, **kw): return {}
-        @staticmethod
-        def clear_logs(*a, **kw): return {}
-    debug_log = _NoOpDebugLog()  # type: ignore[assignment]
-
 AGENT_ROOT = Path(os.environ.get("AGENT_ROOT", "/tmp/agent"))
 SESSION_TTL_S = int(os.environ.get("AGENT_SESSION_TTL_S", "7200"))   # 2h idle
 MAX_SESSIONS = int(os.environ.get("AGENT_MAX_SESSIONS", "8"))        # RAM bound
@@ -83,7 +55,19 @@ AGENT_SYSTEM_PROMPT = (
     "create files, run shell commands, pack/unpack zips and repos there. "
     "Artifacts you write to the workspace are listed for the user to download. "
     "The disk is ephemeral — remind the user to download anything important. "
-    "Be direct and concise; lead with outcomes."
+    "Be direct and concise; lead with outcomes.\n\n"
+    "You have these tools available:\n"
+    "- shell: run bash commands (ls, cat, grep, git, python, etc.) — PREFER this over python_repl\n"
+    "- file_read: read file contents\n"
+    "- file_write: write/create files\n"
+    "- editor: edit existing files (str_replace)\n"
+    "- http_request: fetch URLs (web access)\n"
+    "- python_repl: execute Python code (fallback for complex logic)\n"
+    "- calculator: math calculations\n"
+    "- load_tool: dynamically load more tools at runtime\n"
+    "Use the shell tool for bash operations (grep, find, git, make, etc.). "
+    "Use http_request for web fetches. Use file_read/file_write/editor for "
+    "file operations. Only use python_repl when shell isn't sufficient."
 )
 
 #   open-tier model routing: each entry is
@@ -93,8 +77,7 @@ AGENT_SYSTEM_PROMPT = (
 #   Overridable via AGENT_OPEN_MODEL / AGENT_OPEN_BASE_URL / AGENT_OPEN_KEY_ENV.
 _OPEN_LLMS: list[tuple[str, str, str, str | None]] = [
     ("MOONSHOT_API_KEY",   "Kimi (Moonshot)",   "moonshot/kimi-k2-0905-preview", None),
-    # Groq removed — best model is GPT-120B-OSS which underperforms; users
-    # reported it as not useful. Re-add if Groq adds a competitive model.
+    ("GROQ_API_KEY",       "Groq Llama 3.3",    "groq/llama-3.3-70b-versatile",  None),
     ("OPENROUTER_API_KEY", "OpenRouter Qwen3",  "openrouter/qwen/qwen3-coder",   None),
     ("CEREBRAS_API_KEY",   "Cerebras Qwen3",    "cerebras/qwen-3-coder-480b",    None),
     ("ZAI_API_KEY",        "GLM 5.2 (Z.ai)",     "openai/glm-5.2",
@@ -283,9 +266,6 @@ class MockAdapter(BaseAdapter):
 # not be installed and the bridge may not be running. By calling the APIs
 # directly from Python (urllib is stdlib), the ZaiAdapter works with ZERO
 # external dependencies beyond the Python interpreter.
-#
-# All calls are logged to debug/glm.log via debug_log.dlog() so you can see
-# exactly which provider was tried, what happened, and how long it took.
 # --------------------------------------------------------------------------
 GLM_BRIDGE_URL = os.environ.get("GLM_BRIDGE_URL", "http://localhost:3030")
 GLM_BRIDGE_TIMEOUT_S = float(os.environ.get("GLM_BRIDGE_TIMEOUT_S", "120"))
@@ -295,22 +275,24 @@ _GLM_CHAT_SCRIPT = os.environ.get(
 _GLM_NODE_BIN = os.environ.get("GLM_NODE_BIN", "node")
 
 # --- OpenAI-compatible provider configs (for Python-native calls) ---
-# Each provider: env var name, endpoint URL, supported models, model ID formatter.
-# Priority order: Puter (free 5.2) → Z.ai (real 5.2) → NVIDIA (free 5.1) →
-# OpenRouter (paid 5.2) → SiliconFlow (free tier).
 _GLM_PROVIDERS = [
+    # Puter.js — FREE GLM-5.2, user-pays model. No Z.ai account needed.
     {"name": "puter", "env": "PUTER_API_TOKEN",
      "url": "https://api.puter.com/puterai/openai/v1/chat/completions",
      "models": ["glm-5.2", "glm-5.1"], "model_id": lambda m: f"z-ai/{m}"},
+    # Z.ai public API — real GLM-5.2, "Limited-time Free" cached input
     {"name": "zai", "env": "ZAI_API_KEY",
      "url": "https://api.z.ai/api/paas/v4/chat/completions",
      "models": ["glm-5.2", "glm-5.1"], "model_id": lambda m: m},
+    # NVIDIA NIM — free GLM-5.1, 1000 credits, no phone
     {"name": "nvidia", "env": "NVIDIA_API_KEY",
      "url": "https://integrate.api.nvidia.com/v1/chat/completions",
      "models": ["glm-5.1"], "model_id": lambda m: "z-ai/glm-5.1"},
+    # OpenRouter — GLM-5.2, $1 free credit on signup
     {"name": "openrouter", "env": "OPENROUTER_API_KEY",
      "url": "https://openrouter.ai/api/v1/chat/completions",
      "models": ["glm-5.2", "glm-5.1"], "model_id": lambda m: f"z-ai/{m}"},
+    # SiliconFlow — free tier, GitHub login
     {"name": "siliconflow", "env": "SILICONFLOW_API_KEY",
      "url": "https://api.siliconflow.cn/v1/chat/completions",
      "models": ["glm-5.2", "glm-5.1"], "model_id": lambda m: m},
@@ -319,97 +301,37 @@ _GLM_PROVIDERS = [
 
 def _glm_native_available() -> bool:
     """True if ANY provider env var is set (Python-native call path is usable)."""
-    available = any(os.environ.get(p["env"], "").strip() for p in _GLM_PROVIDERS)
-    try:
-        pass  # debug_log already imported at module level
-        providers_set = [p["name"] for p in _GLM_PROVIDERS
-                         if os.environ.get(p["env"], "").strip()]
-        debug_log.dlog("glm", "_glm_native_available",
-                       f"native_available={available}, providers_with_keys={providers_set}",
-                       data={"available": available, "providers_with_keys": providers_set})
-    except Exception:
-        pass
-    return available
+    return any(os.environ.get(p["env"], "").strip() for p in _GLM_PROVIDERS)
 
 
 def _glm_call_native(messages: list[dict], model: str, timeout: float) -> str:
     """Call GLM providers directly from Python (urllib — stdlib, no Node needed).
     Tries each provider whose key is set + whose models include the requested one.
-    Returns the response text, or raises if all providers fail.
-    Every attempt is logged to debug/glm.log for instant debugging."""
+    Returns the response text, or raises if all providers fail."""
     import urllib.request
-    import urllib.error
     import json as _json
-    pass  # debug_log already imported at module level
-    # Normalize the model name: the agent panel sends "glm-5.2-free" but the
-    # provider config checks against ["glm-5.2", "glm-5.1"]. Strip suffixes
-    # like "-free", "-paid", etc. so the model matches the provider's list.
-    # THIS WAS THE ROOT CAUSE OF "No provider available": the model ID
-    # "glm-5.2-free" never matched "glm-5.2" so every provider was skipped.
-    normalized = model
-    for suffix in ("-free", "-paid", "-turbo", "-flash"):
-        if normalized.endswith(suffix):
-            normalized = normalized[:-len(suffix)]
-            break
-    debug_log.dlog("glm", "_glm_call_native",
-                   f"model normalization: '{model}' → '{normalized}'",
-                   level="DEBUG", data={"original": model, "normalized": normalized})
     errors = []
     for p in _GLM_PROVIDERS:
         key = os.environ.get(p["env"], "").strip()
         if not key:
             continue
-        if normalized not in p["models"]:
-            debug_log.dlog("glm", "_glm_call_native",
-                           f"skip {p['name']}: model '{normalized}' not in {p['models']}",
-                           level="DEBUG", data={"provider": p["name"], "model": normalized})
+        if model not in p["models"]:
             continue
-        model_id = p["model_id"](normalized)
+        model_id = p["model_id"](model)
         body = _json.dumps({"model": model_id, "messages": messages}).encode()
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
         if p["name"] == "openrouter":
             headers["HTTP-Referer"] = "https://scoobybaby1999-loom.hf.space"
             headers["X-Title"] = "loom conscious agents"
         req = urllib.request.Request(p["url"], data=body, method="POST", headers=headers)
-        t0 = time.monotonic()
-        debug_log.dlog("glm", "_glm_call_native",
-                       f"calling {p['name']} endpoint",
-                       data={"provider": p["name"], "url": p["url"],
-                             "model_id": model_id, "msg_count": len(messages),
-                             "token_preview": f"{key[:4]}...{key[-4:]}"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = _json.loads(r.read().decode())
-            ms = (time.monotonic() - t0) * 1000
             content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-            served = data.get("model", "?")
-            debug_log.dlog("glm", "_glm_call_native",
-                           f"SUCCESS via {p['name']}: {len(content)} chars",
-                           ms=ms, data={"provider": p["name"], "served_model": served,
-                                        "content_len": len(content),
-                                        "content_preview": content[:80]})
             if content:
                 return content.strip()
-        except urllib.error.HTTPError as exc:
-            ms = (time.monotonic() - t0) * 1000
-            body_text = ""
-            try:
-                body_text = exc.read().decode(errors="replace")[:200]
-            except Exception:
-                pass
-            err = f"{p['name']} HTTP {exc.code}: {body_text}"
-            errors.append(err)
-            debug_log.derror("glm", "_glm_call_native",
-                             f"FAIL {p['name']} HTTP {exc.code}", exc=exc,
-                             data={"provider": p["name"], "status": exc.code,
-                                   "body": body_text, "ms": round(ms, 1)})
         except Exception as exc:
-            ms = (time.monotonic() - t0) * 1000
-            err = f"{p['name']}: {type(exc).__name__}: {str(exc)[:120]}"
-            errors.append(err)
-            debug_log.derror("glm", "_glm_call_native",
-                             f"FAIL {p['name']} exception", exc=exc,
-                             data={"provider": p["name"], "ms": round(ms, 1)})
+            errors.append(f"{p['name']}: {type(exc).__name__}: {str(exc)[:120]}")
     raise RuntimeError("All GLM providers failed: " + "; ".join(errors))
 
 
@@ -467,10 +389,9 @@ def _glm_call_http(messages: list[dict], model: str, timeout: float) -> str:
 class ZaiAdapter(BaseAdapter):
     """Drives the agent panel with the FREE GLM 5.2 model.
 
-    Tries Python-native HTTP calls first (Puter/Z.ai/NVIDIA/OpenRouter/
-    SiliconFlow — no Node needed), then Node subprocess, then HTTP bridge.
-    Maintains an in-memory conversation for multi-turn context.
-    Every turn is logged to debug/glm.log for instant debugging.
+    No API key required — the z-ai-web-dev-sdk provides free, rate-limited
+    access. Tries the subprocess CLI first (most robust), falls back to the
+    HTTP bridge. Maintains an in-memory conversation for multi-turn context.
     """
 
     def __init__(self, workspace: Path, model: str | None = None,
@@ -479,82 +400,48 @@ class ZaiAdapter(BaseAdapter):
         self.model = model or "glm-5.2"
         self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
         self.messages: list[dict] = []
-        try:
-            pass  # debug_log already imported at module level
-            debug_log.dlog("agent", "ZaiAdapter.__init__",
-                           f"created adapter model={self.model}",
-                           data={"model": self.model, "workspace_id": workspace_id})
-        except Exception:
-            pass
 
     def open(self) -> None:
+        # Seed the conversation with the system prompt. Both call paths forward
+        # the messages array directly to z-ai-web-dev-sdk's chat completions.
         self.messages = [{"role": "system", "content": self.system_prompt}]
-        try:
-            pass  # debug_log already imported at module level
-            debug_log.dlog("agent", "ZaiAdapter.open", "adapter opened",
-                           data={"model": self.model, "system_prompt_len": len(self.system_prompt)})
-        except Exception:
-            pass
 
     def turn(self, user_msg: str, emit) -> None:
         import json as _json
-        pass  # debug_log already imported at module level
         self.messages.append({"role": "user", "content": user_msg})
         content = ""
         errors: list[str] = []
-        t0 = time.monotonic()
-        debug_log.dlog("agent", "ZaiAdapter.turn", f"ENTER: msg={user_msg[:60]!r}",
-                       data={"model": self.model, "msg_len": len(user_msg),
-                             "history_len": len(self.messages)})
         # Path 1: PYTHON-NATIVE direct HTTP call (PREFERRED — no Node needed).
         # This is the path that works on a Python-only HF Space. Uses urllib
         # (stdlib) to call Puter/Z.ai/NVIDIA/OpenRouter/SiliconFlow directly.
         if _glm_native_available():
-            debug_log.dlog("agent", "ZaiAdapter.turn", "trying native path (Python urllib)")
             try:
                 content = _glm_call_native(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
             except Exception as exc:
                 errors.append(f"native: {type(exc).__name__}: {str(exc)[:200]}")
-                debug_log.derror("agent", "ZaiAdapter.turn", "native path failed", exc=exc)
         # Path 2: Node.js subprocess (fallback — used if native fails or no keys set)
         if not content and _glm_subprocess_available():
-            debug_log.dlog("agent", "ZaiAdapter.turn", "trying subprocess path (Node.js)")
             try:
                 content = _glm_call_subprocess(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
             except Exception as exc:
                 errors.append(f"subprocess: {type(exc).__name__}: {str(exc)[:160]}")
-                debug_log.derror("agent", "ZaiAdapter.turn", "subprocess path failed", exc=exc)
         # Path 3: HTTP bridge at localhost:3030 (last resort)
         if not content and _glm_http_available():
-            debug_log.dlog("agent", "ZaiAdapter.turn", "trying HTTP bridge (localhost:3030)")
             try:
                 content = _glm_call_http(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
             except Exception as exc:
                 errors.append(f"http: {type(exc).__name__}: {str(exc)[:160]}")
-                debug_log.derror("agent", "ZaiAdapter.turn", "HTTP bridge path failed", exc=exc)
-        ms = (time.monotonic() - t0) * 1000
         if not content:
             if errors:
                 content = (f"[GLM error] Could not reach the GLM model.\n\n"
                            f"Attempted paths:\n" + "\n".join(f"  • {e}" for e in errors) +
                            f"\n\nSet PUTER_API_TOKEN (free, puter.com/dashboard) as a Space Secret"
                            f" for free GLM-5.2. Or NVIDIA_API_KEY (free 5.1, build.nvidia.com).")
-                debug_log.dlog("agent", "ZaiAdapter.turn",
-                               f"ALL PATHS FAILED in {ms:.0f}ms",
-                               level="ERROR", ms=ms, data={"errors": errors})
             else:
                 content = ("[GLM error] No GLM provider configured. Set ONE of these as a "
                            "Space Secret:\n  • PUTER_API_TOKEN (free GLM-5.2) → puter.com/dashboard\n"
                            "  • NVIDIA_API_KEY (free GLM-5.1) → build.nvidia.com\n"
                            "  • ZAI_API_KEY (real GLM-5.2) → z.ai")
-                debug_log.dlog("agent", "ZaiAdapter.turn",
-                               "NO PROVIDER CONFIGURED",
-                               level="ERROR", ms=ms)
-        else:
-            debug_log.dlog("agent", "ZaiAdapter.turn",
-                           f"EXIT OK in {ms:.0f}ms: {len(content)} chars",
-                           ms=ms, data={"content_len": len(content),
-                                        "content_preview": content[:80]})
         self.messages.append({"role": "assistant", "content": content})
         emit({"type": "assistant", "text": content})
 
@@ -847,14 +734,31 @@ class StrandsAdapter(BaseAdapter):
 
         # the agent works in its session workspace; tools are imported defensively
         # so a renamed/missing tool never blocks startup.
-        # shell is replaced by _guarded_shell to force workdir per-thread instead
-        # of using a process-wide os.chdir() (which breaks concurrent sessions).
+        # Tool suite (user requested bash/shell/grep/web instead of python_repl):
+        # - shell: bash execution (replaces python_repl as the primary tool)
+        # - file_read: read files
+        # - file_write: write files
+        # - editor: str_replace-based file editing
+        # - http_request: web fetch (replaces python_repl for web access)
+        # - python_repl: still available as a fallback for complex logic
+        # - calculator: math
+        # - load_tool: meta-tool — agent can load more tools at runtime
+        # shell is replaced by _guarded_shell to force workdir per-thread.
         tools = []
         for mod_name in ("file_read", "file_write", "editor",
-                         "python_repl", "http_request"):
+                         "http_request", "python_repl", "calculator",
+                         "load_tool"):
             try:
                 import importlib
                 tools.append(importlib.import_module(f"strands_tools.{mod_name}"))
+            except Exception:
+                continue
+        # Try to import the grep tool (may be named differently across versions)
+        for grep_mod in ("grep", "search_files", "grep_code"):
+            try:
+                import importlib
+                tools.append(importlib.import_module(f"strands_tools.{grep_mod}"))
+                break
             except Exception:
                 continue
         # guarded shell: forces execution into this session's workspace

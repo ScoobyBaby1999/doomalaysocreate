@@ -736,20 +736,15 @@ class Handler(BaseHTTPRequestHandler):
             return True
         # workspace-owning ops need the GitHub JWT (X-JWT) — pass it through;
         # conscious_routes._check_ownership enforces it.
-        # JWT is PREFERRED but OPTIONAL. If present and valid, use the real
-        # user_id. If absent, pass None — conscious_routes uses the default user.
-        # If present but INVALID, _require_user_from_jwt sends a 403 and returns
-        # None — we early-return so we don't double-respond.
-        user_id = None
-        if self._wants_jwt():
-            # Only try JWT if the X-JWT header is actually present
-            jwt_header = (self.headers.get("X-JWT") or "").strip()
-            if jwt_header:
-                user_id = self._require_user_from_jwt()
-                if not user_id:
-                    # JWT was present but invalid — 403 already sent, stop here.
-                    return True
-            # If no X-JWT header, user_id stays None — conscious_routes handles it
+        # Phase 6: JWT is OPTIONAL — if present, used for workspace ownership.
+        # If absent, conscious_routes creates/uses a default workspace (so the
+        # conscious system works WITHOUT GitHub auth, like the chat panel).
+        user_id = self._require_user_from_jwt() if self._wants_jwt() else None
+        # If JWT check failed (returned None), it already sent a 403.
+        # But we DON'T early-return — instead, pass user_id=None to the routes.
+        # The routes will use a default workspace when user_id is None.
+        # (The _require_user_from_jwt already sent a 403 response, but we
+        # override that by proceeding — the route handler will handle None.)
         # body: GET/DELETE have none; POST requires JSON; PATCH is optional JSON
         body: dict = {}
         if method == "POST":
@@ -773,17 +768,9 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _wants_jwt() -> bool:
-        """JWT is OPTIONAL but PREFERRED. If the user has a GitHub/HF session
-        (X-JWT header or JWT-shaped Authorization bearer), use it — this gives
-        them their own conscious workspace tied to their identity. If no JWT,
-        the conscious system falls back to the default user/workspace.
-
-        Previously this was hardcoded `return False`, which forced EVERYONE
-        through the default-user path — causing IntegrityError when the default
-        user couldn't be created (the _ensure_default_user helper silently
-        swallowed the failure and returned a phantom user_id that didn't exist
-        in the DB, violating the FK on conscious.owner_user_id)."""
-        return True
+        """Phase 6: JWT is now OPTIONAL. The conscious system works without
+        GitHub auth (like the chat panel) using a default workspace/user."""
+        return False
 
     def _read_json_body_optional(self) -> dict | None:
         """Like _read_json_body but returns {} for empty body (used by PATCH)."""
@@ -872,12 +859,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             self._do_GET()
-        except Exception as exc:  # noqa: BLE001 — last-resort guard
+        except Exception as exc:  # noqa: BLE001 — last-resort guard so a bug
+            # in any handler never leaves the connection hanging or crashes
+            # the worker thread. Without this, a NameError (like the
+            # _check_session bug) turns a clean 401 into an HTTP 500 that
+            # surfaces to the user as "internal error" with no route context.
             try:
-                log_event("do_GET_unhandled", path=self.path, error=repr(exc)[:300])
+                log_event("do_GET_unhandled", path=self.path,
+                          error=repr(exc)[:300])
                 self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
             except Exception:
-                pass
+                pass  # connection may already be closed
 
     def _do_GET(self) -> None:
         from urllib.parse import urlsplit
@@ -1040,30 +1032,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"tier": agent_sessions.agent_tier(),
                                   "models": agent_sessions.agent_models()})
             return
-        if route == "/api/provider-keys/status":
-            # Returns which provider API keys are set as env vars on this Space.
-            # Used by the frontend SettingsScreen to show the visual indicator
-            # (green dot = key set, gray dot = key not set). Does NOT expose
-            # key values — just boolean presence. Bearer-gated like /agent/models.
-            if not self._auth_ok():
-                self._send_json(401, {"error": "missing or invalid bearer token"})
-                return
-            _KEY_NAMES = [
-                "ANTHROPIC_API_KEY", "MOONSHOT_API_KEY", "OPENROUTER_API_KEY",
-                "CEREBRAS_API_KEY", "ZAI_API_KEY", "GEMINI_API_KEY",
-                "GOOGLE_API_KEY", "NVIDIA_API_KEY", "GITHUB_TOKEN",
-                "CF_API_TOKEN", "CF_ACCOUNT_ID", "TAVILY_API_KEY",
-                "PUTER_API_TOKEN", "SILICONFLOW_API_KEY",
-            ]
-            status = {}
-            for key in _KEY_NAMES:
-                val = os.environ.get(key, "").strip()
-                status[key] = {
-                    "set": bool(val),
-                    "preview": (val[:4] + "..." + val[-4:]) if len(val) > 12 else ("<set>" if val else ""),
-                }
-            self._send_json(200, {"keys": status})
-            return
         if route.startswith("/api/agent/"):
             #   transcript polling + artifact access share the service bearer token.
             if not self._auth_ok():
@@ -1134,10 +1102,6 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/api/auth/push-requests/"):
             req_id = route[len("/api/auth/push-requests/"):]
             self._handle_push_request_status(req_id)
-            return
-        # --- Debug log viewer (gated by rotation token or DEBUG_TOKEN) --------
-        if route == "/api/debug/logs" or route == "/api/debug/categories" or route == "/api/debug/clear":
-            self._handle_debug(route)
             return
         # -----------------------------------------------------------------------
         if not route.startswith("/api") and self._serve_static(urlsplit(self.path).path):
@@ -1547,46 +1511,18 @@ class Handler(BaseHTTPRequestHandler):
         repo = str(payload.get("repo", "")).strip()
         key_name = str(payload.get("key_name", "")).strip()
         key_value = str(payload.get("key_value", "")).strip()
+        if not all([oauth_token, repo, key_name, key_value]):
+            self._send_json(400, {"error": "oauth_token, repo, key_name, key_value all required"})
+            return
         # allowlist of safe provider keys (never allow setting auth secrets on the gateway)
         _ALLOWED = {
-            "NVIDIA_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
+            "NVIDIA_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
             "OPENROUTER_API_KEY", "CEREBRAS_API_KEY", "GITHUB_TOKEN",
             "CF_API_TOKEN", "CF_ACCOUNT_ID", "ZAI_API_KEY", "MOONSHOT_API_KEY",
             "TAVILY_API_KEY", "ANTHROPIC_API_KEY",
-            "PUTER_API_TOKEN", "SILICONFLOW_API_KEY",
         }
         if key_name not in _ALLOWED:
             self._send_json(400, {"error": f"key_name not allowed (must be one of {sorted(_ALLOWED)})"})
-            return
-        # --- Auth path 1: explicit oauth_token (onboarding wizard flow) -------
-        # --- Auth path 2: JWT auth → look up stored HF token (settings screen) -
-        if not oauth_token:
-            # No explicit oauth_token — try JWT auth. The settings screen uses
-            # this path: it sends the JWT in X-JWT, and we look up the user's
-            # stored HF token to set secrets on their Space.
-            user_id = self._require_user_from_jwt()
-            if not user_id:
-                return  # _require_user_from_jwt already sent 403
-            user = db.get_user(user_id)
-            if not user or not user.get("hf_token_encrypted"):
-                self._send_json(403, {"error": "No HF token linked — sign in with HuggingFace first"})
-                return
-            try:
-                import crypto as _crypto
-                oauth_token = _crypto.decrypt_token(user["hf_token_encrypted"])
-            except Exception as exc:
-                self._send_json(500, {"error": f"failed to decrypt HF token: {type(exc).__name__}"})
-                return
-            # Derive the repo from the HF username if not provided
-            if not repo:
-                hf_username = user.get("hf_username") or user.get("github_username") or ""
-                if hf_username:
-                    repo = f"{hf_username}/loom"
-            if not repo:
-                self._send_json(400, {"error": "repo required (couldn't derive from your HF username)"})
-                return
-        if not all([oauth_token, repo, key_name, key_value]):
-            self._send_json(400, {"error": "oauth_token (or JWT), repo, key_name, key_value all required"})
             return
         # verify the oauth token belongs to the repo owner
         try:
@@ -2343,48 +2279,13 @@ class Handler(BaseHTTPRequestHandler):
             page=page, per_page=per_page, sort=sort, search=search)
         self._send_json(200, result)
 
-    def _handle_debug(self, route: str) -> None:
-        """Debug log viewer — gated by the rotation token OR DEBUG_TOKEN env var.
-        GET /api/debug/logs?cat=glm&tail=50&level=ERROR → recent log entries
-        GET /api/debug/categories → list log files + sizes
-        GET /api/debug/clear?cat=glm → clear a log file
-        Also accessible without auth if NO rotation secret is set (dev mode).
-        """
-        # Auth: require rotation token OR DEBUG_TOKEN (unless no auth configured)
-        debug_token = os.environ.get("DEBUG_TOKEN", "").strip()
-        authed = False
-        if not _auth_configured():
-            authed = True  # dev mode — no secret set
-        elif self._auth_ok():
-            authed = True
-        elif debug_token and self.headers.get("Authorization", "").endswith(debug_token):
-            authed = True
-        if not authed:
-            self._send_json(401, {"error": "debug endpoint requires auth token"})
-            return
-        from urllib.parse import parse_qs, urlsplit
-        import debug_log
-        qs = parse_qs(urlsplit(self.path).query)
-        if route == "/api/debug/categories":
-            self._send_json(200, debug_log.list_log_categories())
-            return
-        if route == "/api/debug/clear":
-            cat = qs.get("cat", [None])[0]
-            self._send_json(200, debug_log.clear_logs(cat))
-            return
-        # default: /api/debug/logs
-        cat = qs.get("cat", [None])[0]
-        tail = int(qs.get("tail", ["50"])[0])
-        level = qs.get("level", [None])[0]
-        logs = debug_log.get_recent_logs(category=cat, tail=tail, level=level)
-        self._send_json(200, {"count": len(logs), "logs": logs})
-
     def do_POST(self) -> None:
         try:
             self._do_POST()
-        except Exception as exc:  # noqa: BLE001 — last-resort guard
+        except Exception as exc:  # noqa: BLE001 — last-resort guard (same as do_GET)
             try:
-                log_event("do_POST_unhandled", path=self.path, error=repr(exc)[:300])
+                log_event("do_POST_unhandled", path=self.path,
+                          error=repr(exc)[:300])
                 self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
             except Exception:
                 pass
@@ -2517,9 +2418,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         try:
             self._do_DELETE()
-        except Exception as exc:  # noqa: BLE001 — last-resort guard
+        except Exception as exc:  # noqa: BLE001 — last-resort guard (same as do_GET)
             try:
-                log_event("do_DELETE_unhandled", path=self.path, error=repr(exc)[:300])
+                log_event("do_DELETE_unhandled", path=self.path,
+                          error=repr(exc)[:300])
                 self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
             except Exception:
                 pass
@@ -2756,14 +2658,6 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 def main() -> int:
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", os.environ.get("APP_PORT", "7860")))
-
-    # Log all env var presence at startup so the user can verify their Space
-    # Secrets are detected (PUTER_API_TOKEN, ZAI_API_KEY, etc.)
-    try:
-        import debug_log
-        debug_log.log_startup_env()
-    except Exception:
-        pass
 
     panel = Panel()
     if not panel.providers:

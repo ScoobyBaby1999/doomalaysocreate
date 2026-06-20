@@ -383,13 +383,9 @@ def create_workspace(user_id: str, *, title: str, source_repo: str | None = None
                      source_branches: list[str] | None = None,
                      visibility: str = "private",
                      description: str = "", auto_sync: bool = False,
-                     sandbox_path: str = "", hf_space_id: str | None = None,
-                     workspace_id: str | None = None) -> dict:
+                     sandbox_path: str = "", hf_space_id: str | None = None) -> dict:
     db = _db()
-    # Use the provided workspace_id, or generate a random one. The conscious
-    # system passes a specific ID (e.g. "user-c7bb05356541d765") so the
-    # workspace is stable across sessions and tied to the user's identity.
-    wid = workspace_id or _gen_id()
+    wid = _gen_id()
     now = _iso_now()
     branches_json = json.dumps(source_branches) if source_branches else None
     with _write_lock:

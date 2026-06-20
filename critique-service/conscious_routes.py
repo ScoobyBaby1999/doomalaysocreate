@@ -134,16 +134,9 @@ def _check_ownership(cid: str, user_id: str | None) -> tuple[bool, dict | None]:
 _DEFAULT_USER_ID = "conscious-default-user"
 
 
-def _ensure_default_user() -> str | None:
-    """Create a default user + workspace if they don't exist.
-    Used when no GitHub auth is provided (like the chat panel).
-    Returns the default user_id on success, or None on failure.
-
-    CRITICAL: Previously this silently swallowed ALL exceptions and returned
-    _DEFAULT_USER_ID anyway — even if the user row was never created. That
-    caused IntegrityError downstream when create_conscious tried to INSERT
-    with a non-existent owner_user_id (FK violation). Now it returns None
-    on failure so the caller can return a proper error."""
+def _ensure_default_user() -> str:
+    """Phase 6: create a default user + workspace if they don't exist.
+    Used when no GitHub auth is provided (like the chat panel)."""
     try:
         user = _dbmod.get_user(_DEFAULT_USER_ID)
         if not user:
@@ -157,16 +150,8 @@ def _ensure_default_user() -> str | None:
                 sandbox_path="/tmp/conscious-default",
             )
         return _DEFAULT_USER_ID
-    except Exception as exc:
-        # Log the error — don't silently swallow it. Return None so the caller
-        # knows the default user couldn't be created.
-        try:
-            import debug_log
-            debug_log.derror("conscious", "_ensure_default_user",
-                             f"failed to create default user: {exc}")
-        except Exception:
-            pass
-        return None
+    except Exception:
+        return _DEFAULT_USER_ID
 
 
 # ---------------------------------------------------------------------------
@@ -174,51 +159,23 @@ def _ensure_default_user() -> str | None:
 # ---------------------------------------------------------------------------
 
 def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
-    # If no user_id (no JWT), auto-provision a default user + workspace.
-    # _ensure_default_user now returns None on failure (was silently swallowing).
+    # Phase 6: if no user_id, auto-provision a default user + workspace
     if not user_id:
         user_id = _ensure_default_user()
-        if not user_id:
-            return 500, {"error": "Failed to create default user. Check server logs — this is likely a database initialization issue."}
     workspace_id = str(body.get("workspace_id", "")).strip()
     if not workspace_id:
+        # Phase 6: use the default workspace if none specified
         workspace_id = "conscious-default-workspace"
+        _ensure_default_user()  # ensure the workspace exists
     ws = _dbmod.get_workspace(workspace_id)
     if not ws:
-        # Auto-create the workspace if it doesn't exist.
-        # Previously this ONLY auto-created "conscious-default-workspace" — any
-        # other workspace_id (like "user-c7bb05356541d765" derived from the JWT)
-        # got a 404. Now we auto-create ANY workspace for the authenticated user.
-        create_err = None
-        try:
-            import os as _os
-            sandbox_root = _os.environ.get("LOOM_SANDBOX_ROOT", "/tmp/loom-sandboxes")
-            sandbox_path = f"{sandbox_root}/{workspace_id}"
-            _os.makedirs(sandbox_path, exist_ok=True)
-            _dbmod.create_workspace(
-                user_id,
-                title=f"Conscious Workspace ({workspace_id})",
-                sandbox_path=sandbox_path,
-                workspace_id=workspace_id,  # use the exact ID the client sent
-            )
+        # auto-create the workspace if it doesn't exist
+        if workspace_id == "conscious-default-workspace":
+            _ensure_default_user()
             ws = _dbmod.get_workspace(workspace_id)
-        except Exception as exc:
-            create_err = f"{type(exc).__name__}: {str(exc)[:200]}"
-            try:
-                import debug_log
-                debug_log.derror("conscious", "_create_conscious",
-                                 f"failed to auto-create workspace '{workspace_id}': {exc}",
-                                 data={"workspace_id": workspace_id, "user_id": user_id,
-                                       "error": create_err})
-            except Exception:
-                pass
         if not ws:
-            # Include the actual exception in the error message so the user
-            # can see WHAT failed (was silently swallowed before).
-            detail = f" (error: {create_err})" if create_err else ""
-            return 404, {"error": f"workspace '{workspace_id}' not found and could not be created{detail}"}
-    # Ownership check: skip if using the default user/workspace (they always match)
-    if ws["user_id"] != user_id and not (workspace_id == "conscious-default-workspace"):
+            return 404, {"error": "workspace not found"}
+    if ws["user_id"] != user_id:
         return 403, {"error": "not your workspace"}
     # cap conscious per workspace (TIER3_PLAN.md §13)
     existing = conscious_db.list_conscious(workspace_id)
@@ -232,76 +189,42 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
         policy = "on"
     max_agents = int(body.get("max_agents", 8) or 8)
 
-    # Wrap DB operations in try/except to catch IntegrityError and give a
-    # useful message instead of "internal error: IntegrityError".
-    try:
-        c = conscious_db.create_conscious(
-            workspace_id=workspace_id, owner_user_id=user_id, title=title, goal=goal,
-            cost_ceiling_usd=cost_ceiling, brain_commit_policy=policy,
-            max_agents=max_agents)
-    except Exception as exc:
-        try:
-            import debug_log
-            debug_log.derror("conscious", "_create_conscious",
-                             f"create_conscious failed: {exc}",
-                             data={"workspace_id": workspace_id, "user_id": user_id})
-        except Exception:
-            pass
-        return 500, {"error": f"Failed to create conscious: {type(exc).__name__}: {str(exc)[:200]}"}
-
+    c = conscious_db.create_conscious(
+        workspace_id=workspace_id, owner_user_id=user_id, title=title, goal=goal,
+        cost_ceiling_usd=cost_ceiling, brain_commit_policy=policy,
+        max_agents=max_agents)
     # init .brain/ in the workspace sandbox
     from pathlib import Path
     sandbox = Path(ws["sandbox_path"])
     sandbox.mkdir(parents=True, exist_ok=True)
-    try:
-        bp = _brain.init_brain(sandbox, c)
-    except Exception as exc:
-        try:
-            import debug_log
-            debug_log.derror("conscious", "_create_conscious",
-                             f"init_brain failed: {exc}")
-        except Exception:
-            pass
-        bp = sandbox / ".brain"  # fallback path
+    bp = _brain.init_brain(sandbox, c)
 
-    # spawn orchestrator agent
+    # spawn orchestrator agent (Phase 1: DB row only, no worktree)
     orch_model = str(body.get("orchestrator_model", "")).strip()
     if not orch_model:
+        # default to claude-opus if claude tier available, else open default
         try:
             import agent_sessions
             tier = agent_sessions.agent_tier()
             if tier == "claude":
                 orch_model = "claude-opus-4-8"
-            elif tier in ("open", "zai"):
+            elif tier == "open":
                 models = agent_sessions.agent_models()
-                orch_model = models[0]["model"] if models else "glm-5.2-free"
+                orch_model = models[0]["model"] if models else "groq/llama-3.3-70b-versatile"
             else:
-                orch_model = "glm-5.2-free"  # default to free GLM
+                orch_model = "claude-opus-4-8"  # placeholder; Phase 2 picks real
         except Exception:
-            orch_model = "glm-5.2-free"
-    tier = "claude" if orch_model.startswith("claude") else ("zai" if "glm" in orch_model else "open")
-    try:
-        agent = conscious_db.spawn_agent(
-            conscious_id=c["id"], role="orchestrator", model=orch_model, tier=tier,
-            is_orchestrator=True, subscribed_events=["proposal.*", "task.*", "drawer.*", "message.*"])
-        conscious_db.set_orchestrator(c["id"], agent["id"])
-    except Exception as exc:
-        try:
-            import debug_log
-            debug_log.derror("conscious", "_create_conscious",
-                             f"spawn_agent/set_orchestrator failed: {exc}")
-        except Exception:
-            pass
-        # Don't fail the whole request — the conscious was created, just without
-        # an orchestrator. The user can spawn agents manually.
+            orch_model = "claude-opus-4-8"
+    tier = "claude" if orch_model.startswith("claude") else "open"
+    agent = conscious_db.spawn_agent(
+        conscious_id=c["id"], role="orchestrator", model=orch_model, tier=tier,
+        is_orchestrator=True, subscribed_events=["proposal.*", "task.*", "drawer.*", "message.*"])
+    conscious_db.set_orchestrator(c["id"], agent["id"])
     c = conscious_db.get_conscious(c["id"]) or {}
 
     # regenerate CONSCIOUS.md with the orchestrator
     agents = conscious_db.list_agents(c["id"])
-    try:
-        _brain.regenerate_conscious_md(bp, c, agents, [], [], [])
-    except Exception:
-        pass  # non-critical
+    _brain.regenerate_conscious_md(bp, c, agents, [], [], [])
     return 201, {"conscious": c, "brain_path": str(bp)}
 
 

@@ -20,19 +20,6 @@ from typing import Any
 
 import conscious_db
 
-# --- debug_log: robust import with no-op fallback --------------------------
-# Same pattern as agent_sessions.py — if debug_log.py is missing from the
-# deployment, use a no-op dummy so logging never crashes the code.
-try:
-    import debug_log  # noqa: F401 — tries the real module first
-except ImportError:
-    class _NoOpDebugLog:
-        @staticmethod
-        def dlog(*a, **kw): pass
-        @staticmethod
-        def derror(*a, **kw): pass
-    debug_log = _NoOpDebugLog()  # type: ignore[assignment]
-
 # Phase 1 invoke/delegate stub cost (mocked; per TIER3_PLAN.md §14).
 _STUB_INVOKE_COST_USD = 0.001
 
@@ -357,27 +344,23 @@ def _run_glm_bridge(sub: dict, task: str, inputs: dict,
     try:
         response_text = ""
         errors = []
-        import agent_sessions as _as
-        pass  # debug_log already imported at module level
         # Path 1: PYTHON-NATIVE direct HTTP call (PREFERRED — no Node needed).
         # Uses urllib (stdlib) to call Puter/Z.ai/NVIDIA/OpenRouter/SiliconFlow
         # directly from the Python process. Works on Python-only HF Spaces.
         try:
+            import agent_sessions as _as
             if _as._glm_native_available():
-                debug_log.dlog("conscious", "_run_glm_bridge", "trying native path")
                 response_text = _as._glm_call_native(messages, "glm-5.2", 120)
         except Exception as exc:
             errors.append(f"native: {type(exc).__name__}: {str(exc)[:120]}")
-            debug_log.derror("conscious", "_run_glm_bridge", "native path failed", exc=exc)
         # Path 2: Node.js subprocess (fallback)
         if not response_text:
             try:
+                import agent_sessions as _as
                 if _as._glm_subprocess_available():
-                    debug_log.dlog("conscious", "_run_glm_bridge", "trying subprocess path")
                     response_text = _as._glm_call_subprocess(messages, "glm-5.2", 120)
             except Exception as exc:
                 errors.append(f"subprocess: {type(exc).__name__}: {str(exc)[:120]}")
-                debug_log.derror("conscious", "_run_glm_bridge", "subprocess failed", exc=exc)
         # Path 3: HTTP bridge at localhost:3030 (last resort)
         if not response_text:
             body = _json.dumps({"messages": messages, "model": "glm-5.2"}).encode()
@@ -388,21 +371,14 @@ def _run_glm_bridge(sub: dict, task: str, inputs: dict,
                 method="POST",
             )
             try:
-                debug_log.dlog("conscious", "_run_glm_bridge", "trying HTTP bridge")
                 with _urlreq.urlopen(req, timeout=120) as resp:
                     result = _json.loads(resp.read().decode())
                 response_text = result.get("content", "")
             except Exception as exc:
                 errors.append(f"http: {type(exc).__name__}: {str(exc)[:120]}")
-                debug_log.derror("conscious", "_run_glm_bridge", "HTTP bridge failed", exc=exc)
         if not response_text:
             raise RuntimeError("GLM unavailable — " + "; ".join(errors))
-        debug_log.dlog("conscious", "_run_glm_bridge",
-                       f"SUCCESS: {len(response_text)} chars",
-                       data={"content_len": len(response_text),
-                             "content_preview": response_text[:80]})
     except Exception as exc:
-        debug_log.derror("conscious", "_run_glm_bridge", "ALL PATHS FAILED", exc=exc)
         return (f"[GLM bridge error] {exc}\n\n(Falling back to simulated response.)",
                 [], "failed", str(exc))
 
