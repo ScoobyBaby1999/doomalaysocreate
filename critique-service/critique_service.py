@@ -874,6 +874,10 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
+        # --- HF Spaces health check ---
+        if route == "/-/health":
+            self._send_json(200, {"status": "ok", "service": "doomalaysocreate"})
+            return
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
             self._conscious_dispatch("GET")
