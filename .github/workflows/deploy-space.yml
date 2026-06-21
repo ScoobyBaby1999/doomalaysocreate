@@ -52,16 +52,9 @@ jobs:
           mkdir space/app
           cp -r frontend/. space/app/
           rm -rf space/app/.git space/app/node_modules space/app/dist
-          # the multi-stage Dockerfile + Space README replace the API-only ones
-          cp backend/critique-service/deploy/Dockerfile space/Dockerfile
-          cp backend/critique-service/deploy/README.space.md space/README.md
-          # also copy the glm-bridge (in case it's needed later)
-          mkdir -p space/glm-bridge
-          if [ -d frontend/mini-services/glm-bridge ]; then
-            cp -r frontend/mini-services/glm-bridge/* space/glm-bridge/ 2>/dev/null || true
-          fi
-          # remove the legacy Dockerfile (only deploy/Dockerfile should exist)
-          rm -f space/Dockerfile.txt space/critique-service/Dockerfile
+          # the multi-stage Dockerfile already lands at space/Dockerfile via the cp -r above
+          # overwrite README with the HF Space metadata version
+          cp backend/critique-service/README.space.md space/README.md
           ls space
 
       - name: Push to Space
