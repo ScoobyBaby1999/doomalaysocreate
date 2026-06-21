@@ -3,10 +3,10 @@ import re
 from enum import StrEnum
 from pathlib import Path
 
-# ported (trimmed) from loom's backend/content/roles.py. the critique service only
+# ported (trimmed) from doomalaysocreate's backend/content/roles.py. the critique service only
 # needs: the Roles enum (so the ported scheduler/providers stay drop-in), the
 # prompt-skeleton templating (get_role/make_role), and the refusal/fence helpers.
-# the full per-role context-merge machinery from loom is intentionally left out -
+# the full per-role context-merge machinery from doomalaysocreate is intentionally left out -
 # this service does its own validation in critique_service.py.
 
 

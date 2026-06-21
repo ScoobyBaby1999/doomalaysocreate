@@ -11,7 +11,7 @@ from pathlib import Path
 # mock web tools. MOCK_MODE=1 python tools/sim_research.py
 
 os.environ.setdefault("MOCK_MODE", "1")
-os.environ.setdefault("LOOM_LOG", "0")
+os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ["CRITIQUE_TOKEN"] = "test"
 os.environ["CACHE_ENABLED"] = "0"   # exercises research mechanics with repeated calls;
                                      # the prompt cache (tested in sim_cache) would collapse them

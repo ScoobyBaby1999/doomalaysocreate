@@ -13,7 +13,7 @@ from pathlib import Path
 # JobRunner returns 429 past MAX_INFLIGHT_JOBS. MOCK_MODE=1 python tools/sim_server_limits.py
 
 os.environ.setdefault("MOCK_MODE", "1")
-os.environ.setdefault("LOOM_LOG", "0")
+os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ["CRITIQUE_TOKEN"] = "test"
 os.environ["MAX_WORKERS"] = "2"
 os.environ["REQUEST_TIMEOUT_S"] = "2"

@@ -14,7 +14,7 @@ from pathlib import Path
 # already-finished work. MOCK_MODE=1 python tools/sim_persistence.py
 
 os.environ.setdefault("MOCK_MODE", "1")
-os.environ.setdefault("LOOM_LOG", "0")
+os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ["CRITIQUE_TOKEN"] = "test"
 os.environ.pop("METRICS_HF_REPO", None)
 os.environ.pop("JOBS_HF_REPO", None)            # local-disk persistence only

@@ -158,7 +158,7 @@ def init_main_repo(sandbox: Path, base_branch: str = "main") -> None:
         _git(sandbox, "init", "-b", base_branch)
         # minimal identity so the initial commit succeeds in headless Spaces
         try:
-            _git(sandbox, "config", "user.email", "conscious@loom.local")
+            _git(sandbox, "config", "user.email", "conscious@doomalaysocreate.local")
             _git(sandbox, "config", "user.name", "Conscious")
         except Exception:
             pass

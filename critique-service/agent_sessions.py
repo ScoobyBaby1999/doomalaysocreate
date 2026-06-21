@@ -50,7 +50,7 @@ HERE = Path(__file__).resolve().parent
 SKILLS_SRC = HERE / "agent_skills"   # seeded into each workspace's .claude/skills
 
 AGENT_SYSTEM_PROMPT = (
-    "You are loom's agent — an agentic orchestrator running inside the user's "
+    "You are doomalaysocreate's agent — an agentic orchestrator running inside the user's "
     "own private Space container. Your workspace directory is your sandbox: "
     "create files, run shell commands, pack/unpack zips and repos there. "
     "Artifacts you write to the workspace are listed for the user to download. "
@@ -321,8 +321,8 @@ def _glm_call_native(messages: list[dict], model: str, timeout: float) -> str:
         body = _json.dumps({"model": model_id, "messages": messages}).encode()
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
         if p["name"] == "openrouter":
-            headers["HTTP-Referer"] = "https://scoobybaby1999-loom.hf.space"
-            headers["X-Title"] = "loom conscious agents"
+            headers["HTTP-Referer"] = "https://scoobybaby1999-doomalaysocreate.hf.space"
+            headers["X-Title"] = "doomalaysocreate conscious agents"
         req = urllib.request.Request(p["url"], data=body, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -999,7 +999,7 @@ class AgentSession:
         self.thread.start()
 
     def _seed_skills(self) -> None:
-        #   ship loom's skill folders into the workspace so the Claude tier
+        #   ship doomalaysocreate's skill folders into the workspace so the Claude tier
         #   picks them up via setting_sources=["project"].
         if SKILLS_SRC.is_dir():
             dest = self.workspace / ".claude" / "skills"

@@ -1,11 +1,11 @@
 ---
 name: workspace-artifacts
-description: How to produce downloadable artifacts in loom's agent workspace — pack files/repos into zips, organize outputs, and tell the user what to download. Use whenever the user asks you to create, build, export, package, or hand back files.
+description: How to produce downloadable artifacts in doomalaysocreate's agent workspace — pack files/repos into zips, organize outputs, and tell the user what to download. Use whenever the user asks you to create, build, export, package, or hand back files.
 ---
 
 # Producing artifacts the user can download
 
-You are running inside the user's own private loom Space. Your current working
+You are running inside the user's own private doomalaysocreate Space. Your current working
 directory is a per-session **workspace** that the app exposes to the user: any
 regular file you write there appears in the "artifacts" strip below the chat,
 with a download button. Dotfiles and `.claude/` are hidden from that list.

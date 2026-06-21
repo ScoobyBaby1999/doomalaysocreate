@@ -16,7 +16,7 @@ from ssrfguard import BlockedAddress, assert_public_url
 
 MOCK = (os.environ.get("MOCK_MODE", "0").strip() in ("1", "true", "yes")
         or os.environ.get("WEB_TOOLS_MOCK", "0").strip() in ("1", "true", "yes"))
-_UA = {"User-Agent": "Mozilla/5.0 (compatible; loom-research/1.0)"}
+_UA = {"User-Agent": "Mozilla/5.0 (compatible; doomalaysocreate-research/1.0)"}
 _FETCH_MAX = int(os.environ.get("WEB_FETCH_MAX_CHARS", "24000"))
 
 TOOLS_PROTOCOL = (

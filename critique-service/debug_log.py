@@ -23,18 +23,18 @@ from typing import Any, Callable
 # --- config -----------------------------------------------------------------
 def _resolve_debug_dir() -> Path:
     """Find a writable directory for debug logs. Tries in order:
-    1. LOOM_DEBUG_DIR env var (explicit override)
+    1. DOOMALAYSOCREATE_DEBUG_DIR env var (explicit override)
     2. <app>/debug (next to critique-service/)
-    3. /tmp/loom-debug (always writable on HF Spaces)
-    4. ~/.loom-debug (home directory)
+    3. /tmp/doomalaysocreate-debug (always writable on HF Spaces)
+    4. ~/.doomalaysocreate-debug (home directory)
     Returns the first writable one, or a dummy path if none work."""
     candidates = []
-    env_dir = os.environ.get("LOOM_DEBUG_DIR", "").strip()
+    env_dir = os.environ.get("DOOMALAYSOCREATE_DEBUG_DIR", "").strip()
     if env_dir:
         candidates.append(Path(env_dir))
     candidates.append(Path(__file__).resolve().parent.parent / "debug")
-    candidates.append(Path("/tmp/loom-debug"))
-    candidates.append(Path.home() / ".loom-debug")
+    candidates.append(Path("/tmp/doomalaysocreate-debug"))
+    candidates.append(Path.home() / ".doomalaysocreate-debug")
     for c in candidates:
         try:
             c.mkdir(parents=True, exist_ok=True)
@@ -44,10 +44,10 @@ def _resolve_debug_dir() -> Path:
             return c
         except (OSError, PermissionError):
             continue
-    return Path("/tmp/loom-debug-fallback")
+    return Path("/tmp/doomalaysocreate-debug-fallback")
 
 _DEBUG_DIR = _resolve_debug_dir()
-_DISK_ENABLED = _DEBUG_DIR.exists() and os.environ.get("LOOM_DEBUG", "1").strip() not in ("0", "false", "no", "")
+_DISK_ENABLED = _DEBUG_DIR.exists() and os.environ.get("DOOMALAYSOCREATE_DEBUG", "1").strip() not in ("0", "false", "no", "")
 
 _COMBINED_LOG = _DEBUG_DIR / "current.jsonl"
 
@@ -61,7 +61,7 @@ _CATEGORY_FILES = {
     "http": _DEBUG_DIR / "http.log",
 }
 
-_STDERR_ENABLED = os.environ.get("LOOM_STDERR", "1").strip() not in ("0", "false", "no", "")
+_STDERR_ENABLED = os.environ.get("DOOMALAYSOCREATE_STDERR", "1").strip() not in ("0", "false", "no", "")
 _MAX_FILE_BYTES = 1 * 1024 * 1024
 
 

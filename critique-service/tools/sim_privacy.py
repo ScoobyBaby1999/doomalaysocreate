@@ -10,7 +10,7 @@ from pathlib import Path
 # >=2-frontier guarantee. MOCK_MODE=1 python tools/sim_privacy.py
 
 os.environ.setdefault("MOCK_MODE", "1")
-os.environ.setdefault("LOOM_LOG", "0")
+os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ["CRITIQUE_TOKEN"] = "test"
 os.environ["CACHE_ENABLED"] = "0"
 os.environ.pop("METRICS_HF_REPO", None)

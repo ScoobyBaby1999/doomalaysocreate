@@ -171,7 +171,7 @@ def fetch_repo_files(repo_url: str, *, ref: str = "HEAD", token: str = "",
         assert_public_url(url)  # the initial host (defense-in-depth + DNS-trick catch)
     except BlockedAddress as e:
         raise RepoFetchError(f"repo fetch blocked: {e}") from e
-    req = urllib.request.Request(url, headers={"User-Agent": "loom-panel"})
+    req = urllib.request.Request(url, headers={"User-Agent": "doomalaysocreate-panel"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     opener = urllib.request.build_opener(_GuardedRedirectHandler())

@@ -16,7 +16,7 @@ from pathlib import Path
 
 # --- environment: mock mode + fake keys so providers register ---------------
 os.environ.setdefault("MOCK_MODE", "1")
-os.environ.setdefault("LOOM_LOG", "0")            # quiet the per-call telemetry
+os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")            # quiet the per-call telemetry
 os.environ["CRITIQUE_TOKEN"] = "test-token"
 os.environ["CACHE_ENABLED"] = "0"                 # these scenarios repeat identical calls
                                                    # to exercise ROTATION; the prompt cache

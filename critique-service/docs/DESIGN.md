@@ -1,4 +1,4 @@
-# Loom Model Panel: A Privacy-First Gateway for Uncorrelated Frontier-Model Judgment on Free Tiers
+# Doomalaysocreate Model Panel: A Privacy-First Gateway for Uncorrelated Frontier-Model Judgment on Free Tiers
 
 *System design document — 2026-06. All claims cross-checked against the code at the
 commit that ships this file; constants quoted are the env-overridable defaults.*

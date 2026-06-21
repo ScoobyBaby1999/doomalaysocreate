@@ -10,7 +10,7 @@ from pathlib import Path
 #   MOCK_MODE=1 python tools/sim_templates.py
 
 os.environ.setdefault("MOCK_MODE", "1")
-os.environ.setdefault("LOOM_LOG", "0")
+os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ["CRITIQUE_TOKEN"] = "test"
 os.environ.pop("METRICS_HF_REPO", None)
 os.environ.pop("TEMPLATES_HF_REPO", None)

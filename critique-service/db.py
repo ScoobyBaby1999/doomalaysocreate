@@ -1,6 +1,6 @@
 """SQLite database for GitHub integration: users, workspaces, push logs, registry.
 
-All state is stored in a single ``loom.db`` file in the service's data directory.
+All state is stored in a single ``doomalaysocreate.db`` file in the service's data directory.
 The schema is created/migrated on first access via ``init_db()``.  Thread-safe:
 SQLite is accessed with ``check_same_thread=False`` and all writes go through a
 serializing ``threading.Lock``.
@@ -18,7 +18,7 @@ import time
 import uuid
 from pathlib import Path
 
-DB_PATH = Path(os.environ.get("LOOM_DB_PATH", "/data/loom.db"))
+DB_PATH = Path(os.environ.get("DOOMALAYSOCREATE_DB_PATH", "/data/doomalaysocreate.db"))
 
 _write_lock = threading.Lock()
 _conn: sqlite3.Connection | None = None

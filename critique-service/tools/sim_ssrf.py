@@ -8,7 +8,7 @@ from pathlib import Path
 # the two outbound paths (web_fetch, repopack redirects), allow public ones.
 #   MOCK_MODE=0 python tools/sim_ssrf.py   (web_fetch path needs MOCK off to exercise the guard)
 
-os.environ.setdefault("LOOM_LOG", "0")
+os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ.pop("SSRF_ALLOW_PRIVATE", None)   # ensure the guard is active
 os.environ["MOCK_MODE"] = "0"
 os.environ["WEB_TOOLS_MOCK"] = "0"

@@ -11,7 +11,7 @@ from pathlib import Path
 # end-to-end auth with a derived token, and static back-compat. MOCK_MODE=1 python tools/sim_authtoken.py
 
 os.environ.setdefault("MOCK_MODE", "1")
-os.environ.setdefault("LOOM_LOG", "0")
+os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ.pop("METRICS_HF_REPO", None)
 os.environ.pop("JOBS_HF_REPO", None)
 for key in ("NVIDIA_API_KEY", "CF_API_TOKEN", "CF_ACCOUNT_ID", "OPENROUTER_API_KEY", "GITHUB_TOKEN"):

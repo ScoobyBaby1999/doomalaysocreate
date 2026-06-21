@@ -1,11 +1,11 @@
-"""HF Dataset persistent storage + OAuth for the loom critique service.
+"""HF Dataset persistent storage + OAuth for the doomalaysocreate critique service.
 
 Persists the SQLite DB to a private HF Dataset so data survives Space rebuilds.
 Also provides HF OAuth helpers so users can authorize dataset access.
 
 Tier 3 extension: also persists the ``.brain/`` folder for each active
 Conscious workspace as ``brains/<workspace_id>.tar.gz`` (one tarball per
-workspace, uploaded every 120s alongside ``loom.db``; re-downloaded on boot).
+workspace, uploaded every 120s alongside ``doomalaysocreate.db``; re-downloaded on boot).
 See TIER3_PLAN.md §7.2 for the spec.
 
 Env vars required:
@@ -14,8 +14,8 @@ Env vars required:
     ENCRYPTION_KEY     — Fernet key for token encryption (auto-generated if absent)
 
 Env vars optional:
-    LOOM_DATASET_SUFFIX  — suffix for the dataset name (default: main)
-                           The full name is {hf_username}/loom-priv-{suffix}
+    DOOMALAYSOCREATE_DATASET_SUFFIX  — suffix for the dataset name (default: main)
+                           The full name is {hf_username}/doomalaysocreate-priv-{suffix}
 """
 from __future__ import annotations
 
@@ -283,10 +283,10 @@ _current_hf_token: str = ""
 def dataset_name(hf_username: str) -> str:
     """Return the full dataset repo name for a user.
 
-    Format: {hf_username}/loom-priv-{suffix}
+    Format: {hf_username}/doomalaysocreate-priv-{suffix}
     """
-    suffix = os.environ.get("LOOM_DATASET_SUFFIX", "").strip() or _space_name()
-    return f"{hf_username}/loom-priv-{suffix}"
+    suffix = os.environ.get("DOOMALAYSOCREATE_DATASET_SUFFIX", "").strip() or _space_name()
+    return f"{hf_username}/doomalaysocreate-priv-{suffix}"
 
 
 def init_persistence(user_id: str) -> None:
@@ -330,13 +330,13 @@ def init_persistence(user_id: str) -> None:
 
 
 def _download_db(token: str, ds_name: str) -> None:
-    """Download loom.db from the dataset repo to /data/loom.db if it exists."""
+    """Download doomalaysocreate.db from the dataset repo to /data/doomalaysocreate.db if it exists."""
     from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError
     try:
         path = hf_hub_download(
             repo_id=ds_name,
-            filename="loom.db",
+            filename="doomalaysocreate.db",
             token=token,
             repo_type="dataset",
         )
@@ -347,7 +347,7 @@ def _download_db(token: str, ds_name: str) -> None:
 
 
 def upload_db(token: str, ds_name: str) -> None:
-    """Upload the current loom.db to the dataset repo."""
+    """Upload the current doomalaysocreate.db to the dataset repo."""
     if not db.DB_PATH.exists():
         return
     from huggingface_hub import upload_file
@@ -355,11 +355,11 @@ def upload_db(token: str, ds_name: str) -> None:
     try:
         upload_file(
             path_or_fileobj=str(db.DB_PATH),
-            path_in_repo="loom.db",
+            path_in_repo="doomalaysocreate.db",
             repo_id=ds_name,
             repo_type="dataset",
             token=token,
-            commit_message="auto-sync loom.db",
+            commit_message="auto-sync doomalaysocreate.db",
         )
     except HfHubHTTPError as exc:
         print(f"[dataset_persistence] upload failed: {type(exc).__name__}", flush=True)

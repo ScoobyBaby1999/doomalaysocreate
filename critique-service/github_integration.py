@@ -1,4 +1,4 @@
-"""GitHub integration for the loom critique service.
+"""GitHub integration for the doomalaysocreate critique service.
 
 Handles GitHub OAuth token exchange, encrypted storage, repo/branch/content
 proxying, workspace CRUD, git commit/push/PR operations, and the public
@@ -391,9 +391,9 @@ def init_repo(sandbox: str) -> None:
     """Init a fresh git repo in the sandbox (no remote)."""
     import subprocess
     subprocess.run(["git", "init"], cwd=sandbox, capture_output=True, timeout=10)
-    subprocess.run(["git", "config", "user.email", "agent@loom.local"],
+    subprocess.run(["git", "config", "user.email", "agent@doomalaysocreate.local"],
                    cwd=sandbox, capture_output=True, timeout=10)
-    subprocess.run(["git", "config", "user.name", "Loom Agent"],
+    subprocess.run(["git", "config", "user.name", "Doomalaysocreate Agent"],
                    cwd=sandbox, capture_output=True, timeout=10)
 
 

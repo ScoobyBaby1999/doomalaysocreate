@@ -3,7 +3,7 @@
 #
 # One-time setup (repo Settings -> Secrets and variables -> Actions):
 #   secret   HF_TOKEN  - a Hugging Face WRITE token (hf.co/settings/tokens)
-#   variable HF_SPACE  - the target space id, e.g. ScoobyBaby1999/loom
+#   variable HF_SPACE  - the target space id, e.g. ScoobyBaby1999/doomalaysocreate
 #
 # Pushes to c or socreate auto-deploy once those are configured; until then the
 # job skips silently (manual runs fail loudly with instructions instead).
@@ -30,7 +30,7 @@ jobs:
         run: |
           ok=1
           [ -z "$HF_TOKEN" ] && { echo "::error::Missing HF_TOKEN repo secret (create a WRITE token at hf.co/settings/tokens)"; ok=0; }
-          [ -z "$HF_SPACE" ] && { echo "::error::Missing HF_SPACE repo variable (e.g. ScoobyBaby1999/loom)"; ok=0; }
+          [ -z "$HF_SPACE" ] && { echo "::error::Missing HF_SPACE repo variable (e.g. ScoobyBaby1999/doomalaysocreate)"; ok=0; }
           [ "$ok" = "1" ]
 
       - name: Checkout backend (c)

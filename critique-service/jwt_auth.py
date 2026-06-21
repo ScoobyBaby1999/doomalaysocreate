@@ -1,4 +1,4 @@
-"""Self-validating JWT for stateless loom auth.
+"""Self-validating JWT for stateless doomalaysocreate auth.
 
 Uses HMAC-SHA256 + base64url (no external deps).  The token contains
 encrypted provider credentials so the backend can survive a DB wipe
@@ -72,13 +72,13 @@ def _verify_sig(header_b64: str, payload_b64: str, sig_b64: str) -> bool:
 # ---------------------------------------------------------------------------
 def derive_user_id(github_id: int) -> str:
     """Return a stable 16-char hex user_id from a github_id + secret."""
-    return hashlib.sha256(f"{github_id}:{JWT_SECRET}:loom".encode()).hexdigest()[:16]
+    return hashlib.sha256(f"{github_id}:{JWT_SECRET}:doomalaysocreate".encode()).hexdigest()[:16]
 
 
 def derive_user_id_from_hf(hf_name: str) -> str:
     """Return a stable 16-char hex user_id from a HF username + secret.
     Used for HF-only users who haven't linked GitHub."""
-    return hashlib.sha256(f"hf:{hf_name}:{JWT_SECRET}:loom".encode()).hexdigest()[:16]
+    return hashlib.sha256(f"hf:{hf_name}:{JWT_SECRET}:doomalaysocreate".encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ def verify_jwt(token: str, expected_aud: str | None = None,
 
     ``allow_any_aud=True`` skips the audience check entirely — the signature
     + expiry are still verified.  This is the fallback for multi-Space
-    deployments where the MAIN space (scoobybaby1999-loom) issues the JWT
+    deployments where the MAIN space (scoobybaby1999-doomalaysocreate) issues the JWT
     with ``aud=<main-space-host>`` but a USER space verifies it against its
     own host.  Without this, the user space would reject every JWT from the
     main space → 401 → the workspace panel logs out on every open.

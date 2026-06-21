@@ -1,6 +1,6 @@
-# loom model panel — standalone service
+# doomalaysocreate model panel — standalone service
 
-A slim, token-guarded HTTP service that exposes loom's **multi-model panel**: it
+A slim, token-guarded HTTP service that exposes doomalaysocreate's **multi-model panel**: it
 fans an input out to a panel of frontier LLMs — each on its own provider — and
 merges their outputs. Run it as a **critique panel** (the `/api/critique` preset)
 or as a **general panel** (`/api/panel`) for any role: critique, verify, generate,
@@ -8,8 +8,8 @@ transform, parse, plan — or a fully custom system prompt. Built to deploy free
 **Hugging Face Spaces (Docker)**, reachable from anywhere including the Claude Code
 mobile app on Android.
 
-> Ported from loom's `backend/` and evolved into a **cost-aware routing gateway**:
-> it reuses loom's `SlotScheduler`/`call_slot`, now *activated* for live rotation +
+> Ported from doomalaysocreate's `backend/` and evolved into a **cost-aware routing gateway**:
+> it reuses doomalaysocreate's `SlotScheduler`/`call_slot`, now *activated* for live rotation +
 > **cross-provider failover**, plus a **per-profile metrics substrate** that records
 > real-world cost/throttle/latency so model selection and fan-out staging can be
 > tuned over time without burning quota.
@@ -116,7 +116,7 @@ fire-and-forget task.
 ```jsonc
 // request
 {
-  "plan":   "<markdown plan text  OR  loom schematic JSON>",
+  "plan":   "<markdown plan text  OR  doomalaysocreate schematic JSON>",
   "format": "auto" | "markdown" | "schematic",   // default "auto"
   "panel":  ["provider/model", ...],             // optional; defaults to panel.json
   "rubric": "<optional inline rubric override>"  // optional
@@ -137,7 +137,7 @@ fire-and-forget task.
 ```
 
 - **Auto-detect:** a `plan` that parses as JSON with `stages`/`task_type` is treated
-  as a loom schematic (schematic-aware rubric); otherwise markdown.
+  as a doomalaysocreate schematic (schematic-aware rubric); otherwise markdown.
 - **Resilient:** judges fan out in parallel with per-provider pacing; a judge that
   429s/errors returns `ok:false` and is excluded from the merge — it never fails
   the whole request.
@@ -283,7 +283,7 @@ python tools/orchestrate_client.py --schematic-file build.json \
 
 `panel.json` is the source of truth for the panel. **Any `provider/model` you name
 there is registered on the fly against that provider's API key**, so you can use
-models newer than loom's built-in catalog without touching code. If a model slug
+models newer than doomalaysocreate's built-in catalog without touching code. If a model slug
 is wrong, that one judge simply returns `ok:false` and the request still succeeds —
 fix the string and you're done.
 
@@ -301,7 +301,7 @@ fix the string and you're done.
 ```
 
 > ⚠️ **Verify two slugs:** `z-ai/glm-5.1` (OpenRouter) and the Nemotron Ultra id
-> (NVIDIA NIM) are newer than loom's registry. Confirm them against each provider's
+> (NVIDIA NIM) are newer than doomalaysocreate's registry. Confirm them against each provider's
 > model catalog; correct the strings in `panel.json` if needed.
 
 ## Run locally
@@ -408,9 +408,9 @@ critique-service/
 ├── content/
 │   ├── roles.py          # Roles enum + prompt templating + refusal/fence helpers
 │   └── prompts/
-│       ├── critiquer.md          # markdown-plan rubric (loom's, verbatim)
-│       ├── verifier.md           # yes/no LLM-judge rubric (loom's, verbatim)
-│       └── schematic_critiquer.md# new: loom-schematic-aware rubric
+│       ├── critiquer.md          # markdown-plan rubric (doomalaysocreate's, verbatim)
+│       ├── verifier.md           # yes/no LLM-judge rubric (doomalaysocreate's, verbatim)
+│       └── schematic_critiquer.md# new: doomalaysocreate-schematic-aware rubric
 ├── panel.json            # the editable judge panel
 ├── Dockerfile            # HF Spaces Docker image
 ├── requirements.txt      # just httpx; everything else is stdlib

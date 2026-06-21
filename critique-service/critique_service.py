@@ -42,15 +42,15 @@ from providers import (
 from scheduler import SlotScheduler
 
 # ---------------------------------------------------------------------------
-# loom's multi-model critique panel, exposed as a slim standalone service.
+# doomalaysocreate's multi-model critique panel, exposed as a slim standalone service.
 #
 #   POST /api/critique   (Bearer-token guarded)
-#     { "plan": "<markdown OR loom schematic JSON>",
+#     { "plan": "<markdown OR doomalaysocreate schematic JSON>",
 #       "format": "auto"|"markdown"|"schematic",
 #       "panel":  ["provider/model", ...]   (optional, defaults to panel.json),
 #       "rubric": "<optional inline rubric override>" }
 #
-# fans the plan out to a diverse judge panel in parallel (reusing loom's
+# fans the plan out to a diverse judge panel in parallel (reusing doomalaysocreate's
 # SlotScheduler/call_slot for per-provider pacing + rate-limit handling), then
 # merges the critiques deterministically. one judge failing never fails the call.
 #
@@ -64,7 +64,7 @@ PANEL_PATH = Path(os.environ.get("PANEL_PATH", HERE / "panel.json"))
 STATIC_DIR = Path(os.environ.get("STATIC_DIR", HERE / "static"))
 
 #   OAuth onboarding: the template Space users get duplicated to their own account.
-TEMPLATE_SPACE_ID = os.environ.get("TEMPLATE_SPACE_ID", "ScoobyBaby1999/Loom")
+TEMPLATE_SPACE_ID = os.environ.get("TEMPLATE_SPACE_ID", "ScoobyBaby1999/Doomalaysocreate")
 #   in-memory one-time provision results (token → (timestamp, result)), expires in 5 min.
 _provision_results: dict[str, tuple[float, dict]] = {}
 _provision_lock = threading.Lock()
@@ -110,7 +110,7 @@ DEFAULT_CTX_TOKENS = int(os.environ.get("DEFAULT_CTX_TOKENS", "131072"))
 #   reserved for the role/rubric scaffolding around the packed repo in the system prompt.
 PACK_SYSTEM_OVERHEAD_TOKENS = 2000
 
-# generalized /api/panel: any loom role (or a fully custom system prompt) fanned
+# generalized /api/panel: any doomalaysocreate role (or a fully custom system prompt) fanned
 # out across the model panel. each role maps to a prompt skeleton in
 # content/prompts/<role>.md and a sensible default merge + token budget.
 VALID_ROLES = (
@@ -317,7 +317,7 @@ def _load_panel_cfg() -> dict:
 
 
 def detect_format(plan: str) -> tuple[str, dict | None]:
-    #   loom schematic = JSON object carrying 'stages' or 'task_type'. anything
+    #   doomalaysocreate schematic = JSON object carrying 'stages' or 'task_type'. anything
     #   else is treated as a markdown plan.
     text = plan.strip()
     if text.startswith("{"):
@@ -373,7 +373,7 @@ def build_panel_params(panel: Panel, *, input_text: str, role: str,
                        panel_override: list[str] | None, merge_mode: str | None,
                        max_tokens: int | None, want_artifacts: bool = False,
                        reasoning: bool = False, research: bool = False) -> dict:
-    #   generalized: any loom role, or a fully custom system prompt. this is what
+    #   generalized: any doomalaysocreate role, or a fully custom system prompt. this is what
     #   turns the critique panel into a general "ask my frontier panel to do X".
     if system:
         system_prompt = f"{system.strip()}\n\n## Input\n{input_text}"
@@ -692,7 +692,7 @@ def _pop_provision_result(token: str) -> dict | None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "loom-panel/2.0"
+    server_version = "doomalaysocreate-panel/2.0"
     #   socketserver enforces this on the request socket: a client that opens a
     #   connection but sends its body slowly (slowloris) is dropped instead of pinning
     #   a worker forever. HTTP/1.0 default => no keep-alive holding workers between calls.
@@ -884,7 +884,7 @@ class Handler(BaseHTTPRequestHandler):
             panel: Panel = self.server.panel  # type: ignore[attr-defined]
             roster = panel.roster()
             self._send_json(200, {
-                "service": "loom model panel",
+                "service": "doomalaysocreate model panel",
                 "status": "ok",
                 "web_app": STATIC_DIR.is_dir(),  # bundled frontend served at / ?
                 "token_required": True,
@@ -1192,13 +1192,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         from urllib.parse import quote as _q
-        target_repo = f"{username}/loom"
+        target_repo = f"{username}/doomalaysocreate"
         rotation_secret = secrets.token_urlsafe(32)
         existing = False
 
         # 3. Returning user? Repo ids are unique case-insensitively but API lookups
-        #    are exact-case — find the canonical id of any existing "loom" Space
-        #    (e.g. "<user>/Loom") instead of blindly assuming lowercase.
+        #    are exact-case — find the canonical id of any existing "doomalaysocreate" Space
+        #    (e.g. "<user>/Doomalaysocreate") instead of blindly assuming lowercase.
         try:
             spaces = _hf_api(
                 f"https://huggingface.co/api/spaces?author={_q(username)}&limit=100",
@@ -1565,7 +1565,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # Strict audience check first (same-space JWTs). If that fails, retry
         # with allow_any_aud — the JWT is still signature-verified, so it was
-        # issued by a trusted space (the main loom Space in the proxy flow).
+        # issued by a trusted space (the main doomalaysocreate Space in the proxy flow).
         # Without this fallback, a JWT minted by the main Space is rejected by
         # every user Space → 401 → the workspace panel logs out on every open
         # even though the user just authenticated.
@@ -1629,7 +1629,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": "GitHub auth required — link your GitHub account"})
             return None
         # Strict audience checks first (try both SPACE_HOST and SPACE_ID), then
-        # fall back to allow_any_aud so a JWT minted by the main loom Space is
+        # fall back to allow_any_aud so a JWT minted by the main doomalaysocreate Space is
         # accepted by user Spaces in the proxy flow. Signature is still verified.
         payload = jwt_auth.verify_jwt(jwt, expected_aud=os.environ.get("SPACE_HOST", ""))
         if not payload:
@@ -2675,7 +2675,7 @@ def main() -> int:
               default_panel=panel.default_panel,
               token_configured=_auth_configured(),
               token_rotation=bool(os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip()))
-    print(f"loom model panel listening on {host}:{port}  "
+    print(f"doomalaysocreate model panel listening on {host}:{port}  "
           f"(providers={[p.name for p in panel.providers]})", flush=True)
     # Graceful shutdown: on SIGTERM (HF Space rebuild/stop), upload DB one last time
     import signal

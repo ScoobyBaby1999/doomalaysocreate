@@ -80,7 +80,7 @@
       "privacy": {"trains_on_data": "per-model", "stability_tier": 3, "optout_url": "https://openrouter.ai/docs/features/privacy-and-logging", "note": "':free' routes REQUIRE prompt logging/training consent -> NOT privacy-safe; paid routes are safe with account Privacy enabled."},
       "extra_headers": {
         "HTTP-Referer": "https://huggingface.co/spaces",
-        "X-Title": "loom model panel"
+        "X-Title": "doomalaysocreate model panel"
       },
       "models": [
         "nvidia/nemotron-3-ultra-550b-a55b:free",

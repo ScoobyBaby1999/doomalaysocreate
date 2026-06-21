@@ -70,4 +70,4 @@ exposes `workers{max,busy}` and `jobs_inflight` for monitoring.
 ## Every off-switch
 
 `PRIVACY_MODE` · `DEFAULT_PRIVACY` · `no_store` / `NO_STORE` · `CACHE_ENABLED` ·
-`METRICS_SAMPLE_OUTPUTS` (default off) · `LOOM_LOG=0` (silence telemetry).
+`METRICS_SAMPLE_OUTPUTS` (default off) · `DOOMALAYSOCREATE_LOG=0` (silence telemetry).

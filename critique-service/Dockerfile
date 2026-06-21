@@ -50,7 +50,7 @@ ENV HOME=/home/appuser \
     AGENT_ROOT=/tmp/agent \
     WORKSPACE_BASE=/tmp/workspace \
     BYPASS_TOOL_CONSENT=true \
-    LOOM_DB_PATH=/data/loom.db
+    DOOMALAYSOCREATE_DB_PATH=/data/doomalaysocreate.db
 RUN mkdir -p /data && chmod 777 /data && useradd -m -u 1000 appuser && chown -R appuser:appuser /app /data
 
 # NOTE: The GLM bridge (Node.js mini-service on port 3030) is NO LONGER NEEDED.

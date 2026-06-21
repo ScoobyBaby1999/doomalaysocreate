@@ -10,7 +10,7 @@ from oplog import log_event
 # providers and slots: top-level registry of llm endpoints and the (provider, model)
 # pairs they expose. each slot carries which roles it's allowed to play.
 #
-# ported from loom's backend/providers.py and trimmed for the standalone critique
+# ported from doomalaysocreate's backend/providers.py and trimmed for the standalone critique
 # service. gpt-oss models are intentionally excluded (user preference, see HANDOFF
 # section 4). panel.json is the source of truth for which models are *used* as
 # judges - any provider/model named there is registered on the fly against that
