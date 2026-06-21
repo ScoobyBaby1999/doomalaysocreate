@@ -1,3 +1,13 @@
+---
+title: Doomalaysocreate
+emoji: "\U0001F525"
+colorFrom: gray
+colorTo: green
+sdk: docker
+pinned: false
+license: mit
+---
+
 # doomalaysocreate model panel — standalone service
 
 A slim, token-guarded HTTP service that exposes doomalaysocreate's **multi-model panel**: it
