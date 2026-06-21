@@ -55,8 +55,12 @@ export function GithubConnect({ settings, onConnected }: Props) {
     // the GitHub OAuth and forwards the callback back to this user's Space.
     // If user already has a session (e.g. from HF OAuth), pass its `sub` so
     // the backend merges the GitHub account instead of creating a new one.
-    const MAIN_SPACE = "https://scoobybaby1999-loom.hf.space";
+    const MAIN_SPACE = import.meta.env.VITE_MAIN_SPACE || "";
     const thisSpace = window.location.origin;
+    if (!MAIN_SPACE) {
+      console.error("VITE_MAIN_SPACE not configured - cannot complete GitHub OAuth proxy flow");
+      return;
+    }
     const existingId = settings.githubSessionId ? getJWTSub(settings.githubSessionId) : null;
     const existingParam = existingId ? `&existing_id=${encodeURIComponent(existingId)}` : "";
     const loginUrl = `${MAIN_SPACE}/api/auth/github/login?redirect_to=${encodeURIComponent(thisSpace)}${existingParam}`;

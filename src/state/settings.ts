@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import type { Settings } from "../api/panel";
 
-const KEY = "loom.settings.v1";
-const EXPIRY_KEY = "loom.settings.expiry";
+const KEY = "doomalaysocreate.settings.v1";
+const EXPIRY_KEY = "doomalaysocreate.settings.expiry";
 const EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // In dev (browser) default to the Vite proxy at /backend. A production build is

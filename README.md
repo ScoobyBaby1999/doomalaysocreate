@@ -1,6 +1,6 @@
-# loom app — mobile-first agentic-coder client
+# doomalaysocreate app — mobile-first agentic-coder client
 
-A thin, mobile-first client for the loom panel gateway (`../critique-service`). TypeScript
+A thin, mobile-first client for the doomalaysocreate panel gateway (`../critique-service`). TypeScript
 + React + Vite + Tailwind, designed to be wrapped by **Tauri 2.0** for iOS/Android/desktop
 (the same web build runs in the WebView). Browser is a first-class dev/test target.
 

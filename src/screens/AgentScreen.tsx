@@ -10,8 +10,8 @@ import {
   type AgentStatus,
 } from "../api/agent";
 
-const SESSION_KEY = "loom.agent.session";
-const MODEL_KEY = "loom.agent.model";
+const SESSION_KEY = "doomalaysocreate.agent.session";
+const MODEL_KEY = "doomalaysocreate.agent.model";
 
 /** The agent tab: a chat with the orchestrator running inside the user's Space.
  *  A model picker chooses which frontier model drives it (Claude via its SDK,

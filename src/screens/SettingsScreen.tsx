@@ -41,10 +41,10 @@ export function SettingsScreen({
       return;
     }
     // Clear all stored credentials and reload
-    localStorage.removeItem("loom.settings.v1");
-    localStorage.removeItem("loom.settings.expiry");
-    localStorage.removeItem("loom.agent.session");
-    localStorage.removeItem("loom.agent.model");
+    localStorage.removeItem("doomalaysocreate.settings.v1");
+    localStorage.removeItem("doomalaysocreate.settings.expiry");
+    localStorage.removeItem("doomalaysocreate.agent.session");
+    localStorage.removeItem("doomalaysocreate.agent.model");
     sessionStorage.clear();
     window.location.reload();
   }

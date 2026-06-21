@@ -170,7 +170,7 @@ export function OnboardingScreen({ onComplete }: { onComplete: (s: Partial<Setti
   return (
     <div className="flex flex-col items-center justify-center h-full p-6 space-y-6 text-center">
       <div className="space-y-2">
-        <h1 className="text-2xl font-bold tracking-tight">loom</h1>
+        <h1 className="text-2xl font-bold tracking-tight">doomalaysocreate</h1>
         <p className="text-sm text-muted max-w-xs">
           Multi-model judge panel in your pocket. Sign in to get your own
           private Space — your keys, your metrics, your URL.

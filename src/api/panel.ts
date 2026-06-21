@@ -1,4 +1,4 @@
-// Typed client for the loom panel gateway (the backend we built in critique-service/).
+// Typed client for the doomalaysocreate panel gateway (the backend we built in critique-service/).
 // Mirrors its real endpoints: /health, /api/roster, /api/panel, /api/run, /api/jobs/:id.
 // Async-first: submit a job, then poll the snapshot for per-judge streaming progress
 // (the gateway exposes content_chars / reasoning_chars / tail per running judge).

@@ -1,4 +1,4 @@
-# API contract — loom panel gateway
+# API contract — doomalaysocreate panel gateway
 
 This frontend talks to the backend **only** over HTTP. The backend lives on its own
 branch (`c`) of the same repo, deployed as a Hugging Face Space. Point the app at it in

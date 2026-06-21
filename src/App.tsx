@@ -63,8 +63,12 @@ export default function App() {
             // Persist to localStorage BEFORE navigation — React's useEffect
             // may not flush before window.location.href takes effect.
             saveSettings(newSettings);
-            const MAIN_SPACE = "https://scoobybaby1999-loom.hf.space";
+            const MAIN_SPACE = import.meta.env.VITE_MAIN_SPACE || "";
             const thisSpace = window.location.origin;
+            if (!MAIN_SPACE) {
+              console.error("VITE_MAIN_SPACE not configured - cannot complete HF OAuth proxy flow");
+              return;
+            }
             const userId = getJWTSub(result.session_id) || result.session_id;
             window.location.href = `${MAIN_SPACE}/api/auth/hf/login?redirect_to=${encodeURIComponent(thisSpace)}&github_user_id=${encodeURIComponent(userId)}`;
           } else {
@@ -105,7 +109,7 @@ export default function App() {
     return (
       <div className="flex flex-col h-full">
         <header className="flex items-center px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content">
-          <span className="font-semibold tracking-tight">loom</span>
+          <span className="font-semibold tracking-tight">doomalaysocreate</span>
           <span className="ml-2 text-[11px] text-muted">panel · agentic coder</span>
         </header>
         <main className="flex-1 min-h-0">
@@ -127,10 +131,10 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-full">
-      <header className="flex items-center px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content">
-        <span className="font-semibold tracking-tight">loom</span>
-        <span className="ml-2 text-[11px] text-muted">panel · agentic coder</span>
-      </header>
+       <header className="flex items-center px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content">
+         <span className="font-semibold tracking-tight">doomalaysocreate</span>
+         <span className="ml-2 text-[11px] text-muted">panel · agentic coder</span>
+       </header>
 
       <main className="flex-1 min-h-0">
         {tab === "chat" ? (

@@ -1,6 +1,6 @@
 {
-  "name": "loom",
-  "short_name": "loom",
+  "name": "doomalaysocreate",
+  "short_name": "doomalaysocreate",
   "description": "Multi-model judge panel & agentic coder client",
   "start_url": "/",
   "display": "standalone",

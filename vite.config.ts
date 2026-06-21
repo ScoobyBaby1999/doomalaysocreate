@@ -6,7 +6,7 @@ import react from "@vitejs/plugin-react";
 // Set VITE_BACKEND_ORIGIN to point the dev proxy at a different gateway.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const backend = env.VITE_BACKEND_ORIGIN || "https://scoobybaby1999-loom.hf.space";
+  const backend = env.VITE_BACKEND_ORIGIN || "https://scoobybaby1999-doomalaysocreate.hf.space";
   return {
     plugins: [react()],
     server: {
