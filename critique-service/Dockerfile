@@ -1,9 +1,10 @@
-# Hugging Face Spaces (Docker SDK) image for the FULL loom product: the panel gateway
+# Hugging Face Spaces (Docker SDK) image for the FULL doomalaysocreate product: the panel gateway
 # plus the web app served at /. Built from the tree the deploy-space GitHub Action
 # assembles: backend (critique-service/*) at the root, frontend source under app/.
 # CPU basic / free is plenty - all real work is I/O-bound on the LLM provider APIs.
 
 # --- stage 1: build the web app (vite) so the runtime image ships only dist/ -------
+ARG VITE_MAIN_SPACE
 FROM node:22-alpine AS webbuild
 WORKDIR /web
 COPY app/package.json app/package-lock.json ./
@@ -13,6 +14,7 @@ RUN npm ci
 COPY app/index.html app/tsconfig.json app/tailwind.config.js app/postcss.config.js app/vite.config.ts ./
 COPY app/src/ ./src/
 COPY app/public/ ./public/
+ENV VITE_MAIN_SPACE=${VITE_MAIN_SPACE}
 RUN npm run build
 
 # --- stage 2: the python gateway, serving the built app from ./static --------------
