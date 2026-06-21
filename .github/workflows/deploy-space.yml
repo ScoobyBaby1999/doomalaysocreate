@@ -63,7 +63,7 @@ jobs:
           # Derive main Space URL from HF_SPACE (e.g., "ScoobyBaby1999/doomalaysocreate" -> "https://scoobybaby1999-doomalaysocreate.hf.space")
           MAIN_SPACE_URL="https://${HF_SPACE/\//-}.hf.space"
           # Inject VITE_MAIN_SPACE into Dockerfile for Vite build
-          sed -i "s/ARG VITE_MAIN_SPACE/ARG VITE_MAIN_SPACE=\"${MAIN_SPACE_URL}\"/" Dockerfile
+          sed -i "s|ARG VITE_MAIN_SPACE|ARG VITE_MAIN_SPACE=\"${MAIN_SPACE_URL}\"|" Dockerfile
           git init -b main
           git config user.email "actions@github.com"
           git config user.name "deploy-space action"
