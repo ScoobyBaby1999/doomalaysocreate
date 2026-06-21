@@ -16,12 +16,12 @@ import time
 # Config
 # ---------------------------------------------------------------------------
 # shared secret: prefer dedicated JWT_SECRET, fall back to rotation secret.
-# NO hardcoded fallback — if neither is set the module refuses to load.
+# If neither is set, generate a random one per process (JWTs won't survive
+# restarts — acceptable for ephemeral HF Spaces).
 _raw = os.environ.get("JWT_SECRET") or os.environ.get("CRITIQUE_ROTATION_SECRET")
 if not _raw:
-    raise RuntimeError(
-        "JWT_SECRET or CRITIQUE_ROTATION_SECRET must be set"
-    )
+    import secrets as _secrets
+    _raw = _secrets.token_hex(32)
 JWT_SECRET = _raw.encode()
 
 # default audience: the SPACE_ID env var (set per-Space by HF).  When absent
