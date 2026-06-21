@@ -6,6 +6,7 @@ colorTo: green
 sdk: docker
 pinned: false
 license: mit
+hf_oauth: true
 ---
 
 # doomalaysocreate model panel — standalone service
