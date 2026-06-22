@@ -2,10 +2,11 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import tempfile
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclass import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +137,12 @@ class MetricStore:
             pass
         self.load()
         atexit.register(self.flush)
+        
+        # Auto-sync public metrics periodically
+        self._auto_sync_interval = int(os.environ.get("METRICS_AUTO_SYNC_EVERY", "300"))  # 5 min default
+        self._auto_sync_thread = None
+        if self._hf.enabled:
+            self._start_auto_sync()
 
     def record(self, *, profile: str, logical: str, provider: str, model: str,
                family: str, role: str, effort: str, latency_s: float,
@@ -250,6 +257,95 @@ class MetricStore:
                 log_event("metrics_flush_error", profile=profile, error=repr(e)[:200])
         for path in touched:
             self._hf.upload(path)
+
+    # --- auto-sync public metrics --------------------------------------------
+    def _start_auto_sync(self) -> None:
+        """Start background thread to periodically sync public metrics."""
+        if self._auto_sync_thread is not None:
+            return
+        self._auto_sync_thread = threading.Thread(
+            target=self._auto_sync_loop,
+            daemon=True,
+            name="metrics-auto-sync"
+        )
+        self._auto_sync_thread.start()
+        log_event("metrics_auto_sync_started", interval=self._auto_sync_interval)
+
+    def _auto_sync_loop(self) -> None:
+        """Background loop to periodically download public metrics."""
+        while True:
+            time.sleep(self._auto_sync_interval)
+            try:
+                self.sync_public_metrics()
+            except Exception as e:
+                log_event("metrics_auto_sync_error", error=repr(e)[:200])
+
+    def sync_public_metrics(self) -> dict:
+        """
+        Download and merge public metrics from the shared dataset.
+        Returns stats about what was synced.
+        """
+        if not self._hf.enabled:
+            return {"synced": False, "reason": "hf_not_enabled"}
+        try:
+            # Download to a temp directory, then merge
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                self._hf.download_all(tmp_path)
+                files = list(tmp_path.glob("*.jsonl"))
+                if not files:
+                    return {"synced": True, "files": 0, "events": 0}
+                
+                loaded = 0
+                for f in files:
+                    try:
+                        for line in f.read_text(encoding="utf-8").splitlines():
+                            line = line.strip()
+                            if not line.strip()
+                            if not line:
+                                continue
+                            ev = json.loads(line)
+                            prof = ev.get("profile", "default")
+                            self._profiles[prof].add(dict(ev, _now=time.time()))
+                            loaded += 1
+                    except (OSError, ValueError):
+                        continue
+                return {"synced": True, "files": len(files), "events": loaded}
+        except Exception as e:
+            log_event("metrics_sync_error", error=repr(e)[:200])
+            return {"synced": False, "error": str(e)[:200]}
+
+    def get_user_metrics(self, profile: str) -> dict:
+        """
+        Get all metrics for a specific user profile from the public dataset.
+        Downloads if needed, returns aggregated metrics for that profile.
+        """
+        if self._hf.enabled:
+            try:
+                self.sync_public_metrics()
+            except Exception:
+                pass  # fall back to local cache
+        return self.aggregates(profile)
+
+    def get_global_aggregates(self) -> dict:
+        """
+        Get aggregated stats across ALL profiles in the public dataset.
+        Useful for community dashboards: "most used model for programming", etc.
+        """
+        if self._hf.enabled:
+            try:
+                self.sync_public_metrics()
+            except Exception:
+                pass
+        with self._lock:
+            all_profiles = {}
+            for prof_name, pm in self._profiles.items():
+                all_profiles[prof_name] = {
+                    "events": len(pm.events),
+                    "by_provider": {k: v.view() for k, v in pm.by_provider.items()},
+                    "by_model_role": {k: v.view() for k, v in pm.by_model_role.items()},
+                }
+            return {"profiles": all_profiles, "total_profiles": len(all_profiles)}
 
 
 class _HFSink:

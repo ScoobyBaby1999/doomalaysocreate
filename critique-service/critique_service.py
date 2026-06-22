@@ -17,6 +17,7 @@ import authtoken
 import conscious_routes
 import dataset_persistence
 import db
+import debug_log
 import github_integration
 import jwt_auth
 import orchestrate
@@ -846,7 +847,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Security-Policy",
-                         "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                         "default-src 'none'; script-src 'self' https://js.puter.com; style-src 'self' 'unsafe-inline'; "
                          "img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
                          "manifest-src 'self'; base-uri 'none'")
         self.end_headers()
@@ -877,6 +878,21 @@ class Handler(BaseHTTPRequestHandler):
         # --- HF Spaces health check ---
         if route == "/-/health":
             self._send_json(200, {"status": "ok", "service": "doomalaysocreate"})
+            return
+        # --- Debug logs (auth-gated) ---
+        if route == "/api/debug/logs":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            from urllib.parse import parse_qs, urlsplit
+            q = parse_qs(urlsplit(self.path).query)
+            cat = q.get("cat", [None])[0]
+            tail = int(q.get("tail", ["100"])[0])
+            level = q.get("level", [None])[0]
+            self._send_json(200, {
+                "logs": debug_log.get_recent_logs(cat, tail, level),
+                "categories": debug_log.list_log_categories(),
+            })
             return
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
@@ -1014,6 +1030,30 @@ class Handler(BaseHTTPRequestHandler):
                     q = parse_qs(urlsplit(self.path).query)
                     profile = (q.get("profile", ["default"])[0] or "default")
                 self._send_json(200, panel.metrics.aggregates(profile))
+            return
+        # --- public metrics sync & global aggregates ---
+        if route == "/api/metrics/sync":
+            # Force sync from public dataset
+            result = panel.metrics.sync_public_metrics()
+            self._send_json(200, result)
+            return
+        if route == "/api/metrics/global":
+            # Global aggregates across all profiles (community dashboard)
+            result = panel.metrics.get_global_aggregates()
+            self._send_json(200, result)
+            return
+        if route == "/api/metrics/user":
+            # User's own metrics from public dataset (requires auth)
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            profile = "default"
+            if "?" in self.path:
+                from urllib.parse import parse_qs, urlsplit
+                q = parse_qs(urlsplit(self.path).query)
+                profile = (q.get("profile", ["default"])[0] or "default")
+            result = panel.metrics.get_user_metrics(profile)
+            self._send_json(200, result)
             return
         if route.startswith("/api/jobs/"):
             #   polling an async job needs the same bearer token as submitting one.
