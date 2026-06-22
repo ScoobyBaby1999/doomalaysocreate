@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from dataclass import dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -301,7 +301,6 @@ class MetricStore:
                     try:
                         for line in f.read_text(encoding="utf-8").splitlines():
                             line = line.strip()
-                            if not line.strip()
                             if not line:
                                 continue
                             ev = json.loads(line)
