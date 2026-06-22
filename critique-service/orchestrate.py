@@ -240,7 +240,7 @@ class _TemplateHFSink:
     """mirror user templates to templates/ in the private HF Dataset (optional)."""
 
     def __init__(self) -> None:
-        self.repo_id = os.environ.get("TEMPLATES_HF_REPO", os.environ.get("METRICS_HF_REPO", "")).strip()
+        self.repo_id = os.environ.get("TEMPLATES_HF_REPO", os.environ.get("METRICS_PUBLIC_HF_REPO", "")).strip()
         self.token = (os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_TOKEN", "")).strip()
         self._api = None
         self.enabled = False

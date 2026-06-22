@@ -19,7 +19,7 @@ os.environ["MAX_WORKERS"] = "2"
 os.environ["REQUEST_TIMEOUT_S"] = "2"
 os.environ["MAX_INFLIGHT_JOBS"] = "3"
 os.environ["CACHE_ENABLED"] = "0"
-os.environ.pop("METRICS_HF_REPO", None)
+os.environ.pop("METRICS_PUBLIC_HF_REPO", None)
 os.environ.pop("JOBS_HF_REPO", None)
 os.environ.pop("OPTIN_PROVIDERS", None)
 for key in ("NVIDIA_API_KEY", "CF_API_TOKEN", "CF_ACCOUNT_ID", "OPENROUTER_API_KEY", "GITHUB_TOKEN"):

@@ -96,7 +96,7 @@ class _JobHFSink:
 
     def __init__(self) -> None:
         self.repo_id = (os.environ.get("JOBS_HF_REPO", "")
-                        or os.environ.get("METRICS_HF_REPO", "")).strip()
+                        or os.environ.get("METRICS_PUBLIC_HF_REPO", "")).strip()
         self.token = (os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_TOKEN", "")).strip()
         self._api = None
         self.enabled = False

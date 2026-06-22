@@ -22,7 +22,7 @@ os.environ["CACHE_ENABLED"] = "0"                 # these scenarios repeat ident
                                                    # to exercise ROTATION; the prompt cache
                                                    # (correctly) collapses them, so disable it
                                                    # here. cache itself is tested in sim_cache.
-os.environ.pop("METRICS_HF_REPO", None)           # in-memory persistence only
+os.environ.pop("METRICS_PUBLIC_HF_REPO", None)           # in-memory persistence only
 os.environ.pop("OPTIN_PROVIDERS", None)
 for key in ("NVIDIA_API_KEY", "CF_API_TOKEN", "CF_ACCOUNT_ID", "OPENROUTER_API_KEY", "GITHUB_TOKEN"):
     os.environ[key] = "mock"

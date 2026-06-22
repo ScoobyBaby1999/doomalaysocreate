@@ -14,7 +14,7 @@ MARK = "SECRETMARKER_d0Not_Leak_123456"
 os.environ.setdefault("MOCK_MODE", "1")
 os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ["CRITIQUE_TOKEN"] = "smoke-token"
-os.environ.pop("METRICS_HF_REPO", None)
+os.environ.pop("METRICS_PUBLIC_HF_REPO", None)
 os.environ.pop("JOBS_HF_REPO", None)
 os.environ["NVIDIA_API_KEY"] = "nvapi-" + MARK
 os.environ["CF_API_TOKEN"] = "cf-" + MARK

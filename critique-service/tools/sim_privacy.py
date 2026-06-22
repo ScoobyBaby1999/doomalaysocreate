@@ -13,7 +13,7 @@ os.environ.setdefault("MOCK_MODE", "1")
 os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ["CRITIQUE_TOKEN"] = "test"
 os.environ["CACHE_ENABLED"] = "0"
-os.environ.pop("METRICS_HF_REPO", None)
+os.environ.pop("METRICS_PUBLIC_HF_REPO", None)
 os.environ.pop("OPTIN_PROVIDERS", None)
 for key in ("NVIDIA_API_KEY", "CF_API_TOKEN", "CF_ACCOUNT_ID", "OPENROUTER_API_KEY", "GITHUB_TOKEN"):
     os.environ[key] = "mock"

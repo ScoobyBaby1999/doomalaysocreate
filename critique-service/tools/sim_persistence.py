@@ -16,7 +16,7 @@ from pathlib import Path
 os.environ.setdefault("MOCK_MODE", "1")
 os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ["CRITIQUE_TOKEN"] = "test"
-os.environ.pop("METRICS_HF_REPO", None)
+os.environ.pop("METRICS_PUBLIC_HF_REPO", None)
 os.environ.pop("JOBS_HF_REPO", None)            # local-disk persistence only
 for key in ("NVIDIA_API_KEY", "CF_API_TOKEN", "CF_ACCOUNT_ID", "OPENROUTER_API_KEY", "GITHUB_TOKEN"):
     os.environ[key] = "mock"

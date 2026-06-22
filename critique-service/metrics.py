@@ -25,8 +25,9 @@ from oplog import log_event
 # qualitative review by Opus.
 #
 # Persistence: a Hugging Face Space filesystem is ephemeral (reset on sleep), so
-# durable storage is an append-only JSONL per profile in a private HF Dataset
-# repo (we already have HF_TOKEN). If that isn't configured the store degrades
+# durable storage is an append-only JSONL per profile in a PUBLIC HF Dataset
+# repo (optional). If configured, ALL Spaces write to the SAME dataset so metrics
+# are shared and aggregated across users. Without this, the store degrades
 # gracefully to in-memory + a local jsonl cache - still fully queryable within a
 # session. Flushes are batched + best-effort and never break a request.
 
@@ -252,10 +253,10 @@ class MetricStore:
 
 
 class _HFSink:
-    """optional durable sink: mirrors per-profile JSONL to a private HF Dataset."""
+    """optional durable sink: mirrors per-profile JSONL to a PUBLIC HF Dataset."""
 
     def __init__(self) -> None:
-        self.repo_id = os.environ.get("METRICS_HF_REPO", "").strip()
+        self.repo_id = os.environ.get("METRICS_PUBLIC_HF_REPO", "").strip()
         self.token = (os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_TOKEN", "")).strip()
         self._api = None
         self.enabled = False
@@ -264,9 +265,21 @@ class _HFSink:
         try:
             from huggingface_hub import HfApi
             self._api = HfApi(token=self.token)
-            self._api.create_repo(self.repo_id, repo_type="dataset", private=True, exist_ok=True)
+            self._api.create_repo(self.repo_id, repo_type="dataset", private=False, exist_ok=True)
             self.enabled = True
             log_event("metrics_hf_enabled", repo=self.repo_id)
+        except Exception as e:  # noqa: BLE001 - persistence must never break boot
+            log_event("metrics_hf_disabled", reason=repr(e)[:200])
+            self.enabled = False
+        if not (self.repo_id and self.token):
+            return
+        try:
+            from huggingface_hub import HfApi
+            self._api = HfApi(token=self.token)
+            # PUBLIC dataset - anyone can read, authenticated users with write token can write
+            self._api.create_repo(self.repo_id, repo_type="dataset", private=False, exist_ok=True)
+            self.enabled = True
+            log_event("metrics_hf_enabled", repo=self.repo_id, public=True)
         except Exception as e:  # noqa: BLE001 - persistence must never break boot
             log_event("metrics_hf_disabled", reason=repr(e)[:200])
             self.enabled = False
@@ -294,6 +307,7 @@ class _HFSink:
             return
         try:
             from huggingface_hub import snapshot_download
+            # Public dataset - no token needed for download, but use if available
             snap = snapshot_download(self.repo_id, repo_type="dataset", token=self.token,
                                      allow_patterns="metrics/*.jsonl")
             src = Path(snap) / "metrics"

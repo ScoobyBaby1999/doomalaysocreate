@@ -15,7 +15,7 @@ os.environ.setdefault("DOOMALAYSOCREATE_LOG", "0")
 os.environ["CRITIQUE_TOKEN"] = "test"
 os.environ["CACHE_ENABLED"] = "0"   # exercises research mechanics with repeated calls;
                                      # the prompt cache (tested in sim_cache) would collapse them
-os.environ.pop("METRICS_HF_REPO", None)
+os.environ.pop("METRICS_PUBLIC_HF_REPO", None)
 for key in ("NVIDIA_API_KEY", "CF_API_TOKEN", "CF_ACCOUNT_ID", "OPENROUTER_API_KEY", "GITHUB_TOKEN"):
     os.environ[key] = "mock"
 for p in ("NVIDIA", "CLOUDFLARE", "OPENROUTER", "GITHUB_MODELS"):

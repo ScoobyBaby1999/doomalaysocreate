@@ -206,7 +206,7 @@ for `no_store` jobs. Exposed via `GET /api/stats`, `/api/metrics?profile=`, `/ap
 
 Duplicate the Hugging Face Space, set your own provider keys as Space secrets
 (`NVIDIA_API_KEY`, `CF_API_TOKEN`+`CF_ACCOUNT_ID`, `GITHUB_TOKEN`, `OPENROUTER_API_KEY`) and
-a `CRITIQUE_TOKEN`; optionally `METRICS_HF_REPO`/`JOBS_HF_REPO` for cross-deploy durability.
+a `CRITIQUE_TOKEN`; optionally `METRICS_PUBLIC_HF_REPO`/`JOBS_HF_REPO` for cross-deploy durability.
 The service boots with whatever keys are present and reports its live posture at `/health`
 and `/api/roster`. Everything is stdlib + `httpx`; no build step. See `README.md` for the
 API surface and `PRIVACY.md` for the full privacy/off-switch matrix.

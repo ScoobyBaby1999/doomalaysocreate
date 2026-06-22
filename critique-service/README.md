@@ -172,8 +172,9 @@ GET /api/metrics?profile=<id>   -> per-profile aggregates: by provider (calls, s
 These answer: *how fast/why does a provider throttle, which model is best at which
 role, what does a fan-out actually cost* — the substrate for staging fan-outs
 without burning quota. **Persistence:** an HF Space filesystem is ephemeral, so set
-`METRICS_HF_REPO` + `HF_TOKEN` to mirror per-profile JSONL to a **private HF
-Dataset** (loaded on boot, batched/best-effort flush). Without them the store runs
+`METRICS_PUBLIC_HF_REPO` + `HF_TOKEN` to mirror per-profile JSONL to a **public HF
+Dataset** shared across ALL users (loaded on boot, batched/best-effort flush). This
+creates a community benchmark dataset. Without them the store runs
 in-memory only (still queryable within a session). `set_budget_cooldown` also cools
 a provider for a profile once it crosses the catalog's published daily request/token
 ceiling.
@@ -340,7 +341,7 @@ curl -sS -X POST http://127.0.0.1:7860/api/critique \
    - the core provider keys you want rotated: `NVIDIA_API_KEY`, `GOOGLE_API_KEY`,
      `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`,
      `CF_API_TOKEN`+`CF_ACCOUNT_ID`, `GITHUB_TOKEN` (any subset).
-   - optionally `METRICS_HF_REPO` + `HF_TOKEN` for durable per-profile metrics,
+    - optionally `METRICS_PUBLIC_HF_REPO` + `HF_TOKEN` to contribute per-profile metrics to the **public community benchmark dataset**,
      and `OPTIN_PROVIDERS` (+ `ZAI_API_KEY`/`MOONSHOT_API_KEY`) for the opt-in pool.
 4. The Space builds and serves on port **7860**. Public URL:
    `https://<user>-<space>.hf.space`. Test:
