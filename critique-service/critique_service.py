@@ -14,6 +14,7 @@ from pathlib import Path
 
 import agent_sessions
 import authtoken
+import crypto
 import conscious_routes
 import dataset_persistence
 import db
@@ -1093,6 +1094,23 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/oauth/result/"):
             self._handle_oauth_result(route[len("/oauth/result/"):])
             return
+        # --- Identity grant claim endpoints (main Space serves, any Space claims) --
+        if route.startswith("/api/auth/github/grants/"):
+            token = route[len("/api/auth/github/grants/"):]
+            data = _pop_provision_result(token)
+            if data is None:
+                self._send_json(404, {"error": "grant token not found or expired"})
+            else:
+                self._send_json(200, data)
+            return
+        if route.startswith("/api/auth/hf/grants/"):
+            token = route[len("/api/auth/hf/grants/"):]
+            data = _pop_provision_result(token)
+            if data is None:
+                self._send_json(404, {"error": "grant token not found or expired"})
+            else:
+                self._send_json(200, data)
+            return
         # --- GitHub integration routes -------------------------------------------
         if route == "/api/auth/github/login":
             self._handle_github_login()
@@ -1757,9 +1775,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._redirect(f"https://{host}/#github-error=invalid_state")
             return
 
-        # Proxy flow: forward the code to the user's Space
+        # Proxy flow: exchange code on main Space, create in-memory identity grant
         if redirect_to:
-            self._redirect(f"{redirect_to}#github-code={code}&state={state}")
+            try:
+                gh_token = github_integration.exchange_github_code(code)
+                user_data = github_integration.get_github_user(gh_token)
+                encrypted = crypto.encrypt_token(gh_token) if gh_token else ""
+                grant_data = {
+                    "github_id": user_data["id"],
+                    "github_username": user_data.get("login", ""),
+                    "github_token_encrypted": encrypted,
+                }
+                grant_token = _store_provision_result(grant_data)
+                self._redirect(f"{redirect_to}#github-grant={grant_token}")
+            except Exception as exc:
+                log_event("github_oauth_error", error=str(exc)[:200])
+                self._redirect(f"{redirect_to}#github-error=token_exchange_failed")
             return
 
         # Direct flow (main Space): exchange code and complete
@@ -1827,6 +1858,53 @@ class Handler(BaseHTTPRequestHandler):
         db.delete_github_token(user_id)
         self._send_json(200, {"disconnected": True})
 
+    def _handle_github_claim_grant(self) -> None:
+        """Claim a GitHub identity grant from the main Space and create a local user.
+        POST /api/auth/github/claim-grant  body: {"token": "..."}
+        Returns {"session_id": "<local-jwt>", "user_id": "...", next?: "hf"}"""
+        payload = self._read_json_body()
+        if not payload:
+            return
+        token = (payload.get("token") or "").strip()
+        if not token:
+            self._send_json(400, {"error": "token required"})
+            return
+        main_space = os.environ.get("MAIN_SPACE_URL", "").strip()
+        if not main_space:
+            self._send_json(503, {"error": "MAIN_SPACE_URL not configured on this Space"})
+            return
+        from urllib.parse import quote as _q
+        import urllib.request as _ureq
+        try:
+            req = _ureq.Request(f"{main_space}/api/auth/github/grants/{_q(token)}")
+            with _ureq.urlopen(req, timeout=15) as resp:
+                identity = json.loads(resp.read().decode())
+        except Exception as exc:
+            self._send_json(502, {"error": f"failed to claim grant: {exc}"})
+            return
+        gh_id = identity.get("github_id")
+        if not gh_id:
+            self._send_json(502, {"error": "invalid grant: missing github_id"})
+            return
+        user_id = jwt_auth.derive_user_id(gh_id)
+        user = db.upsert_user(
+            user_id=user_id,
+            github_id=gh_id,
+            github_username=identity.get("github_username", ""),
+            github_token_encrypted=identity.get("github_token_encrypted", ""),
+        )
+        jwt_token = jwt_auth.generate_jwt(
+            user_id=user["id"],
+            github_id=user["github_id"],
+            github_username=user.get("github_username", ""),
+            github_token_encrypted=user.get("github_token_encrypted", ""),
+            audience=self._space_host(),
+        )
+        result: dict[str, object] = {"session_id": jwt_token, "user_id": user["id"]}
+        if not user.get("hf_token_encrypted"):
+            result["next"] = "hf"
+        self._send_json(200, result)
+
     # -- HF OAuth handlers --------------------------------------------------
 
     def _handle_hf_login(self) -> None:
@@ -1883,9 +1961,33 @@ class Handler(BaseHTTPRequestHandler):
                 self._redirect(f"https://{host}/#hf-error=invalid_state")
             return
 
-        # Proxy flow: forward the code to the user's Space
+        # Proxy flow: exchange code on main Space, create in-memory identity grant
         if redirect_to:
-            self._redirect(f"{redirect_to}#hf-code={code}&state={state}")
+            try:
+                redirect_uri = f"https://{host}/api/auth/hf/callback"
+                token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
+                whoami = _hf_api("https://huggingface.co/api/whoami-v2", token=token_data["access_token"])
+                username = whoami.get("name", "").strip()
+                access_enc = crypto.encrypt_token(token_data.get("access_token", "")) or ""
+                refresh_enc = crypto.encrypt_token(token_data.get("refresh_token", "")) or ""
+                expires_at = ""
+                if token_data.get("expires_in"):
+                    from datetime import datetime, timezone, timedelta
+                    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))).isoformat()
+                grant_data: dict[str, object] = {
+                    "hf_id": username,
+                    "hf_username": username,
+                    "hf_token_encrypted": access_enc,
+                    "hf_refresh_token_encrypted": refresh_enc,
+                    "hf_token_expires_at": expires_at,
+                }
+                if github_user_id:
+                    grant_data["github_user_id"] = github_user_id
+                grant_token = _store_provision_result(grant_data)
+                self._redirect(f"{redirect_to}#hf-grant={grant_token}")
+            except Exception as exc:
+                log_event("hf_oauth_error", error=str(exc)[:200])
+                self._redirect(f"{redirect_to}#hf-error=token_exchange_failed")
             return
 
         # Direct flow (main Space): exchange code and complete
@@ -1956,6 +2058,61 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             log_event("hf_proxy_exchange_error", error=str(exc)[:200])
             self._send_json(500, {"error": "token exchange failed"})
+
+    def _handle_hf_claim_grant(self) -> None:
+        """Claim an HF identity grant from the main Space and create/merge a local user.
+        POST /api/auth/hf/claim-grant  body: {"token": "..."}
+        Returns {"session_id": "<local-jwt>", "user_id": "..."}"""
+        payload = self._read_json_body()
+        if not payload:
+            return
+        token = (payload.get("token") or "").strip()
+        if not token:
+            self._send_json(400, {"error": "token required"})
+            return
+        main_space = os.environ.get("MAIN_SPACE_URL", "").strip()
+        if not main_space:
+            self._send_json(503, {"error": "MAIN_SPACE_URL not configured on this Space"})
+            return
+        from urllib.parse import quote as _q
+        import urllib.request as _ureq
+        try:
+            req = _ureq.Request(f"{main_space}/api/auth/hf/grants/{_q(token)}")
+            with _ureq.urlopen(req, timeout=15) as resp:
+                identity = json.loads(resp.read().decode())
+        except Exception as exc:
+            self._send_json(502, {"error": f"failed to claim grant: {exc}"})
+            return
+        hf_username = identity.get("hf_username", "")
+        if not hf_username:
+            self._send_json(502, {"error": "invalid grant: missing hf_username"})
+            return
+        github_user_id = (identity.get("github_user_id") or "").strip()
+        if github_user_id:
+            existing = db.get_user(github_user_id)
+            user_id = existing["id"] if existing else jwt_auth.derive_user_id_from_hf(hf_username)
+        else:
+            user_id = jwt_auth.derive_user_id_from_hf(hf_username)
+        user = db.upsert_user(
+            user_id=user_id,
+            github_id=None,
+            hf_id=hf_username,
+            hf_username=hf_username,
+            hf_token_encrypted=identity.get("hf_token_encrypted", ""),
+            hf_refresh_token_encrypted=identity.get("hf_refresh_token_encrypted", ""),
+            hf_token_expires_at=identity.get("hf_token_expires_at", ""),
+        )
+        user = db.get_user(user["id"]) or user
+        jwt_token = jwt_auth.generate_jwt(
+            user_id=user["id"],
+            github_id=user.get("github_id") or 0,
+            github_username=user.get("github_username") or "",
+            github_token_encrypted=user.get("github_token_encrypted") or "",
+            hf_id=user.get("hf_username") or "",
+            hf_token_encrypted=user.get("hf_token_encrypted") or "",
+            audience=self._space_host(),
+        )
+        self._send_json(200, {"session_id": jwt_token, "user_id": user["id"]})
 
     def _handle_auth_status(self) -> None:
         user_id = self._require_user()
@@ -2357,6 +2514,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             stopped = session.interrupt()
             self._send_json(200, {"interrupted": stopped, "status": session.status})
+            return
+        # --- Identity grant claim POST endpoints (claimed on user Spaces) ---------
+        if route == "/api/auth/github/claim-grant":
+            self._handle_github_claim_grant()
+            return
+        if route == "/api/auth/hf/claim-grant":
+            self._handle_hf_claim_grant()
             return
         # --- GitHub integration POST routes --------------------------------------
         if route == "/api/auth/github/disconnect":
