@@ -1795,8 +1795,9 @@ class Handler(BaseHTTPRequestHandler):
                 grant_token = _store_provision_result(grant_data)
                 self._redirect(f"{redirect_to}#github-grant={grant_token}")
             except Exception as exc:
-                log_event("github_oauth_error", error=str(exc)[:200])
-                self._redirect(f"{redirect_to}#github-error=token_exchange_failed")
+                err = str(exc)[:120].replace("#", "").replace("&", "")
+                log_event("github_oauth_error", error=err)
+                self._redirect(f"{redirect_to}#github-error={err}")
             return
 
         # Direct flow (main Space): exchange code and complete
@@ -1812,8 +1813,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             self._redirect(f"https://{host}/#github-connected={jwt_token}")
         except Exception as exc:
-            log_event("github_oauth_error", error=str(exc)[:200])
-            self._redirect(f"https://{host}/#github-error=token_exchange_failed")
+            err = str(exc)[:120].replace("#", "").replace("&", "")
+            log_event("github_oauth_error", error=err)
+            self._redirect(f"https://{host}/#github-error={err}")
 
     def _handle_github_proxy_exchange(self, route: str) -> None:
         """Exchange a GitHub OAuth code received via the proxy flow.
@@ -1992,8 +1994,9 @@ class Handler(BaseHTTPRequestHandler):
                 grant_token = _store_provision_result(grant_data)
                 self._redirect(f"{redirect_to}#hf-grant={grant_token}")
             except Exception as exc:
-                log_event("hf_oauth_error", error=str(exc)[:200])
-                self._redirect(f"{redirect_to}#hf-error=token_exchange_failed")
+                err = str(exc)[:120].replace("#", "").replace("&", "")
+                log_event("hf_oauth_error", error=err)
+                self._redirect(f"{redirect_to}#hf-error={err}")
             return
 
         # Direct flow (main Space): exchange code and complete
@@ -2014,8 +2017,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             self._redirect(f"https://{host}/#hf-connected={jwt_token}")
         except Exception as exc:
-            log_event("hf_oauth_error", error=str(exc)[:200])
-            self._redirect(f"https://{host}/#hf-error=token_exchange_failed")
+            err = str(exc)[:120].replace("#", "").replace("&", "")
+            log_event("hf_oauth_error", error=err)
+            self._redirect(f"https://{host}/#hf-error={err}")
 
     def _handle_hf_proxy_exchange(self, route: str) -> None:
         from urllib.parse import parse_qs, urlsplit
