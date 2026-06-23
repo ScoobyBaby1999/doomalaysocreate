@@ -701,6 +701,12 @@ class Handler(BaseHTTPRequestHandler):
     timeout = REQUEST_TIMEOUT_S
     panel: Panel  # injected on the server instance
 
+    def _set_csp_header(self) -> None:
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        )
+
     def _send_json(self, status: int, payload: dict, *, headers: dict | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
