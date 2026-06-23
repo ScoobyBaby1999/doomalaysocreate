@@ -7,7 +7,7 @@ import { AgentScreen } from "./screens/AgentScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
 import { ConsciousScreen } from "./screens/ConsciousScreen";
 import { DebugScreen } from "./screens/DebugScreen";
-import { exchangeGitHubCode, exchangeHFCode } from "./api/github";
+
 import { getJWTSub } from "./lib/jwt";
 import type { Settings } from "./api/panel";
 
@@ -20,8 +20,8 @@ export default function App() {
   const [tab, setTab] = useState<Tab>(hasCredentials ? "chat" : "settings");
 
   // Handle OAuth callback hashes
-  // GitHub: #github-connected=<id> | #github-code=<code>&state=<state> (proxy) | #github-error=...
-  // HF:     #hf-connected=<id>     | #hf-code=<code>&state=<state> (proxy)     | #hf-error=...
+  // GitHub: #github-connected=<id> | #github-grant=<token> (proxy) | #github-error=...
+  // HF:     #hf-connected=<id>     | #hf-grant=<token> (proxy)     | #hf-error=...
   // Chain:  GitHub result.next="hf" triggers automatic HF OAuth redirect
   useEffect(() => {
     // Re-read localStorage on bfcache restore (back/forward nav) so React
@@ -37,11 +37,10 @@ export default function App() {
     if (!hash) return;
     const params = new URLSearchParams(hash);
     const githubId = params.get("github-connected");
-    const githubCode = params.get("github-code");
+    const githubGrant = params.get("github-grant");
     const githubError = params.get("github-error");
-    const stateParam = params.get("state");
     const hfId = params.get("hf-connected");
-    const hfCode = params.get("hf-code");
+    const hfGrant = params.get("hf-grant");
     const hfError = params.get("hf-error");
 
     // Clear hash immediately
@@ -53,15 +52,17 @@ export default function App() {
       saveSettings(ghSettings);
       setSettings(ghSettings);
       setTab("workspaces");
-    } else if (githubCode && stateParam) {
-      // Proxy flow: exchange code for token via this Space's backend
-      exchangeGitHubCode(githubCode, stateParam, settings.baseUrl).then((result) => {
+    } else if (githubGrant) {
+      // Proxy flow: claim identity grant from this Space's backend
+      fetch(`${settings.baseUrl}/api/auth/github/claim-grant`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: githubGrant }),
+      }).then(r => r.json()).then((result) => {
         if (result.session_id) {
           const newSettings = { ...settings, githubSessionId: result.session_id };
           setSettings(newSettings);
           if (result.next === "hf") {
-            // Persist to localStorage BEFORE navigation — React's useEffect
-            // may not flush before window.location.href takes effect.
             saveSettings(newSettings);
             const MAIN_SPACE = import.meta.env.VITE_MAIN_SPACE || "";
             const thisSpace = window.location.origin;
@@ -77,7 +78,7 @@ export default function App() {
           }
         }
       }).catch((e) => {
-        console.error("GitHub code exchange failed:", e);
+        console.error("GitHub grant claim failed:", e);
       });
     } else if (githubError) {
       console.error("GitHub OAuth error:", githubError);
@@ -87,9 +88,13 @@ export default function App() {
       saveSettings(hfSettings);
       setSettings(hfSettings);
       setTab("workspaces");
-    } else if (hfCode && stateParam) {
-      // Proxy HF flow: exchange code
-      exchangeHFCode(hfCode, stateParam, settings.baseUrl).then((result) => {
+    } else if (hfGrant) {
+      // Proxy HF flow: claim HF identity grant from this Space's backend
+      fetch(`${settings.baseUrl}/api/auth/hf/claim-grant`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: hfGrant }),
+      }).then(r => r.json()).then((result) => {
         if (result.session_id) {
           const newSettings = { ...settings, githubSessionId: result.session_id };
           saveSettings(newSettings);
@@ -97,7 +102,7 @@ export default function App() {
           setTab("workspaces");
         }
       }).catch((e) => {
-        console.error("HF code exchange failed:", e);
+        console.error("HF grant claim failed:", e);
       });
     } else if (hfError) {
       console.error("HF OAuth error:", hfError);
