@@ -736,24 +736,23 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path.rstrip("/")
         if path != "/api/conscious" and not path.startswith("/api/conscious/"):
             return False
-        if not self._auth_ok():
-            if not _auth_configured():
-                self._send_json(503, {"error": "no auth secret configured on server "
-                                               "(set CRITIQUE_TOKEN or CRITIQUE_ROTATION_SECRET)"})
-            else:
-                self._send_json(401, {"error": "missing or invalid bearer token"})
-            return True
         # workspace-owning ops need the GitHub JWT (X-JWT) — pass it through;
         # conscious_routes._check_ownership enforces it.
         # Phase 6: JWT is OPTIONAL — if present, used for workspace ownership.
         # If absent, conscious_routes creates/uses a default workspace (so the
         # conscious system works WITHOUT GitHub auth, like the chat panel).
         user_id = self._require_user_from_jwt() if self._wants_jwt() else None
-        # If JWT check failed (returned None), it already sent a 403.
-        # But we DON'T early-return — instead, pass user_id=None to the routes.
-        # The routes will use a default workspace when user_id is None.
-        # (The _require_user_from_jwt already sent a 403 response, but we
-        # override that by proceeding — the route handler will handle None.)
+        if not self._auth_ok():
+            # Fallback: try JWT identity as the auth signal, so users who only
+            # have githubSessionId (no rotation secret) can still use conscious
+            # routes. If neither bearer nor JWT is valid, reject.
+            if not user_id:
+                if not _auth_configured():
+                    self._send_json(503, {"error": "no auth secret configured on server "
+                                                   "(set CRITIQUE_TOKEN or CRITIQUE_ROTATION_SECRET)"})
+                else:
+                    self._send_json(401, {"error": "missing or invalid bearer token"})
+                return True
         # body: GET/DELETE have none; POST requires JSON; PATCH is optional JSON
         body: dict = {}
         if method == "POST":
@@ -777,9 +776,11 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _wants_jwt() -> bool:
-        """Phase 6: JWT is now OPTIONAL. The conscious system works without
-        GitHub auth (like the chat panel) using a default workspace/user."""
-        return False
+        """Phase 6+: JWT is preferred. When present, conscious routes use the
+        JWT'd user_id to find user-specific workspaces. When absent (no GitHub
+        connection), they fall back to the default user/workspace so the
+        conscious system works without GitHub auth."""
+        return True
 
     def _read_json_body_optional(self) -> dict | None:
         """Like _read_json_body but returns {} for empty body (used by PATCH)."""
@@ -1124,17 +1125,11 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/auth/github/callback":
             self._handle_github_callback()
             return
-        if route.startswith("/api/auth/github/proxy-exchange"):
-            self._handle_github_proxy_exchange(self.path)
-            return
         if route == "/api/auth/hf/login":
             self._handle_hf_login()
             return
         if route == "/api/auth/hf/callback":
             self._handle_hf_callback()
-            return
-        if route.startswith("/api/auth/hf/proxy-exchange"):
-            self._handle_hf_proxy_exchange(self.path)
             return
         if route == "/api/auth/status":
             self._handle_auth_status()
@@ -1383,6 +1378,7 @@ class Handler(BaseHTTPRequestHandler):
             # for the service/rotation token).
             user_id = self._require_user_from_jwt()
             if not user_id:
+                self._send_json(401, {"error": "GitHub identity required — connect GitHub in settings"})
                 return
             if ws["user_id"] != user_id:
                 self._send_json(403, {"error": "access denied"})
@@ -1695,7 +1691,8 @@ class Handler(BaseHTTPRequestHandler):
                 if candidate.count(".") == 2:
                     jwt = candidate
         if not jwt:
-            self._send_json(403, {"error": "GitHub auth required — link your GitHub account"})
+            # No JWT at all — return None silently (caller falls through
+            # to default user / unauthenticated path).
             return None
         # Strict audience checks first (try both SPACE_HOST and SPACE_ID), then
         # fall back to allow_any_aud so a JWT minted by the main doomalaysocreate Space is
@@ -1706,8 +1703,7 @@ class Handler(BaseHTTPRequestHandler):
         if not payload:
             payload = jwt_auth.verify_jwt(jwt, allow_any_aud=True)
         if not payload:
-            self._send_json(403, {"error": "invalid or expired GitHub session"})
-            return None
+            return None  # caller decides the response for failed auth
         user_id = payload["sub"]
         # reconstruct user row if missing (DB wiped) — same logic as _require_user.
         # If the JWT has no encrypted GitHub token, still create a minimal row;
@@ -1835,48 +1831,6 @@ class Handler(BaseHTTPRequestHandler):
             err = str(exc)[:120].replace("#", "").replace("&", "")
             log_event("github_oauth_error", error=err)
             self._redirect(f"https://{host}/#github-error={err}")
-
-    def _handle_github_proxy_exchange(self, route: str) -> None:
-        """Exchange a GitHub OAuth code received via the proxy flow.
-        Called by the frontend when it receives #github-code=<code>&state=<state>."""
-        from urllib.parse import parse_qs, urlsplit
-        qs = parse_qs(urlsplit(route).query)
-        code = (qs.get("code", [""])[0] or "").strip()
-        state = (qs.get("state", [""])[0] or "").strip()
-
-        if not code or not state:
-            self._send_json(400, {"error": "missing code or state"})
-            return
-        valid, combined = _verify_oauth_state(state)
-        if not valid:
-            self._send_json(400, {"error": "invalid or expired state"})
-            return
-        # Extract existing_id if packed into state (pipe-separated)
-        # Format: redirect_to|existing_id
-        existing_id = ""
-        if "|" in combined:
-            parts = combined.split("|", 1)
-            if len(parts) > 1:
-                existing_id = parts[1]
-        try:
-            gh_token = github_integration.exchange_github_code(code)
-            user = github_integration.upsert_user_from_github(gh_token, user_id=existing_id or None)
-            user_id = user["id"]
-            jwt_token = jwt_auth.generate_jwt(
-                user_id=user["id"],
-                github_id=user["github_id"],
-                github_username=user.get("github_username", ""),
-                github_token_encrypted=user.get("github_token_encrypted", ""),
-                audience=self._space_host(),
-            )
-            result: dict[str, object] = {"session_id": jwt_token, "user_id": user_id}
-            # Chain HF OAuth if user hasn't connected HF yet
-            if not user.get("hf_token_encrypted"):
-                result["next"] = "hf"
-            self._send_json(200, result)
-        except Exception as exc:
-            log_event("github_proxy_exchange_error", error=str(exc)[:200])
-            self._send_json(500, {"error": "token exchange failed"})
 
     def _handle_github_disconnect(self) -> None:
         user_id = self._require_user()
@@ -2060,54 +2014,6 @@ class Handler(BaseHTTPRequestHandler):
             err = str(exc)[:120].replace("#", "").replace("&", "")
             log_event("hf_oauth_error", error=err)
             self._redirect(f"https://{host}/#hf-error={err}")
-
-    def _handle_hf_proxy_exchange(self, route: str) -> None:
-        from urllib.parse import parse_qs, urlsplit
-        qs = parse_qs(urlsplit(route).query)
-        code = (qs.get("code", [""])[0] or "").strip()
-        state = (qs.get("state", [""])[0] or "").strip()
-
-        if not code or not state:
-            self._send_json(400, {"error": "missing code or state"})
-            return
-        valid, combined = _verify_oauth_state(state)
-        if not valid:
-            self._send_json(400, {"error": "invalid or expired state"})
-            return
-        # Extract redirect_uri and github_user_id packed into redirect_to (pipe-separated)
-        # Format: redirect_to|redirect_uri|github_user_id
-        redirect_uri = ""
-        github_user_id = ""
-        if "|" in combined:
-            parts = combined.split("|", 2)
-            if len(parts) > 1:
-                redirect_uri = parts[1]
-            if len(parts) > 2:
-                github_user_id = parts[2]
-        try:
-            token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
-            user = dataset_persistence.upsert_user_from_hf(token_data, user_id=github_user_id or None)
-            # Initialize dataset persistence now that we have HF token
-            try:
-                dataset_persistence.init_persistence(user["id"])
-            except Exception as exc:
-                log_event("dataset_init_error", error=str(exc)[:200])
-            # Re-fetch to ensure we have the complete row (with github_id if merged)
-            user = db.get_user(user["id"]) or user
-            user_id = user["id"]
-            jwt_token = jwt_auth.generate_jwt(
-                user_id=user["id"],
-                github_id=user.get("github_id") or 0,
-                github_username=user.get("github_username") or "",
-                github_token_encrypted=user.get("github_token_encrypted") or "",
-                hf_id=user.get("hf_username") or "",
-                hf_token_encrypted=user.get("hf_token_encrypted") or "",
-                audience=self._space_host(),
-            )
-            self._send_json(200, {"session_id": jwt_token, "user_id": user_id})
-        except Exception as exc:
-            log_event("hf_proxy_exchange_error", error=str(exc)[:200])
-            self._send_json(500, {"error": "token exchange failed"})
 
     def _handle_hf_claim_grant(self) -> None:
         """Claim an HF identity grant from the main Space and create/merge a local user.
