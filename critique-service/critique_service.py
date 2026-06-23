@@ -705,6 +705,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._set_csp_header()
         #   CORS: the web app may be served from a different origin (separate static
         #   host, or local dev without the proxy). auth is a bearer header - no cookies -
         #   so a wildcard origin grants nothing by itself; requests still need the token.
