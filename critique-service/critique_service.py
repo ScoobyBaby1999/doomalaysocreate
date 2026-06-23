@@ -848,7 +848,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Security-Policy",
                          "default-src 'none'; script-src 'self' https://js.puter.com; style-src 'self' 'unsafe-inline'; "
-                         "img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
+                         "img-src 'self' data: blob:; font-src 'self'; connect-src 'self' wss://api.puter.com; "
                          "manifest-src 'self'; base-uri 'none'")
         self.end_headers()
         self.wfile.write(body)
