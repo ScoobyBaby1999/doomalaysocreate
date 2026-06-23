@@ -23,10 +23,14 @@ def _get_fernet():
     from cryptography.fernet import Fernet
     key = os.environ.get("ENCRYPTION_KEY", "").strip()
     if not key:
-        # ephemeral key — fine for single-restart HF Space containers
         key = Fernet.generate_key().decode()
         os.environ["ENCRYPTION_KEY"] = key
-    _fernet = Fernet(key.encode() if isinstance(key, str) else key)
+    try:
+        _fernet = Fernet(key.encode() if isinstance(key, str) else key)
+    except (ValueError, TypeError):
+        key = Fernet.generate_key().decode()
+        os.environ["ENCRYPTION_KEY"] = key
+        _fernet = Fernet(key.encode() if isinstance(key, str) else key)
     return _fernet
 
 
