@@ -1783,6 +1783,25 @@ class Handler(BaseHTTPRequestHandler):
 
         # Proxy flow: exchange code on main Space, create in-memory identity grant
         if redirect_to:
+            # Self-referencing redirect (user is on the same Space as the OAuth app):
+            # skip the grant round-trip and use the direct JWT flow instead.
+            if redirect_to.rstrip("/") == f"https://{host}".rstrip("/"):
+                try:
+                    gh_token = github_integration.exchange_github_code(code)
+                    user = github_integration.upsert_user_from_github(gh_token, user_id=existing_id or None)
+                    jwt_token = jwt_auth.generate_jwt(
+                        user_id=user["id"],
+                        github_id=user["github_id"],
+                        github_username=user.get("github_username", ""),
+                        github_token_encrypted=user.get("github_token_encrypted", ""),
+                        audience=host,
+                    )
+                    self._redirect(f"{redirect_to}#github-connected={jwt_token}")
+                except Exception as exc:
+                    err = str(exc)[:120].replace("#", "").replace("&", "")
+                    log_event("github_oauth_error", error=err)
+                    self._redirect(f"{redirect_to}#github-error={err}")
+                return
             try:
                 gh_token = github_integration.exchange_github_code(code)
                 user_data = github_integration.get_github_user(gh_token)
@@ -1971,6 +1990,27 @@ class Handler(BaseHTTPRequestHandler):
 
         # Proxy flow: exchange code on main Space, create in-memory identity grant
         if redirect_to:
+            # Self-referencing redirect: skip grant round-trip, use direct JWT flow.
+                if redirect_to.rstrip("/") == f"https://{host}".rstrip("/"):
+                    try:
+                        redirect_uri = f"https://{host}/api/auth/hf/callback"
+                        token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
+                        user = dataset_persistence.upsert_user_from_hf(token_data, user_id=github_user_id or None)
+                        jwt_token = jwt_auth.generate_jwt(
+                            user_id=user["id"],
+                            github_id=user.get("github_id"),
+                            github_username=user.get("github_username", ""),
+                            github_token_encrypted=user.get("github_token_encrypted", ""),
+                            hf_id=user.get("hf_username", ""),
+                            hf_token_encrypted=user.get("hf_token_encrypted", ""),
+                            audience=host,
+                        )
+                        self._redirect(f"{redirect_to}#hf-connected={jwt_token}")
+                    except Exception as exc:
+                        err = str(exc)[:120].replace("#", "").replace("&", "")
+                        log_event("hf_oauth_error", error=err)
+                        self._redirect(f"{redirect_to}#hf-error={err}")
+                    return
             try:
                 redirect_uri = f"https://{host}/api/auth/hf/callback"
                 token_data = dataset_persistence.exchange_hf_code(code, redirect_uri=redirect_uri)
