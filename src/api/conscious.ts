@@ -113,7 +113,9 @@ export class ConsciousClient {
 
   private async bearer(windowsBack = 0): Promise<string> {
     if (this.settings.rotationSecret) return deriveToken(this.settings.rotationSecret, windowsBack);
-    return this.settings.token;
+    if (this.settings.token) return this.settings.token;
+    // Fall back to GitHub OAuth JWT (githubSessionId) for conscious API auth
+    return this.settings.githubSessionId || "";
   }
 
   private async fetchWith(token: string, path: string, init?: RequestInit): Promise<Response> {
