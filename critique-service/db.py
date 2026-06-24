@@ -63,6 +63,34 @@ def _migrate(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE conscious ADD COLUMN last_synced_at TEXT")
     except sqlite3.OperationalError:
         pass
+    # add 'zai' to conscious_agent tier CHECK constraint
+    try:
+        db.executescript("""
+            PRAGMA foreign_keys=OFF;
+            CREATE TABLE conscious_agent_v2 (
+                id                TEXT PRIMARY KEY,
+                conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+                role              TEXT NOT NULL,
+                model             TEXT NOT NULL,
+                tier              TEXT NOT NULL CHECK (tier IN ('claude','open','zai')),
+                status            TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running','waiting','done','failed')),
+                worktree_path     TEXT,
+                branch            TEXT,
+                parent_agent_id   TEXT,
+                subscribed_events TEXT NOT NULL DEFAULT '[]',
+                is_orchestrator   INTEGER NOT NULL DEFAULT 0,
+                created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT INTO conscious_agent_v2 SELECT * FROM conscious_agent;
+            DROP TABLE conscious_agent;
+            ALTER TABLE conscious_agent_v2 RENAME TO conscious_agent;
+            CREATE INDEX IF NOT EXISTS idx_conscious_agent_conscious ON conscious_agent(conscious_id);
+            CREATE INDEX IF NOT EXISTS idx_conscious_agent_orchestrator ON conscious_agent(conscious_id, is_orchestrator);
+            PRAGMA foreign_keys=ON;
+        """)
+    except sqlite3.OperationalError:
+        pass
     db.commit()
 
 
@@ -165,7 +193,7 @@ CREATE TABLE IF NOT EXISTS conscious_agent (
     conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
     role              TEXT NOT NULL,
     model             TEXT NOT NULL,
-    tier              TEXT NOT NULL CHECK (tier IN ('claude','open')),
+    tier              TEXT NOT NULL CHECK (tier IN ('claude','open','zai')),
     status            TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running','waiting','done','failed')),
     worktree_path     TEXT,
     branch            TEXT,

@@ -243,19 +243,11 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
 
 
 def _list_conscious(workspace_id: str, user_id: str | None) -> tuple[int, dict]:
-    # Phase 6: if no user_id, use default
     if not user_id:
         user_id = _ensure_default_user()
     if not workspace_id:
         workspace_id = "conscious-default-workspace"
-    ws = _dbmod.get_workspace(workspace_id)
-    if not ws:
-        # auto-create if it's the default
-        if workspace_id == "conscious-default-workspace":
-            _ensure_default_user()
-            ws = _dbmod.get_workspace(workspace_id)
-        if not ws:
-            return 200, {"conscious": []}  # empty list, not an error
+    workspace_id, ws = _resolve_workspace(user_id, workspace_id)
     if ws["user_id"] != user_id:
         return 403, {"error": "not your workspace"}
     items = conscious_db.list_conscious(workspace_id)
