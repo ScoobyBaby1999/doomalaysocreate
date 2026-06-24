@@ -221,10 +221,15 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
                 models = agent_sessions.agent_models()
                 orch_model = models[0]["model"] if models else "groq/llama-3.3-70b-versatile"
             else:
-                orch_model = "claude-opus-4-8"  # placeholder; Phase 2 picks real
+                orch_model = "glm-5.2-free"  # zai tier default
         except Exception:
-            orch_model = "claude-opus-4-8"
-    tier = "claude" if orch_model.startswith("claude") else "open"
+            orch_model = "glm-5.2-free"
+    if orch_model.startswith("claude"):
+        tier = "claude"
+    elif orch_model.startswith("glm"):
+        tier = "zai"
+    else:
+        tier = "open"
     agent = conscious_db.spawn_agent(
         conscious_id=c["id"], role="orchestrator", model=orch_model, tier=tier,
         is_orchestrator=True, subscribed_events=["proposal.*", "task.*", "drawer.*", "message.*"])
@@ -354,7 +359,7 @@ def _route_agents(method: str, cid: str, sub: str, body: dict,
         tier = str(body.get("tier", "")).strip()
         if not role or not model or not tier:
             return 400, {"error": "role, model, tier are required"}
-        if tier not in ("claude", "open"):
+        if tier not in ("claude", "open", "zai"):
             return 400, {"error": "tier must be 'claude' or 'open'"}
         parent = body.get("parent_agent_id") or None
         agent = conscious_db.spawn_agent(
