@@ -1661,7 +1661,7 @@ class Handler(BaseHTTPRequestHandler):
         # allowlist of safe provider keys (never allow setting auth secrets on the gateway)
         _ALLOWED = {
             "NVIDIA_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
-            "OPENROUTER_API_KEY", "CEREBRAS_API_KEY", "GITHUB_TOKEN",
+            "OPENROUTER_API_KEY", "CEREBRAS_API_KEY",
             "CF_API_TOKEN", "CF_ACCOUNT_ID", "ZAI_API_KEY", "MOONSHOT_API_KEY",
             "TAVILY_API_KEY", "ANTHROPIC_API_KEY",
         }
