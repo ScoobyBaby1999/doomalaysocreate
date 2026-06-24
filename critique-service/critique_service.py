@@ -622,6 +622,40 @@ def _ensure_auth_secret() -> None:
         log_event("auth_secret", source="generated_ephemeral")
 
 
+def _ensure_encryption_key() -> None:
+    """Auto-generate ENCRYPTION_KEY on first boot and persist to /data/.
+
+    Without this, crypto.py falls back to a per-process ephemeral key, which
+    means encrypted tokens (GitHub/HF OAuth tokens) are lost on every Space
+    restart — forcing users to re-authenticate.
+    """
+    if os.environ.get("ENCRYPTION_KEY", "").strip():
+        return
+    key_path = "/data/encryption_key"
+    try:
+        if os.path.isfile(key_path):
+            with open(key_path) as f:
+                val = f.read().strip()
+            if val and len(val) >= 16:
+                os.environ["ENCRYPTION_KEY"] = val
+                log_event("encryption_key", source="disk")
+                return
+    except OSError:
+        pass
+    import secrets as _secrets
+    import base64
+    raw = _secrets.token_bytes(32)
+    val = base64.urlsafe_b64encode(raw).decode()
+    try:
+        with open(key_path, "w") as f:
+            f.write(val)
+        os.environ["ENCRYPTION_KEY"] = val
+        log_event("encryption_key", source="generated", path=key_path)
+    except OSError:
+        os.environ["ENCRYPTION_KEY"] = val
+        log_event("encryption_key", source="generated_ephemeral")
+
+
 def _auth_configured() -> bool:
     return bool(os.environ.get("CRITIQUE_TOKEN", "").strip()
                 or os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip())
@@ -2867,6 +2901,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 
 def main() -> int:
     _ensure_auth_secret()
+    _ensure_encryption_key()
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", os.environ.get("APP_PORT", "7860")))
 

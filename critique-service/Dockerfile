@@ -51,6 +51,7 @@ ENV HOME=/home/appuser \
     WORKSPACE_BASE=/data/workspaces \
     BYPASS_TOOL_CONSENT=true \
     DOOMALAYSOCREATE_DB_PATH=/data/doomalaysocreate.db
+ENV MAIN_SPACE_URL=https://scoobybaby1999-doomalaysocreate.hf.space
 RUN mkdir -p /data && chmod 777 /data && useradd -m -u 1000 appuser && chown -R appuser:appuser /app /data
 
 # NOTE: The GLM bridge (Node.js mini-service on port 3030) is NO LONGER NEEDED.

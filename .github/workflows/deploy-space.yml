@@ -64,6 +64,8 @@ jobs:
           MAIN_SPACE_URL="https://${HF_SPACE/\//-}.hf.space"
           # Inject VITE_MAIN_SPACE into Dockerfile for Vite build
           sed -i "s|^ARG VITE_MAIN_SPACE$|ARG VITE_MAIN_SPACE=\"${MAIN_SPACE_URL}\"|" Dockerfile
+          # Inject MAIN_SPACE_URL for backend claim-grant proxy calls
+          sed -i "s|^ENV MAIN_SPACE_URL=.*$|ENV MAIN_SPACE_URL=${MAIN_SPACE_URL}|" Dockerfile
           echo "=== Dockerfile after sed ==="
           head -20 Dockerfile
           git init -b main

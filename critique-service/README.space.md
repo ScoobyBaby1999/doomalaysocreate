@@ -15,10 +15,18 @@ env:
 
 **Duplication notes — set these Space secrets for full functionality:**
 
-| Secret | Purpose |
-|--------|---------|
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | GitHub OAuth app (create one at github.com/settings/developers) |
-| `HF_CLIENT_ID` / `HF_CLIENT_SECRET` | HF OAuth app (create one at hf.co/settings/apps) |
-| Your LLM provider API keys | See providers_catalog.json for all supported providers |
+| Secret | Purpose | Required? |
+|--------|---------|-----------|
+| `ZAI_API_KEY` + other provider keys | LLM API access for agents | Yes (at least one) |
+| `GITHUB_TOKEN` | Clone repos from GitHub | Optional |
 
-Everything else (rotation secret, workspace storage) auto-configures on first boot.
+Everything else auto-configures or proxies through the main Space:
+
+| What | How it's handled |
+|------|-----------------|
+| GitHub OAuth | Proxied through main Space — set your own `GITHUB_CLIENT_ID/SECRET` only if running a standalone main Space |
+| HF OAuth | Proxied through main Space — set your own `HF_CLIENT_ID/SECRET` only if running a standalone main Space |
+| `CRITIQUE_ROTATION_SECRET` | Auto-generated on first boot, persisted to `/data/` |
+| `ENCRYPTION_KEY` | Auto-generated on first boot, persisted to `/data/` |
+| `WORKSPACE_BASE` | Defaults to `/data/workspaces` (persistent) — Dockerfile default |
+| `MAIN_SPACE_URL` | Defaults to https://scoobybaby1999-doomalaysocreate.hf.space — Dockerfile default |
