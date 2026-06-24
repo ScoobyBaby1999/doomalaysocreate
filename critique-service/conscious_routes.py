@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+import os
 
 import brain as _brain
 import conscious_db
@@ -137,6 +138,7 @@ _DEFAULT_USER_ID = "conscious-default-user"
 def _ensure_default_user() -> str:
     """Phase 6: create a default user + workspace if they don't exist.
     Used when no GitHub auth is provided (like the chat panel)."""
+    sandbox_base = os.environ.get("WORKSPACE_BASE", "/data/workspaces")
     try:
         user = _dbmod.get_user(_DEFAULT_USER_ID)
         if not user:
@@ -147,7 +149,7 @@ def _ensure_default_user() -> str:
             _dbmod.create_workspace(
                 _DEFAULT_USER_ID,
                 title="Default Conscious Workspace",
-                sandbox_path="/tmp/conscious-default",
+                sandbox_path=f"{sandbox_base}/conscious-default",
             )
         return _DEFAULT_USER_ID
     except Exception:
@@ -160,6 +162,8 @@ def _ensure_default_user() -> str:
 
 def _resolve_workspace(user_id: str, workspace_id: str) -> tuple[str, dict | None]:
     """Find or create a workspace by id (or title).  Returns (resolved_id, ws_dict)."""
+    from pathlib import Path as _Path
+    sandbox_base = _Path(os.environ.get("WORKSPACE_BASE", "/data/workspaces"))
     ws = _dbmod.get_workspace(workspace_id)
     if ws:
         return workspace_id, ws
@@ -171,7 +175,7 @@ def _resolve_workspace(user_id: str, workspace_id: str) -> tuple[str, dict | Non
     ws = _dbmod.create_workspace(
         user_id,
         title=workspace_id,
-        sandbox_path=f"/tmp/workspaces/{workspace_id}",
+        sandbox_path=str(sandbox_base / workspace_id),
     )
     return ws["id"], ws
 

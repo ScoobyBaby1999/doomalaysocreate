@@ -225,7 +225,7 @@ def create_workspace(user_id: str, *, title: str, description: str = "",
     """Create a new workspace.  If source_repo is given, clone it into the
     sandbox directory.  source_branches can specify multiple branches to clone;
     when source_branch is None and source_branches is None, all branches are cloned."""
-    sandbox_base = Path(os.environ.get("WORKSPACE_BASE", "/tmp/workspace"))
+    sandbox_base = Path(os.environ.get("WORKSPACE_BASE", "/data/workspaces"))
     ws_id = db._gen_id()
     sandbox_path = str(sandbox_base / ws_id)
     Path(sandbox_path).mkdir(parents=True, exist_ok=True)

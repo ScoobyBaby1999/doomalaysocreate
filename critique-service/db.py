@@ -91,6 +91,19 @@ def _migrate(db: sqlite3.Connection) -> None:
         """)
     except sqlite3.OperationalError:
         pass
+    # migrate sandbox_path from /tmp to /data for persist across Space restarts
+    try:
+        new_base = "/data/workspaces/"
+        db.execute(
+            "UPDATE workspaces SET sandbox_path = ? || substr(sandbox_path, 16) "
+            "WHERE sandbox_path LIKE '/tmp/workspace/%'",
+            (new_base,))
+        db.execute(
+            "UPDATE workspaces SET sandbox_path = ? || substr(sandbox_path, 18) "
+            "WHERE sandbox_path LIKE '/tmp/workspaces/%'",
+            (new_base,))
+    except sqlite3.OperationalError:
+        pass
     db.commit()
 
 
