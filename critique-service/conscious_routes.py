@@ -234,7 +234,7 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
     # regenerate CONSCIOUS.md with the orchestrator
     agents = conscious_db.list_agents(c["id"])
     _brain.regenerate_conscious_md(bp, c, agents, [], [], [])
-    return 201, {"conscious": c, "brain_path": str(bp)}
+    return 201, {"conscious": c, "agents": agents, "brain_path": str(bp)}
 
 
 def _list_conscious(workspace_id: str, user_id: str | None) -> tuple[int, dict]:
