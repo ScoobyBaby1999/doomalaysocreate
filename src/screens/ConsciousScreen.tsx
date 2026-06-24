@@ -17,7 +17,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ConsciousClient, ApiError } from "../api/conscious";
 import type { Settings } from "../api/panel";
-import type { Agent, DrawerEntry, Conscious, Proposal, Workspace } from "../api/conscious";
+import type { Agent, DrawerEntry, Conscious, Proposal } from "../api/conscious";
+import type { Workspace } from "../api/github";
 
 // ---------------------------------------------------------------------------
 // inline SVG icons (no dependency)
