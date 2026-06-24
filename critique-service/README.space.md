@@ -18,7 +18,6 @@ env:
 | Secret | Purpose | Required? |
 |--------|---------|-----------|
 | `ZAI_API_KEY` + other provider keys | LLM API access for agents | Yes (at least one) |
-| `GITHUB_TOKEN` | Clone repos from GitHub | Optional |
 
 Everything else auto-configures or proxies through the main Space:
 
