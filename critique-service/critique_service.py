@@ -585,6 +585,43 @@ class _BadRequest(ValueError):
     """raised by request builders to signal a 400 with a client-safe message."""
 
 
+def _ensure_auth_secret() -> None:
+    """Auto-generate CRITIQUE_ROTATION_SECRET on first boot and persist to /data/.
+
+    This lets duplicators skip the manual 'set Space secret' step — the
+    rotation secret is generated once, stored in the persistent volume, and
+    reused across restarts.  Also degrades gracefully if /data/ is unwritable
+    (works for this session only).
+    """
+    if os.environ.get("CRITIQUE_TOKEN", "").strip():
+        return  # static token is set — no rotation secret needed
+    if os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip():
+        return  # already configured
+    secret_path = "/data/rotation_secret"
+    try:
+        if os.path.isfile(secret_path):
+            with open(secret_path) as f:
+                val = f.read().strip()
+            if val and len(val) >= 16:
+                os.environ["CRITIQUE_ROTATION_SECRET"] = val
+                log_event("auth_secret", source="disk")
+                return
+    except OSError:
+        pass
+    # generate new secret and persist
+    import secrets as _secrets
+    val = _secrets.token_hex(32)
+    try:
+        with open(secret_path, "w") as f:
+            f.write(val)
+        os.environ["CRITIQUE_ROTATION_SECRET"] = val
+        log_event("auth_secret", source="generated", path=secret_path)
+    except OSError:
+        # /data/ may not exist or be unwritable — run session-local
+        os.environ["CRITIQUE_ROTATION_SECRET"] = val
+        log_event("auth_secret", source="generated_ephemeral")
+
+
 def _auth_configured() -> bool:
     return bool(os.environ.get("CRITIQUE_TOKEN", "").strip()
                 or os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip())
@@ -2829,6 +2866,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 
 
 def main() -> int:
+    _ensure_auth_secret()
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", os.environ.get("APP_PORT", "7860")))
 

@@ -48,7 +48,7 @@ EXPOSE 7860
 # AGENT_ROOT holds per-session agent workspaces (ephemeral /tmp is fine).
 ENV HOME=/home/appuser \
     AGENT_ROOT=/tmp/agent \
-    WORKSPACE_BASE=/tmp/workspace \
+    WORKSPACE_BASE=/data/workspaces \
     BYPASS_TOOL_CONSENT=true \
     DOOMALAYSOCREATE_DB_PATH=/data/doomalaysocreate.db
 RUN mkdir -p /data && chmod 777 /data && useradd -m -u 1000 appuser && chown -R appuser:appuser /app /data
