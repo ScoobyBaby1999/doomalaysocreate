@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ConsciousClient, ApiError } from "../api/conscious";
 import type { Settings } from "../api/panel";
-import type { Agent, DrawerEntry, Conscious, Proposal } from "../api/conscious";
+import type { Agent, DrawerEntry, Conscious, Proposal, Workspace } from "../api/conscious";
 
 // ---------------------------------------------------------------------------
 // inline SVG icons (no dependency)
@@ -142,7 +142,10 @@ export function ConsciousScreen({ settings, workspaceId }: {
   settings: Settings; workspaceId?: string;
 }) {
   const client = useRef(new ConsciousClient(settings));
-  const wsId = workspaceId || "demo-workspace";
+
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [selectedWsId, setSelectedWsId] = useState<string | null>(null);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
 
   const [conscious, setConscious] = useState<Conscious | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -154,6 +157,8 @@ export function ConsciousScreen({ settings, workspaceId }: {
   const [showDrawer, setShowDrawer] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+
+  const wsId = selectedWsId || workspaceId || "demo-workspace";
 
   const init = useCallback(async () => {
     setLoading(true); setError(null);
@@ -168,6 +173,15 @@ export function ConsciousScreen({ settings, workspaceId }: {
     } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
     finally { setLoading(false); }
   }, [wsId]);
+
+  useEffect(() => {
+    client.current.listWorkspaces().then((r) => {
+      setWorkspaces(r.workspaces);
+      if (!selectedWsId && r.workspaces.length > 0) {
+        setSelectedWsId(r.workspaces[0].id);
+      }
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => { init(); }, [init]);
 
@@ -238,13 +252,37 @@ export function ConsciousScreen({ settings, workspaceId }: {
     <div className="flex flex-col h-full bg-bg overflow-hidden relative">
       {/* header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-surface">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-accent/20 flex items-center justify-center">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-8 h-8 rounded-lg bg-accent/20 flex items-center justify-center shrink-0">
             <Icon.Brain size={16} color="#5b8cff" />
           </div>
-          <div>
-            <div className="text-sm font-semibold text-text">{conscious?.title || "Conscious"}</div>
-            <div className="text-[10px] text-muted">{agents.length} agent{agents.length !== 1 ? "s" : ""} · GLM 5.2</div>
+          <div className="relative min-w-0">
+            <div className="flex items-center gap-1">
+              <button onClick={() => setWorkspaceOpen(!workspaceOpen)}
+                className="flex items-center gap-1 text-sm font-semibold text-text truncate max-w-[160px] hover:text-accent transition-colors">
+                <span className="truncate">{(workspaces.find((w) => w.id === selectedWsId)?.title) || selectedWsId || "Select workspace"}</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" className={`transition-transform ${workspaceOpen ? "rotate-180" : ""}`}>
+                  <polyline points="6 9 12 15 18 9"/>
+                </svg>
+              </button>
+            </div>
+            <div className="text-[10px] text-muted truncate">{agents.length} agent{agents.length !== 1 ? "s" : ""} · GLM 5.2</div>
+            {workspaceOpen && (
+              <>
+                <div className="fixed inset-0 z-30" onClick={() => setWorkspaceOpen(false)} />
+                <div className="absolute top-full left-0 mt-1 w-56 bg-surface2 border border-border rounded-xl shadow-xl z-40 max-h-60 overflow-y-auto">
+                  {workspaces.length === 0 ? (
+                    <div className="px-3 py-3 text-xs text-muted text-center">No workspaces found</div>
+                  ) : workspaces.map((w) => (
+                    <button key={w.id} onClick={() => { setSelectedWsId(w.id); setWorkspaceOpen(false); }}
+                      className={`w-full text-left px-3 py-2.5 text-xs flex items-center gap-2 hover:bg-surface transition-colors ${w.id === selectedWsId ? "text-accent bg-accent/10" : "text-text"}`}>
+                      <Icon.Folder size={12} color={w.id === selectedWsId ? "#5b8cff" : "#8b95a3"} />
+                      <span className="truncate">{w.title}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </div>
         <button onClick={() => setShowDrawer(true)}

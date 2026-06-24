@@ -11,6 +11,7 @@
  */
 import { deriveToken } from "./token";
 import type { Settings } from "./panel";
+import type { Workspace } from "./github";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -168,6 +169,12 @@ export class ConsciousClient {
 
   patchConscious(cid: string, body: Record<string, unknown>): Promise<{ conscious: Conscious }> {
     return this.req(`/api/conscious/${cid}`, { method: "PATCH", body: JSON.stringify(body) });
+  }
+
+  // --- workspaces ---
+
+  listWorkspaces(): Promise<{ workspaces: Workspace[] }> {
+    return this.req("/api/workspaces");
   }
 
   // --- agents ---
