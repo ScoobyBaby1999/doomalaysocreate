@@ -742,7 +742,15 @@ class Handler(BaseHTTPRequestHandler):
         # If absent, conscious_routes creates/uses a default workspace (so the
         # conscious system works WITHOUT GitHub auth, like the chat panel).
         user_id = self._require_user_from_jwt() if self._wants_jwt() else None
-        if not self._auth_ok():
+        auth_ok = self._auth_ok()
+        log_event("conscious_dispatch_auth",
+                  path=self.path, method=method,
+                  auth_ok=auth_ok,
+                  has_x_jwt=bool(self.headers.get("X-JWT")),
+                  has_auth=bool(self.headers.get("Authorization")),
+                  wants_jwt=self._wants_jwt(),
+                  user_id=user_id)
+        if not auth_ok:
             # Fallback: try JWT identity as the auth signal, so users who only
             # have githubSessionId (no rotation secret) can still use conscious
             # routes. If neither bearer nor JWT is valid, reject.

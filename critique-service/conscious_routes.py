@@ -158,23 +158,32 @@ def _ensure_default_user() -> str:
 # conscious lifecycle
 # ---------------------------------------------------------------------------
 
+def _resolve_workspace(user_id: str, workspace_id: str) -> tuple[str, dict | None]:
+    """Find or create a workspace by id (or title).  Returns (resolved_id, ws_dict)."""
+    ws = _dbmod.get_workspace(workspace_id)
+    if ws:
+        return workspace_id, ws
+    # look up by title among the user's workspaces
+    for w in _dbmod.list_user_workspaces(user_id):
+        if w.get("title") == workspace_id:
+            return w["id"], w
+    # auto-create
+    ws = _dbmod.create_workspace(
+        user_id,
+        title=workspace_id,
+        sandbox_path=f"/tmp/workspaces/{workspace_id}",
+    )
+    return ws["id"], ws
+
+
 def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
     # Phase 6: if no user_id, auto-provision a default user + workspace
     if not user_id:
         user_id = _ensure_default_user()
     workspace_id = str(body.get("workspace_id", "")).strip()
     if not workspace_id:
-        # Phase 6: use the default workspace if none specified
         workspace_id = "conscious-default-workspace"
-        _ensure_default_user()  # ensure the workspace exists
-    ws = _dbmod.get_workspace(workspace_id)
-    if not ws:
-        # auto-create the workspace if it doesn't exist
-        if workspace_id == "conscious-default-workspace":
-            _ensure_default_user()
-            ws = _dbmod.get_workspace(workspace_id)
-        if not ws:
-            return 404, {"error": "workspace not found"}
+    workspace_id, ws = _resolve_workspace(user_id, workspace_id)
     if ws["user_id"] != user_id:
         return 403, {"error": "not your workspace"}
     # cap conscious per workspace (TIER3_PLAN.md §13)
