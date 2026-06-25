@@ -1,7 +1,10 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { PanelClient, type Settings, type PanelSnapshot, type Effort, type Privacy } from "../api/panel";
 import { JudgeCard } from "../components/JudgeCard";
+import { ModelSelectOverlay } from "../components/ModelSelectOverlay";
+import { ProvidersDialog } from "../components/ProvidersDialog";
+import { useModelStore } from "../lib/model-store";
 
 interface Turn {
   id: string;
@@ -21,6 +24,31 @@ export function Chat({ settings }: { settings: Settings }) {
   const [privacy] = useState<Privacy>("strict");
   const listRef = useRef<VirtuosoHandle>(null);
 
+  const {
+    setBaseUrl,
+    fetchProviders,
+    focusedMode,
+    selectedModelId,
+    selectedProviderName,
+    providers,
+    openOverlay,
+  } = useModelStore();
+
+  useEffect(() => {
+    setBaseUrl(settings.baseUrl);
+    fetchProviders();
+  }, [settings.baseUrl, setBaseUrl, fetchProviders]);
+
+  const selectedModelDisplay = selectedModelId
+    ? (() => {
+        for (const p of providers) {
+          const m = p.models.find((m) => m.id === selectedModelId);
+          if (m) return m.displayName;
+        }
+        return selectedModelId;
+      })()
+    : null;
+
   async function send() {
     const prompt = input.trim();
     if (!prompt || busy) return;
@@ -29,9 +57,13 @@ export function Chat({ settings }: { settings: Settings }) {
     const id = crypto.randomUUID();
     setTurns((t) => [...t, { id, prompt }]);
     const client = new PanelClient(settings);
+    const body: Record<string, unknown> = { input: prompt, role: "critiquer", effort, privacy, profile: "app" };
+    if (focusedMode && selectedModelId && selectedProviderName) {
+      body.panel = [`${selectedProviderName}/${selectedModelId}`];
+    }
     try {
       await client.runPanel(
-        { input: prompt, role: "critiquer", effort, privacy, profile: "app" },
+        body as Parameters<PanelClient["runPanel"]>[0],
         (snap) =>
           setTurns((t) => t.map((x) => (x.id === id ? { ...x, snapshot: snap } : x))),
       );
@@ -45,6 +77,8 @@ export function Chat({ settings }: { settings: Settings }) {
 
   return (
     <div className="flex flex-col h-full">
+      <ModelSelectOverlay />
+      <ProvidersDialog />
       <Virtuoso
         ref={listRef}
         className="flex-1"
@@ -99,6 +133,22 @@ export function Chat({ settings }: { settings: Settings }) {
               {e}
             </button>
           ))}
+          <button
+            onClick={openOverlay}
+            className={`ml-2 text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1 ${
+              focusedMode ? "border-accent text-accent" : "border-border text-muted"
+            }`}
+            title={focusedMode && selectedModelDisplay ? `Focused: ${selectedModelDisplay}` : "Panel mode"}
+          >
+            {focusedMode && selectedModelDisplay ? (
+              <>
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4"/></svg>
+                {selectedModelDisplay}
+              </>
+            ) : (
+              "Panel"
+            )}
+          </button>
           <span className="ml-auto text-[11px] text-muted">privacy: {privacy}</span>
         </div>
         <div className="flex items-end gap-2">
