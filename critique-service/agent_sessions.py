@@ -76,6 +76,10 @@ AGENT_SYSTEM_PROMPT = (
 #   picker (Part 2) surfaces EVERY entry whose key is set, not just the first.
 #   Overridable via AGENT_OPEN_MODEL / AGENT_OPEN_BASE_URL / AGENT_OPEN_KEY_ENV.
 _OPEN_LLMS: list[tuple[str, str, str, str | None]] = [
+    ("OPENCODE_ZEN_API_KEY", "DeepSeek V4 Flash Free (Zen)", "openai/deepseek-v4-flash-free",
+     "https://opencode.ai/zen/v1"),
+    ("OPENCODE_GO_API_KEY",  "DeepSeek V4 Flash (Go)",      "openai/deepseek-v4-flash",
+     "https://opencode.ai/zen/go/v1"),
     ("MOONSHOT_API_KEY",   "Kimi (Moonshot)",   "moonshot/kimi-k2-0905-preview", None),
     ("GROQ_API_KEY",       "Groq Llama 3.3",    "groq/llama-3.3-70b-versatile",  None),
     ("OPENROUTER_API_KEY", "OpenRouter Qwen3",  "openrouter/qwen/qwen3-coder",   None),

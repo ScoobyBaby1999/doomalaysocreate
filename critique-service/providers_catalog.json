@@ -14,6 +14,7 @@
       "pool": "core",
       "env_var": "NVIDIA_API_KEY",
       "base_url": "https://integrate.api.nvidia.com/v1/chat/completions",
+      "models_url": "https://integrate.api.nvidia.com/v1/models",
       "region": "us",
       "limits": {"rpm": 40, "rpd": null, "tpm": null, "tpd": null, "concurrency": 4, "monthly_credit": "free credits"},
       "privacy": {"trains_on_data": false, "stability_tier": 1, "optout_url": "https://www.nvidia.com/en-us/about-nvidia/privacy-policy/"},
@@ -32,6 +33,7 @@
         "mistralai/mistral-medium-3.5-128b",
         "mistralai/mistral-small-4-119b-2603"
       ],
+      "sync_config": {"enabled": true, "params": {}},
       "//probe": "Roster refresh 2026-06 (docs/ROSTER-2026-06.md): all above live-probed OK. deepseek-v4-pro kept but DEMOTED (queue >1k, ReadTimeout); deepseek-v4-flash is the new primary. NOT added (probe-failed): mistralai/mistral-large-3 (404), mistralai/mistral-nemotron (400 needs tools), qwen/qwen3-next-80b-a3b-instruct (504/unreliable).",
       "note": "free credits, generous rpm. 2026-06 roster refresh added qwen3.5-397b/122b, llama-4-maverick, minimax-m2.7, mistral-medium-3.5, mistral-small-4 + deepseek-v4-flash (all probe-verified)."
     },
@@ -41,6 +43,7 @@
       "env_var": "CF_API_TOKEN",
       "requires": ["CF_ACCOUNT_ID"],
       "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1/chat/completions",
+      "models_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/models/search",
       "region": "global",
       "limits": {"rpm": 30, "rpd": 10000, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "Workers AI free allocation (neurons/day)"},
       "privacy": {"trains_on_data": false, "stability_tier": 1, "optout_url": "https://www.cloudflare.com/privacypolicy/"},
@@ -52,6 +55,7 @@
         "@cf/qwen/qwen2.5-coder-32b-instruct",
         "@cf/nvidia/nemotron-3-120b-a12b"
       ],
+      "sync_config": {"enabled": true, "params": {"hide_experimental": true, "include_deprecated": false}},
       "note": "fast. CF DEFAULTS max_tokens=256 - always pass it explicitly (we do). newer slots (kimi 262k / nemotron-120b 256k / gemma-4 256k ctx) expose reasoning_effort + chat_template_kwargs (see reasoning_catalog); legacy slots (llama-3.3 24k / qwen-coder 32k ctx) have no reasoning params. r1-distill REMOVED 2026-06: captest showed it confidently proposing a deadlock-inducing fix."
     },
     {
@@ -75,6 +79,7 @@
       "pool": "core",
       "env_var": "OPENROUTER_API_KEY",
       "base_url": "https://openrouter.ai/api/v1/chat/completions",
+      "models_url": "https://openrouter.ai/api/v1/models",
       "region": "us",
       "limits": {"rpm": 20, "rpd": 50, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "shared free quota"},
       "privacy": {"trains_on_data": "per-model", "stability_tier": 3, "optout_url": "https://openrouter.ai/docs/features/privacy-and-logging", "note": "':free' routes REQUIRE prompt logging/training consent -> NOT privacy-safe; paid routes are safe with account Privacy enabled."},
@@ -87,7 +92,68 @@
         "moonshotai/kimi-k2.6:free",
         "google/gemma-4-31b-it:free"
       ],
+      "sync_config": {"enabled": true, "params": {"output_modalities": "text"}},
       "note": "shared free quota (429s often). nemotron-3-ultra-550b + kimi-k2.6 + gemma-4-31b free; use 'reasoning:{enabled}' for the reasoning ones (see reasoning_catalog)."
+    },
+    {
+      "name": "opencode-zen",
+      "pool": "core",
+      "env_var": "OPENCODE_ZEN_API_KEY",
+      "base_url": "https://opencode.ai/zen/v1/chat/completions",
+      "models_url": "https://opencode.ai/zen/v1/models",
+      "region": "us",
+      "limits": {"rpm": 30, "rpd": 100, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "free tier (100 req/day) + pay-as-you-go"},
+      "privacy": {"trains_on_data": "per-model", "stability_tier": 1, "optout_url": "https://opencode.ai/privacy", "note": "free models may train on data; paid/routed models vary by upstream provider"},
+      "models": [
+        "deepseek-v4-flash-free",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "big-pickle",
+        "nemotron-3-ultra-free",
+        "mimo-v2.5-free",
+        "north-mini-code-free",
+        "glm-5.2",
+        "glm-5.1",
+        "glm-5",
+        "kimi-k2.6",
+        "kimi-k2.5",
+        "minimax-m2.7",
+        "minimax-m2.5",
+        "qwen3.6-plus",
+        "qwen3.5-plus",
+        "grok-build-0.1"
+      ],
+      "sync_config": {"enabled": true, "params": {"variant": "zen"}},
+      "note": "OpenCode Zen — curated model gateway. Free models (deepseek-v4-flash-free, big-pickle, nemotron-3-ultra-free, mimo-v2.5-free, north-mini-code-free) have 0$ inference. Paid models billed per-token via Zen account. API key: opencode.ai/auth. Auto-syncs new models from /v1/models at boot."
+    },
+    {
+      "name": "opencode-go",
+      "pool": "core",
+      "env_var": "OPENCODE_GO_API_KEY",
+      "base_url": "https://opencode.ai/zen/go/v1/chat/completions",
+      "models_url": "https://opencode.ai/zen/go/v1/models",
+      "region": "us",
+      "limits": {"rpm": 60, "rpd": 10000, "tpm": null, "tpd": null, "concurrency": 4, "monthly_credit": "Go subscription ($60/mo usage included)"},
+      "privacy": {"trains_on_data": false, "stability_tier": 1, "optout_url": "https://opencode.ai/privacy"},
+      "models": [
+        "glm-5.2",
+        "glm-5.1",
+        "kimi-k2.6",
+        "kimi-k2.7-code",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "mimo-v2.5",
+        "mimo-v2.5-pro",
+        "minimax-m3",
+        "minimax-m2.7",
+        "minimax-m2.5",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-plus",
+        "qwen3.5-plus"
+      ],
+      "sync_config": {"enabled": true, "params": {"variant": "go"}},
+      "note": "OpenCode Go ($10/mo subscription, $5 first month). Includes GLM-5.2, Kimi K2.6/K2.7, DeepSeek V4 Pro/Flash, MiMo-V2.5, MiniMax M3/M2.7, Qwen3.7/3.6 Plus. Hosted in US, EU, SG. Auto-syncs new models from /v1/models at boot."
     }
   ]
 }

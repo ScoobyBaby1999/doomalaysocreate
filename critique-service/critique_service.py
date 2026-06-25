@@ -22,6 +22,7 @@ import debug_log
 import github_integration
 import jwt_auth
 import orchestrate
+import provider_sync
 from content.roles import make_prompt
 from jobs import JobCapExceeded, JobRunner, finalize_judges, run_panel_slots
 from metrics import MetricStore
@@ -205,6 +206,11 @@ class Panel:
         for who in self.default_panel:
             self._ensure_slot(who)
 
+        #   Auto-sync model lists from all providers with /v1/models endpoints.
+        #   Any new model IDs not yet in the static catalog will be registered
+        #   as extra slots so they join rotation without a code deploy.
+        self._sync_all_provider_models()
+
     def judge_ctx(self, who: str) -> int:
         #   a judge's usable context window: for a logical model, the LARGEST among
         #   its candidate hosts (failover prefers big-ctx hosts anyway; small-ctx
@@ -214,6 +220,16 @@ class Panel:
         spec = self.logical_models.get(who) or {}
         vals = [int(c["ctx"]) for c in spec.get("candidates", []) if c.get("ctx")]
         return max(vals) if vals else DEFAULT_CTX_TOKENS
+
+    def _sync_all_provider_models(self) -> None:
+        """Fetch live model lists from all providers with /v1/models endpoints and
+        register any newly discovered models as extra slots.
+
+        Called at boot after scheduler init. If endpoints are unreachable,
+        gracefully degrades to the static model list.
+        """
+        sync_results = provider_sync.sync_all_providers(self.provider_by_name)
+        provider_sync.register_synced_models(self, sync_results)
 
     def _ensure_slot(self, who: str) -> slot | None:
         if who in self.slot_by_who:
