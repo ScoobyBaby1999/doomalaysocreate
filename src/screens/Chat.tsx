@@ -21,7 +21,7 @@ export function Chat({ settings }: { settings: Settings }) {
   const [privacy] = useState<Privacy>("strict");
   const listRef = useRef<VirtuosoHandle>(null);
 
-  const { setBaseUrl, fetchProviders, focusedMode, selectedModelId, selectedProviderName, providers, openOverlay, toggleFocusedMode } = useModelStore();
+  const { setBaseUrl, fetchProviders, focusedMode, selectedModelId, selectedProviderName, providers, toggleFocusedMode } = useModelStore();
 
   useEffect(() => {
     setBaseUrl(settings.baseUrl);

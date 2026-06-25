@@ -146,7 +146,6 @@ export function ConsciousScreen({ settings, workspaceId }: {
   const client = useRef(new ConsciousClient(settings));
 
   const selectedModelId = useModelStore((s) => s.selectedModelId);
-  const selectedProviderName = useModelStore((s) => s.selectedProviderName);
   const openOverlay = useModelStore((s) => s.openOverlay);
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
