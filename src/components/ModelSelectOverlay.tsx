@@ -292,9 +292,6 @@ export function ModelSelectOverlay() {
     [providers, selectModel]
   );
 
-  const topRow = providers.slice(0, 2);
-  const bottomRow = providers.slice(2, 4);
-
   const filteredCount = useMemo(() => {
     if (!searchQuery.trim()) return totalModels;
     const q = searchQuery.toLowerCase();
@@ -422,34 +419,19 @@ export function ModelSelectOverlay() {
                   </div>
                 )}
 
-                {!loading && !error && (
-                  <div className="flex flex-col gap-3 p-3">
-                    {topRow.length > 0 && (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {topRow.map((p) => (
-                          <ProviderBox
-                            key={p.name}
-                            provider={p}
-                            selectedModelId={selectedModelId}
-                            onSelect={handleSelect}
-                            searchQuery={searchQuery}
-                          />
-                        ))}
-                      </div>
-                    )}
-                    {bottomRow.length > 0 && (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {bottomRow.map((p) => (
-                          <ProviderBox
-                            key={p.name}
-                            provider={p}
-                            selectedModelId={selectedModelId}
-                            onSelect={handleSelect}
-                            searchQuery={searchQuery}
-                          />
-                        ))}
-                      </div>
-                    )}
+                {!loading && !error && providers.length > 0 && (
+                  <div className="p-3">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {providers.map((p) => (
+                        <ProviderBox
+                          key={p.name}
+                          provider={p}
+                          selectedModelId={selectedModelId}
+                          onSelect={handleSelect}
+                          searchQuery={searchQuery}
+                        />
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
