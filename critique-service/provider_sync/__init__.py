@@ -37,7 +37,12 @@ def sync_all_providers(registered_providers: dict[str, provider]) -> dict[str, l
 
         try:
             api_key = getattr(prov, "api_key", None)
-            sync_instance = sync_class(api_key=api_key, **sync_config.get("params", {}))
+            params = dict(sync_config.get("params", {}))
+            for req in entry.get("requires", []):
+                val = os.environ.get(req, "").strip()
+                if val:
+                    params[req.lower()] = val
+            sync_instance = sync_class(api_key=api_key, **params)
             models = sync_instance.sync()
             results[name] = models
         except Exception as e:

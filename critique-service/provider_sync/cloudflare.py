@@ -14,7 +14,7 @@ class CloudflareSync(BaseSync):
 
     def __init__(self, api_key: str | None = None, **kwargs) -> None:
         super().__init__(api_key, **kwargs)
-        self.account_id = kwargs.get("account_id") or os.environ.get("CF_ACCOUNT_ID", "")
+        self.account_id = kwargs.get("account_id") or kwargs.get("cf_account_id") or os.environ.get("CF_ACCOUNT_ID", "")
         if not self.account_id:
             raise ValueError("CF_ACCOUNT_ID required for Cloudflare sync")
         self.models_url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/models/search"
