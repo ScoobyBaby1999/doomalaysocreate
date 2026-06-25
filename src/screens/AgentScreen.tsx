@@ -6,7 +6,6 @@ import {
   AgentClient,
   type AgentEvent,
   type AgentFile,
-  type AgentModel,
   type AgentStatus,
 } from "../api/agent";
 import { useModelStore } from "../lib/model-store";
