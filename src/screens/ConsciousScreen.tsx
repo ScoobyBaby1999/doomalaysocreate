@@ -14,7 +14,7 @@
  * - Works on any screen size: radial layout auto-scales
  * - No external icon dependency — all icons are inline SVG
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ConsciousClient, ApiError } from "../api/conscious";
 import type { Settings } from "../api/panel";
 import type { Agent, DrawerEntry, Conscious, Proposal } from "../api/conscious";
@@ -143,7 +143,7 @@ function StatusIcon({ status, size, color }: { status: string; size: number; col
 export function ConsciousScreen({ settings, workspaceId }: {
   settings: Settings; workspaceId?: string;
 }) {
-  const client = useRef(new ConsciousClient(settings));
+  const client = useMemo(() => new ConsciousClient(settings), [settings]);
 
   const selectedModelId = useModelStore((s) => s.selectedModelId);
   const openOverlay = useModelStore((s) => s.openOverlay);
@@ -168,32 +168,32 @@ export function ConsciousScreen({ settings, workspaceId }: {
   const init = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const list = await client.current.listConscious(wsId);
+      const list = await client.listConscious(wsId);
       if (list.conscious.length > 0) {
         const c = list.conscious[0];
-        const detail = await client.current.getConscious(c.id);
+        const detail = await client.getConscious(c.id);
         setConscious(detail.conscious); setAgents(detail.agents);
         await refreshData(c.id);
       } else { await createConscious(); }
     } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
     finally { setLoading(false); }
-  }, [wsId]);
+  }, [client, wsId]);
 
   useEffect(() => {
-    client.current.listWorkspaces().then((r) => {
+    client.listWorkspaces().then((r) => {
       setWorkspaces(r.workspaces);
       if (!selectedWsId && r.workspaces.length > 0) {
         setSelectedWsId(r.workspaces[0].id);
       }
     }).catch(() => {});
-  }, []);
+  }, [client]);
 
   useEffect(() => { init(); }, [init]);
 
   const createConscious = async () => {
     setCreating(true);
     try {
-      const r = await client.current.createConscious({
+      const r = await client.createConscious({
         workspace_id: wsId, title: "Conscious Workspace",
         goal: "Multi-agent collaboration with GLM 5.2",
       });
@@ -205,8 +205,8 @@ export function ConsciousScreen({ settings, workspaceId }: {
   const refreshData = async (cid: string) => {
     try {
       const [d, p] = await Promise.all([
-        client.current.listDrawer(cid, { limit: 20 }),
-        client.current.listProposals(cid, "pending"),
+        client.listDrawer(cid, { limit: 20 }),
+        client.listProposals(cid, "pending"),
       ]);
       setDrawer(d.entries); setProposals(p.proposals);
     } catch {}
@@ -217,7 +217,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
     try {
       const model = selectedModelId || "glm-5.2 (free)";
       const tier = selectedModelId?.toLowerCase().includes("claude") ? "claude" : "zai";
-      const r = await client.current.spawnAgent(conscious.id, {
+      const r = await client.spawnAgent(conscious.id, {
         role: "ai-engineer", model, tier,
       });
       setAgents((prev) => [...prev, r.agent]);
@@ -232,7 +232,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
     if (!orch) return;
     try {
       setPulseLines((prev) => ({ ...prev, [`${orch.id}-${agent.id}`]: Date.now() }));
-      const r = await client.current.invokeAgent(conscious.id, {
+      const r = await client.invokeAgent(conscious.id, {
         from_agent_id: orch.id, to_agent_id: agent.id, kind: "invoke", task,
       });
       setPulseLines((prev) => ({ ...prev, [`${agent.id}-${orch.id}`]: Date.now() }));
@@ -246,7 +246,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
     const orch = agents.find((a) => a.isOrchestrator === 1);
     if (!orch) return;
     try {
-      await client.current.mergeAgentBranch(conscious.id, agent.id, orch.id);
+      await client.mergeAgentBranch(conscious.id, agent.id, orch.id);
       await refreshData(conscious.id);
     } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
   };
