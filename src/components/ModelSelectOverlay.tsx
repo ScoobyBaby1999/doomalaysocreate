@@ -39,7 +39,7 @@ function IcoRefresh({ spinning }: { spinning?: boolean }) {
 }
 
 function fmtCtx(k: number): string {
-  if (!k) return "\u2014";
+  if (!k) return "—";
   if (k >= 1_000_000) return `${(k / 1_000_000).toFixed(k % 1_000_000 === 0 ? 0 : 1)}M`;
   if (k >= 1_000) return `${(k / 1_000).toFixed(0)}K`;
   return String(k);
@@ -76,15 +76,15 @@ function attributeLine(a: ModelAttributes | undefined): { text: string; warn?: b
     if (typeof b.aaCoding === "number" && typeof b.sweBench === "undefined") parts.push(`AA-coding ${b.aaCoding}`);
   }
   if (a.ranks && a.ranks.length > 0) {
-    const top = a.ranks.slice(0, 3).map((r) => `${r.label} #${r.rank}`).join(" \u00b7 ");
+    const top = a.ranks.slice(0, 3).map((r) => `${r.label} #${r.rank}`).join(" · ");
     parts.push(top);
   }
   if (a.capabilities && a.capabilities.length > 0) {
-    parts.push(a.capabilities.join(" \u00b7 "));
+    parts.push(a.capabilities.join(" · "));
   }
   if (a.pricing) parts.push(a.pricing);
 
-  const text = parts.join(" \u00b7 ");
+  const text = parts.join(" · ");
   if (!text && !a.note) return null;
   return { text, warn: a.note ? true : false };
 }
@@ -146,7 +146,7 @@ function ModelRow({
           )}
           {note && (
             <span
-              className={`text-[9px] leading-none truncate ${attr?.text ? "ml-1.5" : ""} ${note.startsWith("\u26a0") ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground/70"}`}
+              className={`text-[9px] leading-none truncate ${attr?.text ? "ml-1.5" : ""} ${note.startsWith("⚠") ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground/70"}`}
               title={note}
             >
               {note}
@@ -207,7 +207,7 @@ function ProviderBox({
           onClick={openSettings}
           className="flex items-center justify-center size-5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
           aria-label={`Manage ${provider.displayName} privacy & keys`}
-          title={`${provider.manageLabel} \u2197`}
+          title={`${provider.manageLabel} ↗`}
         >
           <IcoSettings />
         </button>
@@ -353,7 +353,7 @@ export function ModelSelectOverlay() {
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="text-[12px] font-semibold text-foreground">Select Model</span>
                   <span className="text-[10px] text-muted-foreground">
-                    {loading ? "loading\u2026" : `${filteredCount} models \u00b7 ${providers.length} providers`}
+                    {loading ? "loading…" : error ? "failed to load" : `${filteredCount} models · ${providers.length} providers`}
                   </span>
                   {!loading && providers.length > 0 && (
                     <button
@@ -370,10 +370,10 @@ export function ModelSelectOverlay() {
                       onClick={() => refreshProviders()}
                       disabled={refreshing}
                       className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-60"
-                      title={refreshing ? "syncing\u2026" : `${syncedLabel} \u00b7 ${liveCount}/${totalCount} providers live \u00b7 click to re-sync`}
+                      title={refreshing ? "syncing…" : `${syncedLabel} · ${liveCount}/${totalCount} providers live · click to re-sync`}
                     >
                       <IcoRefresh spinning={refreshing} />
-                      <span className="hidden md:inline">{refreshing ? "syncing\u2026" : syncedLabel || "sync"}</span>
+                      <span className="hidden md:inline">{refreshing ? "syncing…" : syncedLabel || "sync"}</span>
                     </button>
                   )}
                 </div>
@@ -387,7 +387,7 @@ export function ModelSelectOverlay() {
                       ref={inputRef}
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="search\u2026"
+                      placeholder="search…"
                       className="pl-7 pr-2 h-6 w-36 sm:w-48 text-[11px] bg-muted/40 border border-border/60 rounded-md outline-none focus:border-ring/50 placeholder:text-muted-foreground/60"
                     />
                   </div>
@@ -406,7 +406,7 @@ export function ModelSelectOverlay() {
                 {loading && (
                   <div className="flex items-center justify-center h-full">
                     <span className="inline-block size-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
-                    <span className="ml-2 text-[11px] text-muted-foreground">fetching\u2026</span>
+                    <span className="ml-2 text-[11px] text-muted-foreground">fetching…</span>
                   </div>
                 )}
 
@@ -456,7 +456,7 @@ export function ModelSelectOverlay() {
 
               <div className="flex items-center justify-between px-3.5 shrink-0" style={{ height: 30, borderTop: "1px solid var(--border)" }}>
                 <span className="text-[10px] text-muted-foreground truncate">
-                  click to select \u00b7 <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close \u00b7 <span className="text-green-600">\u25cf</span> live / <span className="text-amber-600">\u25cf</span> config \u00b7 {liveCount}/{totalCount} synced
+                  click to select · <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close · <span className="text-green-600">●</span> live / <span className="text-amber-600">●</span> config · {liveCount}/{totalCount} synced
                 </span>
                 {selectedDisplayName && (
                   <span className="text-[10px] text-primary font-medium flex items-center gap-1">

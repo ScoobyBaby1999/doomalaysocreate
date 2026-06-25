@@ -155,7 +155,7 @@ export function ProvidersDialog() {
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="text-[13px] font-semibold text-foreground">Providers &amp; Privacy</span>
                   {focusedName && (
-                    <span className="text-[10px] text-muted-foreground">\u00b7 focused on {focusedName}</span>
+                    <span className="text-[10px] text-muted-foreground">· focused on {focusedName}</span>
                   )}
                 </div>
                 <button
@@ -185,7 +185,7 @@ export function ProvidersDialog() {
 
               <div className="flex items-center justify-between px-4 shrink-0" style={{ height: 32, borderTop: "1px solid var(--border)" }}>
                 <span className="text-[10px] text-muted-foreground">
-                  privacy data sourced from official docs \u00b7 <span className="text-green-600">\u2713 high</span> / <span className="text-amber-600">\u26a0 medium</span> / <span className="text-red-600">\u2717 low</span> confidence
+                  privacy data sourced from official docs · <span className="text-green-600">✓ high</span> / <span className="text-amber-600">⚠ medium</span> / <span className="text-red-600">✗ low</span> confidence
                 </span>
                 <span className="text-[10px] text-muted-foreground">
                   <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close

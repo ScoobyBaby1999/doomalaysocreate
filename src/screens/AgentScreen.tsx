@@ -9,6 +9,7 @@ import {
   type AgentModel,
   type AgentStatus,
 } from "../api/agent";
+import { useModelStore } from "../lib/model-store";
 
 const SESSION_KEY = "doomalaysocreate.agent.session";
 const MODEL_KEY = "doomalaysocreate.agent.model";
@@ -33,8 +34,24 @@ export function AgentScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [cost, setCost] = useState<number | null>(null);
-  const [showModelPicker, setShowModelPicker] = useState(false);
-  const selectedModel = models?.find((m) => m.model === selected) ?? null;
+
+  const openOverlay = useModelStore((s) => s.openOverlay);
+  const selectedModelId = useModelStore((s) => s.selectedModelId);
+  const selectedProviderName = useModelStore((s) => s.selectedProviderName);
+  const providers = useModelStore((s) => s.providers);
+  const selectedModelLabel = (() => {
+    if (!selectedModelId) return selected || null;
+    for (const p of providers) {
+      const m = p.models.find((m) => m.id === selectedModelId);
+      if (m) return m.displayName;
+    }
+    return selectedModelId;
+  })();
+  const selectedProviderColor = (() => {
+    if (!selectedProviderName) return "#5b8cff";
+    const p = providers.find((g) => g.name === selectedProviderName);
+    return p?.color || "#5b8cff";
+  })();
   // workspaces selector state: fetched from /api/workspaces; user picks which
   // sandbox the agent should operate in (or No workspace for ephemeral sandbox)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -138,7 +155,7 @@ export function AgentScreen({
       const start = await client.current.send(
         message,
         sessionRef.current ?? undefined,
-        sessionRef.current ? undefined : selected || undefined,
+        sessionRef.current ? undefined : selectedModelId || selected || undefined,
         selectedWorkspace ?? undefined,
       );
       sessionRef.current = start.session_id;
@@ -199,55 +216,14 @@ export function AgentScreen({
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted">
-        <div className="relative">
-          <button
-            onClick={() => !running && setShowModelPicker((o) => !o)}
-            disabled={running || !models}
-            className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[12px] disabled:opacity-50 max-w-[55%]"
-          >
-            <span className="w-2 h-2 rounded-full shrink-0" style={{
-              background: selectedModel?.tier === "claude" ? "#d97706" : selectedModel?.tier === "open" ? "#10b981" : "#5b8cff",
-            }} />
-            <span className="text-accent truncate">{selectedModel?.label || selected || "Select model"}</span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className={`transition-transform shrink-0 ${showModelPicker ? "rotate-180" : ""}`}>
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </button>
-          {showModelPicker && models && (
-            <>
-              <div className="fixed inset-0 z-30" onClick={() => setShowModelPicker(false)} />
-              <div className="absolute top-full left-0 mt-1 w-56 bg-surface2 border border-border rounded-xl shadow-xl z-40 max-h-60 overflow-y-auto">
-                {models.map((m) => {
-                  const isSel = m.model === selected;
-                  return (
-                    <button
-                      key={m.model}
-                      onClick={() => { newSession(m.model); setShowModelPicker(false); }}
-                      className={`w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors ${isSel ? "bg-accent/10" : ""}`}
-                    >
-                      <span className="w-2 h-2 rounded-full shrink-0" style={{
-                        background: m.tier === "claude" ? "#d97706" : m.tier === "open" ? "#10b981" : "#5b8cff",
-                      }} />
-                      <span className="text-[12px] text-text truncate flex-1">{m.label}</span>
-                      <span className={`text-[9px] px-1.5 py-0.5 rounded-full capitalize ${
-                        m.tier === "claude" ? "bg-amber-500/10 text-amber-400" :
-                        m.tier === "open" ? "bg-emerald-500/10 text-emerald-400" :
-                        "bg-accent/10 text-accent"
-                      }`}>
-                        {m.tier}
-                      </span>
-                      {isSel && (
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#5b8cff" strokeWidth="2.5" strokeLinecap="round" className="shrink-0">
-                          <polyline points="20 6 9 17 4 12" />
-                        </svg>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
-        </div>
+        <button
+          onClick={() => !running && openOverlay()}
+          disabled={running}
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[12px] disabled:opacity-50 max-w-[55%]"
+        >
+          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: selectedProviderColor || "#5b8cff" }} />
+          <span className="text-accent truncate">{selectedModelLabel || "Select model"}</span>
+        </button>
         {workspaces.length > 0 && (
           <select
             value={selectedWorkspace || ""}
