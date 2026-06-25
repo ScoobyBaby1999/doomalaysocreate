@@ -8,7 +8,8 @@ ARG VITE_MAIN_SPACE
 FROM node:22-alpine AS webbuild
 WORKDIR /web
 COPY app/package.json app/package-lock.json ./
-RUN npm ci
+# Use install (not ci) so the lock file auto-updates when package.json adds new deps
+RUN npm install
 # Copy source files ONLY (not node_modules — npm ci already installed deps).
 # Using selective COPY to avoid clobbering /web/node_modules/.
 COPY app/index.html app/tsconfig.json app/tailwind.config.js app/postcss.config.js app/vite.config.ts ./
