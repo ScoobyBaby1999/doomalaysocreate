@@ -10,11 +10,10 @@ View logs in the browser via GET /api/debug/logs?cat=glm&tail=50
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import sys
-import time
-import traceback
 from collections import deque
 from typing import Any
 
@@ -34,6 +33,11 @@ _SENSITIVE_PATTERNS = [
 ]
 
 
+def _iso_ts() -> str:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
 def _redact(msg: str) -> str:
     import re
     for pattern, replacement in _SENSITIVE_PATTERNS:
@@ -45,7 +49,7 @@ def log_event(category: str, **fields: Any) -> None:
     """Fire-and-forget: never raises. Observability must not break a request."""
     try:
         record = {
-            "ts": time.time(),
+            "ts": _iso_ts(),
             "cat": category,
             "fields": {k: _redact(str(v)) for k, v in fields.items()},
         }
@@ -73,7 +77,7 @@ def log_entry(level: str = "INFO", cat: str = "", fn: str = "",
     """
     try:
         record = {
-            "ts": time.time(),
+            "ts": _iso_ts(),
             "level": level,
             "cat": cat,
             "fn": fn,
