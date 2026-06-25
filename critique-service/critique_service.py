@@ -1720,32 +1720,36 @@ class Handler(BaseHTTPRequestHandler):
     # --- GitHub integration handlers ------------------------------------------
 
     def _require_user(self) -> str | None:
-        """Extract and validate user_id from the JWT bearer token.
+        """Extract and validate user_id from the JWT bearer token or X-JWT header.
 
+        Tries Authorization bearer first (GitHubClient), then falls back to
+        X-JWT header (ConsciousClient sends a wire-token bearer + JWT in X-JWT).
         Verifies the JWT signature + expiry.  If the user row is missing from
         the DB (ephemeral SQLite), reconstructs it from the JWT payload so
         sessions survive a DB rebuild.
         Returns the deterministic user_id on success, None on failure (with an
         HTTP 401 already sent to the response).
         """
+        # Try Authorization bearer first (JWT directly — GitHubClient path)
         auth = self.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
-            self._send_json(401, {"error": "missing bearer token"})
-            return None
-        token = auth[len("Bearer "):].strip()
-        if not token:
-            self._send_json(401, {"error": "empty bearer token"})
-            return None
+        token = ""
+        if auth.startswith("Bearer "):
+            token = auth[len("Bearer "):].strip()
 
-        # Strict audience check first (same-space JWTs). If that fails, retry
-        # with allow_any_aud — the JWT is still signature-verified, so it was
-        # issued by a trusted space (the main doomalaysocreate Space in the proxy flow).
-        # Without this fallback, a JWT minted by the main Space is rejected by
-        # every user Space → 401 → the workspace panel logs out on every open
-        # even though the user just authenticated.
-        payload = jwt_auth.verify_jwt(token, expected_aud=self._space_host())
+        payload = None
+        if token:
+            payload = jwt_auth.verify_jwt(token, expected_aud=self._space_host())
+            if not payload:
+                payload = jwt_auth.verify_jwt(token, allow_any_aud=True)
+
+        # Fallback: try X-JWT header (ConsciousClient sends wire-token bearer + JWT here)
         if not payload:
-            payload = jwt_auth.verify_jwt(token, allow_any_aud=True)
+            x_jwt = (self.headers.get("X-JWT") or "").strip()
+            if x_jwt:
+                payload = jwt_auth.verify_jwt(x_jwt, expected_aud=self._space_host())
+                if not payload:
+                    payload = jwt_auth.verify_jwt(x_jwt, allow_any_aud=True)
+
         if not payload:
             self._send_json(401, {"error": "invalid or expired session token"})
             return None
