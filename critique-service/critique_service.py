@@ -1140,6 +1140,15 @@ class Handler(BaseHTTPRequestHandler):
                     profile = (q.get("profile", ["default"])[0] or "default")
                 self._send_json(200, panel.metrics.aggregates(profile))
             return
+        # --- Provider model catalog (public, no auth) ---
+        if route == "/api/models":
+            from urllib.parse import parse_qs
+            from provider_sync.catalog import build_provider_catalog
+            q = parse_qs(urlsplit(self.path).query)
+            refresh = q.get("refresh", ["0"])[0] in ("1", "true", "yes")
+            result = build_provider_catalog(force_refresh=refresh)
+            self._send_json(200, result)
+            return
         # --- public metrics sync & global aggregates ---
         if route == "/api/metrics/sync":
             # Force sync from public dataset
