@@ -2,8 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { PanelClient, type Settings, type PanelSnapshot, type Effort, type Privacy } from "../api/panel";
 import { JudgeCard } from "../components/JudgeCard";
-import { ModelSelectOverlay } from "../components/ModelSelectOverlay";
-import { ProvidersDialog } from "../components/ProvidersDialog";
 import { useModelStore } from "../lib/model-store";
 
 interface Turn {
@@ -15,7 +13,6 @@ interface Turn {
 
 const EFFORTS: Effort[] = ["low", "med", "high", "max"];
 
-/** F0 chat: send a prompt to the panel, watch every frontier judge stream in parallel. */
 export function Chat({ settings }: { settings: Settings }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
@@ -24,15 +21,7 @@ export function Chat({ settings }: { settings: Settings }) {
   const [privacy] = useState<Privacy>("strict");
   const listRef = useRef<VirtuosoHandle>(null);
 
-  const {
-    setBaseUrl,
-    fetchProviders,
-    focusedMode,
-    selectedModelId,
-    selectedProviderName,
-    providers,
-    openOverlay,
-  } = useModelStore();
+  const { setBaseUrl, fetchProviders, focusedMode, selectedModelId, selectedProviderName, providers, openOverlay, toggleFocusedMode } = useModelStore();
 
   useEffect(() => {
     setBaseUrl(settings.baseUrl);
@@ -77,8 +66,6 @@ export function Chat({ settings }: { settings: Settings }) {
 
   return (
     <div className="flex flex-col h-full">
-      <ModelSelectOverlay />
-      <ProvidersDialog />
       <Virtuoso
         ref={listRef}
         className="flex-1"
@@ -134,7 +121,7 @@ export function Chat({ settings }: { settings: Settings }) {
             </button>
           ))}
           <button
-            onClick={openOverlay}
+            onClick={toggleFocusedMode}
             className={`ml-2 text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1 ${
               focusedMode ? "border-accent text-accent" : "border-border text-muted"
             }`}

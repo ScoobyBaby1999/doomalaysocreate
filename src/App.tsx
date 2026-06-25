@@ -7,6 +7,9 @@ import { AgentScreen } from "./screens/AgentScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
 import { ConsciousScreen } from "./screens/ConsciousScreen";
 import { DebugScreen } from "./screens/DebugScreen";
+import { ModelSelectOverlay } from "./components/ModelSelectOverlay";
+import { ProvidersDialog } from "./components/ProvidersDialog";
+import { useModelStore } from "./lib/model-store";
 
 import { getJWTSub } from "./lib/jwt";
 import type { Settings } from "./api/panel";
@@ -18,6 +21,25 @@ export default function App() {
   const hasCredentials = !!(settings.token || settings.rotationSecret || settings.githubSessionId);
   const [manualSetup, setManualSetup] = useState(false);
   const [tab, setTab] = useState<Tab>(hasCredentials ? "chat" : "settings");
+
+  const setBaseUrl = useModelStore((s) => s.setBaseUrl);
+  const fetchProviders = useModelStore((s) => s.fetchProviders);
+  const openOverlay = useModelStore((s) => s.openOverlay);
+  const selectedModelId = useModelStore((s) => s.selectedModelId);
+  const selectedProviderName = useModelStore((s) => s.selectedProviderName);
+  const providers = useModelStore((s) => s.providers);
+  const selectedProviderColor = (() => {
+    if (!selectedProviderName) return "#5b8cff";
+    const p = providers.find((g) => g.name === selectedProviderName);
+    return p?.color || "#5b8cff";
+  })();
+
+  useEffect(() => {
+    if (settings.baseUrl) {
+      setBaseUrl(settings.baseUrl);
+      fetchProviders();
+    }
+  }, [settings.baseUrl]);
 
   // Handle OAuth callback hashes
   // GitHub: #github-connected=<id> | #github-grant=<token> (proxy) | #github-error=...
@@ -136,9 +158,17 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-full">
-       <header className="flex items-center px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content">
+       <header className="flex items-center gap-2 px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content">
          <span className="font-semibold tracking-tight">doomalaysocreate</span>
-         <span className="ml-2 text-[11px] text-muted">panel · agentic coder</span>
+         <span className="text-[11px] text-muted">panel · agentic coder</span>
+         <button
+           onClick={openOverlay}
+           className="ml-auto flex items-center gap-1.5 px-2 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[11px]"
+           title="Select provider model"
+         >
+           <span className="w-2 h-2 rounded-full" style={{ background: selectedProviderColor || "#5b8cff" }} />
+           <span className="text-muted max-w-[80px] truncate">{selectedModelId || selectedProviderName || "Model"}</span>
+         </button>
        </header>
 
       <main className="flex-1 min-h-0">
@@ -188,6 +218,8 @@ export default function App() {
           </button>
         ))}
       </nav>
+      <ModelSelectOverlay />
+      <ProvidersDialog />
     </div>
   );
 }

@@ -19,6 +19,7 @@ import { ConsciousClient, ApiError } from "../api/conscious";
 import type { Settings } from "../api/panel";
 import type { Agent, DrawerEntry, Conscious, Proposal } from "../api/conscious";
 import type { Workspace } from "../api/github";
+import { useModelStore } from "../lib/model-store";
 
 // ---------------------------------------------------------------------------
 // inline SVG icons (no dependency)
@@ -144,6 +145,10 @@ export function ConsciousScreen({ settings, workspaceId }: {
 }) {
   const client = useRef(new ConsciousClient(settings));
 
+  const selectedModelId = useModelStore((s) => s.selectedModelId);
+  const selectedProviderName = useModelStore((s) => s.selectedProviderName);
+  const openOverlay = useModelStore((s) => s.openOverlay);
+
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWsId, setSelectedWsId] = useState<string | null>(null);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -211,8 +216,10 @@ export function ConsciousScreen({ settings, workspaceId }: {
   const addAgent = async () => {
     if (!conscious) return;
     try {
+      const model = selectedModelId || "glm-5.2 (free)";
+      const tier = selectedModelId?.toLowerCase().includes("claude") ? "claude" : "zai";
       const r = await client.current.spawnAgent(conscious.id, {
-        role: "ai-engineer", model: "glm-5.2 (free)", tier: "zai",
+        role: "ai-engineer", model, tier,
       });
       setAgents((prev) => [...prev, r.agent]);
       const orch = agents.find((a) => a.isOrchestrator === 1);
@@ -267,7 +274,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
                 </svg>
               </button>
             </div>
-            <div className="text-[10px] text-muted truncate">{agents.length} agent{agents.length !== 1 ? "s" : ""} · GLM 5.2</div>
+            <div className="text-[10px] text-muted truncate">{agents.length} agent{agents.length !== 1 ? "s" : ""} · {selectedModelId || "GLM 5.2"}</div>
             {workspaceOpen && (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setWorkspaceOpen(false)} />
@@ -286,6 +293,14 @@ export function ConsciousScreen({ settings, workspaceId }: {
             )}
           </div>
         </div>
+        <button onClick={openOverlay}
+          className="w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
+          title="Select model"
+          style={{ marginRight: 4 }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
+          </svg>
+        </button>
         <button onClick={() => setShowDrawer(true)}
           className="w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
           title="View outputs">
@@ -342,7 +357,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
 
             {agents.length <= 1 && (
               <div className="absolute bottom-24 left-1/2 -translate-x-1/2 text-center text-muted text-xs px-8">
-                Tap <span className="text-accent font-medium">+</span> to add a GLM 5.2 agent.
+                Tap <span className="text-accent font-medium">+</span> to add a {selectedModelId || "GLM 5.2"} agent.
                 Each agent works in its own git worktree.
               </div>
             )}
@@ -351,7 +366,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
 
         <button onClick={addAgent} disabled={!conscious || loading}
           className="absolute bottom-6 right-6 w-14 h-14 rounded-full bg-accent text-white flex items-center justify-center shadow-lg shadow-accent/30 hover:scale-105 active:scale-95 transition-transform disabled:opacity-50"
-          style={{ zIndex: 10 }} title="Add GLM 5.2 agent">
+          style={{ zIndex: 10 }} title={`Add ${selectedModelId || "GLM 5.2"} agent`}>
           <Icon.Plus size={24} color="white" />
         </button>
       </div>
