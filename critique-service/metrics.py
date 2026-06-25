@@ -350,6 +350,8 @@ class MetricStore:
 class _HFSink:
     """optional durable sink: mirrors per-profile JSONL to a PUBLIC HF Dataset."""
 
+    MAX_RETENTION_DAYS = 90  # public dataset events are pruned after this
+
     def __init__(self) -> None:
         self.repo_id = os.environ.get("METRICS_PUBLIC_HF_REPO", "").strip()
         self.token = (os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_TOKEN", "")).strip()
@@ -362,26 +364,40 @@ class _HFSink:
             self._api = HfApi(token=self.token)
             self._api.create_repo(self.repo_id, repo_type="dataset", private=False, exist_ok=True)
             self.enabled = True
-            log_event("metrics_hf_enabled", repo=self.repo_id)
-        except Exception as e:  # noqa: BLE001 - persistence must never break boot
-            log_event("metrics_hf_disabled", reason=repr(e)[:200])
-            self.enabled = False
-        if not (self.repo_id and self.token):
-            return
-        try:
-            from huggingface_hub import HfApi
-            self._api = HfApi(token=self.token)
-            # PUBLIC dataset - anyone can read, authenticated users with write token can write
-            self._api.create_repo(self.repo_id, repo_type="dataset", private=False, exist_ok=True)
-            self.enabled = True
             log_event("metrics_hf_enabled", repo=self.repo_id, public=True)
         except Exception as e:  # noqa: BLE001 - persistence must never break boot
             log_event("metrics_hf_disabled", reason=repr(e)[:200])
             self.enabled = False
 
+    def _prune_old_events(self, path: Path) -> None:
+        """Remove events older than MAX_RETENTION_DAYS from a JSONL file in-place."""
+        try:
+            cutoff = time.time() - self.MAX_RETENTION_DAYS * 86400
+            lines = path.read_text(encoding="utf-8").splitlines()
+            kept = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                    ts = ev.get("ts", "")
+                    if isinstance(ts, str) and ts.endswith("Z"):
+                        parsed = time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+                        if parsed < cutoff:
+                            continue
+                    kept.append(line)
+                except (ValueError, json.JSONDecodeError):
+                    kept.append(line)  # keep unparseable lines
+            if len(kept) < len(lines):
+                path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        except OSError:
+            pass  # best-effort: never break the upload path
+
     def upload(self, path: Path) -> None:
         if not self.enabled or self._api is None:
             return
+        self._prune_old_events(path)
         for attempt in range(3):
             try:
                 self._api.upload_file(

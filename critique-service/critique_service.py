@@ -1048,6 +1048,11 @@ class Handler(BaseHTTPRequestHandler):
                     "GET /api/agent/<sid>/file?path=": "download a workspace artifact",
                     "GET /api/stats": "live rotation/health per provider + slot",
                     "GET /api/metrics?profile=<id>": "per-profile cost/throttle/latency aggregates",
+                    "GET /api/metrics/sync": "force sync public metrics from shared HF Dataset",
+                    "GET /api/metrics/global": "global aggregates across all profiles (community dashboard)",
+                    "GET /api/metrics/user?profile=<id>": "user's own metrics from public dataset",
+                    "GET /api/debug/logs?cat=&tail=100&level=": "view structured debug logs (auth-gated)",
+                    "DELETE /api/debug/clear?cat=": "clear debug log ring buffer (auth-gated)",
                     "GET /api/roster": "per-model benchmark + hosts + privacy-safe routability + frontier guarantee",
                     "GET /oauth/login": "start HF OAuth flow (redirects to HF authorize)",
                     "GET /oauth/callback": "HF OAuth callback — provisions user Space",
@@ -2689,6 +2694,17 @@ class Handler(BaseHTTPRequestHandler):
     def _do_DELETE(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
+        # --- Debug log clear (auth-gated) ---
+        if route == "/api/debug/clear":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            from urllib.parse import parse_qs, urlsplit
+            q = parse_qs(urlsplit(self.path).query)
+            cat = q.get("cat", [None])[0]
+            debug_log.clear_logs(cat)
+            self._send_json(200, {"cleared": True, "category": cat})
+            return
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
             self._conscious_dispatch("DELETE")

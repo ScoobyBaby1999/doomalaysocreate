@@ -57,15 +57,67 @@ def log_event(category: str, **fields: Any) -> None:
         pass  # never break the calling code
 
 
+def log_entry(level: str = "INFO", cat: str = "", fn: str = "",
+              msg: str = "", data: dict | None = None,
+              ms: float | None = None) -> None:
+    """Log a structured entry in the frontend-compatible format.
+
+    This is the primary logging call used by the debug screen. Parameters
+    match the LogEntry interface in DebugScreen.tsx:
+      - level: ERROR / WARN / INFO / DEBUG
+      - cat:   category (startup, glm, auth, agent, conscious, errors, http)
+      - fn:    calling function name
+      - msg:   human-readable message
+      - data:  optional structured payload (shown as expandable JSON)
+      - ms:    optional elapsed milliseconds for timed operations
+    """
+    try:
+        record = {
+            "ts": time.time(),
+            "level": level,
+            "cat": cat,
+            "fn": fn,
+            "msg": msg,
+            "data": data or {},
+        }
+        if ms is not None:
+            record["ms"] = ms
+        _memory_logs.append(record)
+        _categories.add(cat)
+        if _STDERR_ENABLED:
+            print(json.dumps(record, ensure_ascii=False), file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
 def get_recent_logs(category: str | None = None,
                     tail: int = 100,
                     min_level: str | None = None) -> list[dict]:
-    """Return recent log entries, optionally filtered by category."""
+    """Return recent log entries, optionally filtered by category and level."""
     all_logs = list(_memory_logs)
     if category:
         all_logs = [r for r in all_logs if r.get("cat") == category]
+    if min_level:
+        _LEVEL_WEIGHT = {"ERROR": 40, "WARN": 30, "INFO": 20, "DEBUG": 10}
+        threshold = _LEVEL_WEIGHT.get(min_level.upper(), 0)
+        all_logs = [r for r in all_logs if _LEVEL_WEIGHT.get(r.get("level", "INFO"), 0) >= threshold]
     return all_logs[-tail:]
 
 
 def list_log_categories() -> list[str]:
     return sorted(_categories)
+
+
+def clear_logs(category: str | None = None) -> None:
+    """Clear the in-memory ring buffer (optionally by category)."""
+    global _memory_logs, _categories
+    if category:
+        _memory_logs = deque(
+            (r for r in _memory_logs if r.get("cat") != category),
+            maxlen=_MAX_MEMORY_LOGS,
+        )
+        remaining = set(r.get("cat", "") for r in _memory_logs)
+        _categories = remaining
+    else:
+        _memory_logs.clear()
+        _categories.clear()

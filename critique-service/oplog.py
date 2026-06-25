@@ -31,6 +31,23 @@ def log_event(kind: str, **fields: Any) -> None:
         sys.stderr.flush()
     except (OSError, TypeError, ValueError):
         pass
+    # Dual-write to the debug log ring buffer so /api/debug/logs shows these events.
+    try:
+        from debug_log import log_entry as _debug_entry
+        ms = None
+        if "elapsed_s" in fields:
+            ms = round(float(fields["elapsed_s"]) * 1000)
+        elif "latency_s" in fields:
+            ms = round(float(fields["latency_s"]) * 1000)
+        _debug_entry(
+            level="INFO",
+            cat=kind,
+            msg=fields.get("msg", "") or fields.get("error", "") or str(fields.get("profile", "")),
+            data=fields,
+            ms=ms,
+        )
+    except Exception:
+        pass  # debug bridge must never break the primary path
 
 
 def _json_default(obj: Any) -> Any:
