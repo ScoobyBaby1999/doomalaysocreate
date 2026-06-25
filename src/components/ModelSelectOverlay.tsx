@@ -353,7 +353,7 @@ export function ModelSelectOverlay() {
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="text-[12px] font-semibold text-foreground">Select Model</span>
                   <span className="text-[10px] text-muted-foreground">
-                    {loading ? "loading…" : error ? "failed to load" : `${filteredCount} models · ${providers.length} providers`}
+                    {loading ? "loading…" : error ? `failed: ${error}` : providers.length === 0 ? "no provider data" : `${filteredCount} models · ${providers.length} providers`}
                   </span>
                   {!loading && providers.length > 0 && (
                     <button

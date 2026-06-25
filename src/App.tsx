@@ -35,10 +35,8 @@ export default function App() {
   })();
 
   useEffect(() => {
-    if (settings.baseUrl) {
-      setBaseUrl(settings.baseUrl);
-      fetchProviders();
-    }
+    setBaseUrl(settings.baseUrl);
+    fetchProviders();
   }, [settings.baseUrl]);
 
   // Handle OAuth callback hashes

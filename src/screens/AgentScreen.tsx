@@ -25,7 +25,6 @@ export function AgentScreen({
   settings: Settings;
   workspaceId?: string;
 }) {
-  const [models, setModels] = useState<AgentModel[] | null>(null);
   const [selected, setSelected] = useState<string>(localStorage.getItem(MODEL_KEY) || "");
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [status, setStatus] = useState<AgentStatus>("idle");
@@ -70,8 +69,6 @@ export function AgentScreen({
       .models()
       .then((r) => {
         if (!alive) return;
-        setModels(r.models);
-        // default selection: stored choice if still valid, else the server default
         const valid = r.models.find((m) => m.model === selected);
         if (!valid) {
           const def = r.models.find((m) => m.default) || r.models[0];
@@ -81,7 +78,7 @@ export function AgentScreen({
           }
         }
       })
-      .catch(() => alive && setModels([]));
+      .catch(() => {});
     return () => {
       alive = false;
     };
