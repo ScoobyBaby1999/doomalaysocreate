@@ -18,6 +18,7 @@ interface ModelSelectionState {
   selectedProviderName: string | null;
 
   focusedMode: boolean;
+  sortBy: string;
 
   overlayOpen: boolean;
   providersDialogOpen: boolean;
@@ -31,6 +32,7 @@ interface ModelSelectionState {
   selectModel: (modelId: string, providerName: string) => void;
   clearSelection: () => void;
   toggleFocusedMode: () => void;
+  setSortBy: (sort: string) => void;
   openOverlay: () => void;
   closeOverlay: () => void;
   toggleOverlay: () => void;
@@ -74,6 +76,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   selectedModelId: loadPersisted<string | null>(`${PREFIX}.selectedModelId`, null),
   selectedProviderName: loadPersisted<string | null>(`${PREFIX}.selectedProviderName`, null),
   focusedMode: loadPersisted<boolean>(`${PREFIX}.focusedMode`, false),
+  sortBy: loadPersisted<string>(`${PREFIX}.sortBy`, "default"),
 
   overlayOpen: false,
   providersDialogOpen: false,
@@ -152,6 +155,11 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
       set({ focusedMode: false });
       persist(`${PREFIX}.focusedMode`, false);
     }
+  },
+
+  setSortBy: (sort: string) => {
+    set({ sortBy: sort });
+    persist(`${PREFIX}.sortBy`, sort);
   },
 
   openOverlay: () => set({ overlayOpen: true }),

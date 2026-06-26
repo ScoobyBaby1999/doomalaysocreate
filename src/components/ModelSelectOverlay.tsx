@@ -37,6 +37,16 @@ function IcoRefresh({ spinning }: { spinning?: boolean }) {
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={spinning ? "animate-spin" : ""}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
   );
 }
+function IcoSort() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="12" y1="18" x2="20" y2="18"/></svg>
+  );
+}
+function IcoArrowUp() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+  );
+}
 
 function fmtCtx(k: number): string {
   if (!k) return "—";
@@ -64,30 +74,99 @@ function syncedAgoLabel(iso: string | null): string {
   return `synced ${hrs}h ago`;
 }
 
-function attributeLine(a: ModelAttributes | undefined): { text: string; warn?: boolean } | null {
-  if (!a) return null;
-  const parts: string[] = [];
+function scoreColor(v: number): string {
+  if (v >= 70) return "#22c55e";
+  if (v >= 40) return "#f59e0b";
+  return "#ef4444";
+}
+
+function scoreBg(v: number): string {
+  if (v >= 70) return "#22c55e18";
+  if (v >= 40) return "#f59e0b18";
+  return "#ef444418";
+}
+
+const CAP_COLORS: Record<string, string> = {
+  vision: "#a855f7",
+  tools: "#3b82f6",
+  reasoning: "#f97316",
+  audio: "#06b6d4",
+  video: "#ec4899",
+};
+
+function capColor(c: string): string {
+  return CAP_COLORS[c] || "#8b95a3";
+}
+
+interface Badge {
+  text: string;
+  color: string;
+  bg: string;
+  title?: string;
+}
+
+function attributeBadges(a: ModelAttributes | undefined): Badge[] {
+  if (!a) return [];
+  const badges: Badge[] = [];
   const b = a.benchmarks;
   if (b) {
-    if (typeof b.intelligence === "number") parts.push(`AA ${b.intelligence}`);
-    if (typeof b.coding === "number") parts.push(`code ${b.coding}`);
-    if (typeof b.agentic === "number") parts.push(`agent ${b.agentic}`);
-    if (typeof b.sweBench === "number") parts.push(`SWE ${b.sweBench}`);
-    if (typeof b.aaCoding === "number" && typeof b.sweBench === "undefined") parts.push(`AA-coding ${b.aaCoding}`);
+    if (typeof b.intelligence === "number") {
+      badges.push({ text: `AA ${b.intelligence}`, color: scoreColor(b.intelligence), bg: scoreBg(b.intelligence), title: "Artificial Analysis intelligence index" });
+    }
+    if (typeof b.coding === "number") {
+      badges.push({ text: `code ${b.coding}`, color: scoreColor(b.coding), bg: scoreBg(b.coding), title: "Artificial Analysis coding index" });
+    }
+    if (typeof b.agentic === "number") {
+      badges.push({ text: `agent ${b.agentic}`, color: scoreColor(b.agentic), bg: scoreBg(b.agentic), title: "Artificial Analysis agentic index" });
+    }
+    if (typeof b.sweBench === "number") {
+      badges.push({ text: `SWE ${b.sweBench}`, color: scoreColor(b.sweBench), bg: scoreBg(b.sweBench), title: "SWE-bench" });
+    }
+    if (typeof b.aaCoding === "number" && typeof b.sweBench === "undefined") {
+      badges.push({ text: `AA-code ${b.aaCoding}`, color: scoreColor(b.aaCoding), bg: scoreBg(b.aaCoding), title: "Artificial Analysis coding" });
+    }
   }
   if (a.ranks && a.ranks.length > 0) {
-    const top = a.ranks.slice(0, 3).map((r) => `${r.label} #${r.rank}`).join(" · ");
-    parts.push(top);
+    const top = a.ranks[0];
+    badges.push({ text: `${top.label} #${top.rank}`, color: "#8b95a3", bg: "#8b95a318", title: "Usage/spend popularity rank" });
   }
   if (a.capabilities && a.capabilities.length > 0) {
-    parts.push(a.capabilities.join(" · "));
+    for (const c of a.capabilities) {
+      badges.push({ text: c, color: capColor(c), bg: `${capColor(c)}18`, title: `Capability: ${c}` });
+    }
   }
-  if (a.pricing) parts.push(a.pricing);
-
-  const text = parts.join(" · ");
-  if (!text && !a.note) return null;
-  return { text, warn: a.note ? true : false };
+  if (a.pricing) {
+    const isFree = a.pricing.toLowerCase().includes("free");
+    badges.push({ text: a.pricing, color: isFree ? "#22c55e" : "#8b95a3", bg: isFree ? "#22c55e18" : "#8b95a318", title: "Pricing per million tokens" });
+  }
+  return badges;
 }
+
+function attachSortKey(model: ProviderModel, sortBy: string): number {
+  if (sortBy === "intelligence") return model.attributes?.benchmarks?.intelligence ?? -1;
+  if (sortBy === "coding") return model.attributes?.benchmarks?.coding ?? -1;
+  if (sortBy === "agentic") return model.attributes?.benchmarks?.agentic ?? -1;
+  if (sortBy === "context") return model.contextLength ?? 0;
+  return 0;
+}
+
+function sortModels(models: ProviderModel[], sortBy: string): ProviderModel[] {
+  if (sortBy === "default" || sortBy === "name") {
+    const s = [...models];
+    if (sortBy === "name") s.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    return s;
+  }
+  return [...models].sort((a, b) => attachSortKey(b, sortBy) - attachSortKey(a, sortBy));
+}
+
+const SORT_OPTIONS = [
+  { key: "default", label: "Default" },
+  { key: "intelligence", label: "AA Intel" },
+  { key: "coding", label: "Code" },
+  { key: "agentic", label: "Agent" },
+  { key: "context", label: "Context" },
+  { key: "name", label: "Name" },
+];
 
 function ModelRow({
   model,
@@ -98,9 +177,8 @@ function ModelRow({
   isSelected: boolean;
   onSelect: () => void;
 }) {
-  const attr = model.attributes ? attributeLine(model.attributes) : null;
+  const badges = attributeBadges(model.attributes);
   const note = model.attributes?.note;
-  const hasSub = !!(attr && (attr.text || note));
 
   return (
     <button
@@ -109,7 +187,7 @@ function ModelRow({
         flex flex-col w-full text-left rounded px-1.5 transition-colors duration-100 cursor-pointer
         ${isSelected ? "bg-primary/10" : "hover:bg-muted/60"}
       `}
-      style={{ paddingTop: 3, paddingBottom: hasSub ? 3 : 3 }}
+      style={{ paddingTop: 4, paddingBottom: 4 }}
     >
       <span className="flex items-center w-full" style={{ height: 20 }}>
         <span
@@ -137,16 +215,21 @@ function ModelRow({
         </span>
       </span>
 
-      {hasSub && (
-        <span className="flex items-center w-full pl-6 pr-1 mt-0.5 min-h-[14px]">
-          {attr?.text && (
-            <span className="text-[9px] leading-none text-muted-foreground/80 truncate" title={attr.text}>
-              {attr.text}
+      {(badges.length > 0 || note) && (
+        <span className="flex flex-wrap items-center gap-1 pl-6 pr-1 mt-1">
+          {badges.map((b, i) => (
+            <span
+              key={i}
+              className="inline-flex items-center px-1 py-px rounded text-[9px] font-medium leading-none"
+              style={{ color: b.color, backgroundColor: b.bg }}
+              title={b.title || b.text}
+            >
+              {b.text}
             </span>
-          )}
+          ))}
           {note && (
             <span
-              className={`text-[9px] leading-none truncate ${attr?.text ? "ml-1.5" : ""} ${note.startsWith("⚠") ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground/70"}`}
+              className={`inline-flex items-center px-1 py-px rounded text-[9px] leading-none ${note.startsWith("⚠") ? "text-amber-600 dark:text-amber-500 bg-amber-500/10" : "text-muted-foreground/70 bg-muted/30"}`}
               title={note}
             >
               {note}
@@ -163,22 +246,27 @@ function ProviderBox({
   selectedModelId,
   onSelect,
   searchQuery,
+  sortBy,
 }: {
   provider: ProviderGroup;
   selectedModelId: string | null;
   onSelect: (model: ProviderModel) => void;
   searchQuery: string;
+  sortBy: string;
 }) {
   const filtered = useMemo(() => {
-    if (!searchQuery.trim()) return provider.models;
-    const q = searchQuery.toLowerCase();
-    return provider.models.filter(
-      (m) =>
-        m.displayName.toLowerCase().includes(q) ||
-        m.id.toLowerCase().includes(q) ||
-        (m.family?.toLowerCase().includes(q) ?? false)
-    );
-  }, [provider.models, searchQuery]);
+    let ms = provider.models;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      ms = ms.filter(
+        (m) =>
+          m.displayName.toLowerCase().includes(q) ||
+          m.id.toLowerCase().includes(q) ||
+          (m.family?.toLowerCase().includes(q) ?? false)
+      );
+    }
+    return sortModels(ms, sortBy);
+  }, [provider.models, searchQuery, sortBy]);
 
   const openSettings = useCallback(() => {
     useModelStore.getState().openProvidersDialog(provider.name);
@@ -250,11 +338,13 @@ export function ModelSelectOverlay() {
     selectedModelId,
     overlayOpen,
     searchQuery,
+    sortBy,
     fetchProviders,
     refreshProviders,
     selectModel,
     closeOverlay,
     setSearchQuery,
+    setSortBy,
     openProvidersDialog,
   } = useModelStore();
 
@@ -263,6 +353,7 @@ export function ModelSelectOverlay() {
   const syncedLabel = syncedAgoLabel(syncedAt);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const [showSort, setShowSort] = useState(false);
 
   useEffect(() => {
     if (providers.length === 0 && !loading) fetchProviders();
@@ -278,7 +369,7 @@ export function ModelSelectOverlay() {
   useEffect(() => {
     if (!overlayOpen) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeOverlay();
+      if (e.key === "Escape") { closeOverlay(); setShowSort(false); }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -317,6 +408,8 @@ export function ModelSelectOverlay() {
     return null;
   }, [selectedModelId, providers]);
 
+  const sortLabel = SORT_OPTIONS.find((o) => o.key === sortBy)?.label || "Default";
+
   return (
     <AnimatePresence>
       {overlayOpen && (
@@ -327,7 +420,7 @@ export function ModelSelectOverlay() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
             className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm"
-            onClick={closeOverlay}
+            onClick={() => { closeOverlay(); setShowSort(false); }}
             aria-hidden="true"
           />
 
@@ -375,7 +468,34 @@ export function ModelSelectOverlay() {
                   )}
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 relative">
+                  <button
+                    onClick={() => setShowSort(!showSort)}
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                    title={`Sort by: ${sortLabel}`}
+                  >
+                    <IcoSort />
+                    <span className="hidden sm:inline text-[10px]">{sortLabel}</span>
+                    <IcoArrowUp />
+                  </button>
+                  {showSort && (
+                    <>
+                      <div className="fixed inset-0 z-30" onClick={() => setShowSort(false)} />
+                      <div className="absolute top-full right-12 mt-1 w-36 bg-surface2 border border-border rounded-lg shadow-xl z-40 overflow-hidden">
+                        {SORT_OPTIONS.map((o) => (
+                          <button
+                            key={o.key}
+                            onClick={() => { setSortBy(o.key); setShowSort(false); }}
+                            className={`w-full text-left px-3 py-2 text-[11px] flex items-center gap-2 transition-colors ${sortBy === o.key ? "text-primary bg-primary/10 font-medium" : "text-foreground hover:bg-muted/40"}`}
+                          >
+                            {sortBy === o.key && <IcoDot />}
+                            <span className={sortBy === o.key ? "" : "ml-4"}>{o.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+
                   <div className="relative">
                     <span className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground">
                       <IcoSearch />
@@ -390,7 +510,7 @@ export function ModelSelectOverlay() {
                   </div>
 
                   <button
-                    onClick={closeOverlay}
+                    onClick={() => { closeOverlay(); setShowSort(false); }}
                     className="flex items-center justify-center size-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
                     aria-label="Close"
                   >
@@ -429,6 +549,7 @@ export function ModelSelectOverlay() {
                           selectedModelId={selectedModelId}
                           onSelect={handleSelect}
                           searchQuery={searchQuery}
+                          sortBy={sortBy}
                         />
                       ))}
                     </div>
@@ -454,3 +575,5 @@ export function ModelSelectOverlay() {
     </AnimatePresence>
   );
 }
+
+import { useState } from "react";
