@@ -252,6 +252,30 @@ _PROVIDER_DISPLAY: dict[str, dict[str, Any]] = {
             ],
         },
     },
+    "privatemodeai": {
+        "displayName": "PrivateMode AI",
+        "pool": "core",
+        "region": "eu",
+        "icon": "Shield",
+        "color": "#4f46e5",
+        "usageLimits": "Free: 5M initial tokens, then 1M prompt + 1M completion/mo. 20 req/min, 200K TPM, 20K TPD.",
+        "settingsUrl": "https://portal.privatemode.ai",
+        "manageLabel": "Manage PrivateMode account & keys",
+        "privacy": {
+            "notice": "✓ Hardware-enforced E2EE: prompts/responses never stored or trained on. Zero-access architecture — no one (not even Edgeless Systems) can see your data.",
+            "confidence": "high",
+            "retention": "Prompts/responses: NOT retained (stateless by design — zero-clear after inference completes). Metadata (API key, request path/method/status code): stored up to 90 days for monitoring. Token usage: permanently stored for billing. Optional prompt caching: cryptographically isolated per tenant (no cross-tenant leakage). Website privacy policy (www.privatemode.ai) is separate from API — covers marketing site cookies & contact forms only.",
+            "training": "ZERO training — architecturally enforced via confidential computing (AMD SEV-SNP + Intel TDX + NVIDIA CC). Verbatim: 'We can never access your prompts, thus we can't train our models on your data.' No human review possible — prompts encrypted client-side with AES-256-GCM, decrypted only inside hardware-isolated enclaves. Public source code + reproducible builds enable independent verification.",
+            "sources": [
+                "https://docs.privatemode.ai/security/",
+                "https://docs.privatemode.ai/getting-started/faq/",
+                "https://docs.privatemode.ai/architecture/overview/",
+                "https://docs.privatemode.ai/architecture/encryption/",
+                "https://www.privatemode.ai/security-and-encryption",
+                "https://www.privatemode.ai/privacy-policy",
+            ],
+        },
+    },
 }
 
 
@@ -542,7 +566,7 @@ def build_provider_catalog(force_refresh: bool = False) -> dict[str, Any]:
 
         for entry in catalog:
             name = entry["name"]
-            display = display_map.get(name, {})
+            display = display_map.get(name, entry)
             model_ids = provider_models.get(name, [])
             is_live = name in live_set
 
