@@ -265,25 +265,26 @@ function ModelRow({
       </span>
 
       {hasSub && (
-        <span className="flex items-center w-full pl-6 pr-1 mt-0.5 min-h-[14px] overflow-hidden">
-          {segs && (
-            <span className="text-[9px] leading-none truncate" title={segs.map((s) => s.text).join("")}>
-              {segs.map((s, i) => (
-                <span key={i} style={s.color ? { color: dimmed ? undefined : s.color } : undefined}>
-                  {s.text}
-                </span>
-              ))}
-            </span>
+        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-6 pr-1">
+          {segs && segs.map((s, i) =>
+            s.text === " \u00b7 " ? null : (
+              <span
+                key={i}
+                className="text-[9px] leading-none px-1 py-px rounded-sm"
+                style={s.color ? { color: dimmed ? undefined : s.color, backgroundColor: `${s.color}12` } : { color: dimmed ? undefined : "var(--muted-foreground)" }}
+              >
+                {s.text}
+              </span>
+            )
           )}
           {note && (
             <span
-              className={`text-[9px] leading-none truncate shrink-0 ${segs ? "ml-1.5" : ""} ${note.startsWith("\u26a0") ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground/70"}`}
-              title={note}
+              className={`text-[9px] leading-none px-1 py-px rounded-sm ${note.startsWith("\u26a0") ? "text-amber-600 dark:text-amber-500 bg-amber-500/10" : "text-muted-foreground/70 bg-muted/30"}`}
             >
               {note}
             </span>
           )}
-        </span>
+        </div>
       )}
     </button>
   );
@@ -550,7 +551,7 @@ export function ModelSelectOverlay() {
 
                 <div className="flex items-center gap-2">
                   <div className="relative">
-                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground">
+                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/60">
                       <IcoSearch />
                     </span>
                     <input
@@ -558,7 +559,7 @@ export function ModelSelectOverlay() {
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="search\u2026"
-                      className="pl-7 pr-2 h-6 w-36 sm:w-48 text-[11px] bg-muted/40 border border-border/60 rounded-md outline-none focus:border-ring/50 placeholder:text-muted-foreground/60"
+                      className="pl-8 pr-3 h-7 w-40 sm:w-52 text-[12px] bg-muted/20 border border-border/50 rounded-lg outline-none focus:border-ring/40 focus:bg-muted/40 transition-colors placeholder:text-muted-foreground/50"
                     />
                   </div>
 
@@ -657,7 +658,7 @@ export function ModelSelectOverlay() {
 
               <div className="flex items-center justify-between px-3.5 shrink-0" style={{ height: 30, borderTop: "1px solid var(--border)" }}>
                 <span className="text-[10px] text-muted-foreground truncate">
-                  click to select \u00b7 <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close \u00b7 <span className="text-green-600">\u25cf</span> live / <span className="text-amber-600">\u25cf</span> config \u00b7 {liveCount}/{totalCount} synced
+                  click to select \u00b7 <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close \u00b7 {totalCount} provider{totalCount === 1 ? "" : "s"} \u00b7 synced {liveCount}/{totalCount}
                 </span>
                 {selectedDisplayName && (
                   <span className="text-[10px] text-primary font-medium flex items-center gap-1">
