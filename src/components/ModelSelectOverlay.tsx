@@ -386,7 +386,7 @@ function ProviderBox({
         </span>
       </button>
 
-      <div className="flex flex-col gap-px p-1">
+      <div className="flex flex-col gap-px p-1 max-h-[340px] overflow-y-auto">
         {empty ? (
           <div className="flex items-center justify-center h-10 text-[10px] text-muted-foreground/50">
             no models synced
