@@ -348,16 +348,39 @@ function ProviderBox({
       >
         <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: provider.color }} />
         <span className="text-[11px] font-semibold text-foreground leading-none truncate">{provider.displayName}</span>
+        <span
+          className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+          style={{ backgroundColor: provider.syncedLive ? "#22c55e" : "#f59e0b" }}
+          title={provider.syncedLive ? "synced live from provider API" : "config-sourced (no public live API)"}
+        />
         <span className="text-[10px] text-muted-foreground leading-none ml-auto tabular-nums">{provider.models.length}</span>
         <button
           onClick={openSettings}
           className="flex items-center justify-center size-5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
           aria-label={`Manage ${provider.displayName} privacy & keys`}
-          title={`${provider.manageLabel} \u2197  |  ${provider.privacy.notice}`}
+          title={`${provider.manageLabel} \u2197`}
         >
           <IcoSettings />
         </button>
       </div>
+
+      <button
+        onClick={openSettings}
+        className="flex items-center gap-1.5 px-2.5 shrink-0 text-left hover:brightness-95 dark:hover:brightness-110 transition-all"
+        style={{
+          height: 24,
+          borderBottom: `1px solid ${confidenceDotColor(provider.privacy.confidence)}25`,
+          backgroundColor: `${confidenceDotColor(provider.privacy.confidence)}0d`,
+        }}
+        title={provider.privacy.notice}
+      >
+        <span className="shrink-0" style={{ color: confidenceDotColor(provider.privacy.confidence) }}>
+          <IcoShield />
+        </span>
+        <span className="text-[9px] leading-none text-muted-foreground truncate flex-1">
+          {provider.privacy.notice}
+        </span>
+      </button>
 
       <div className="overflow-y-auto flex-1 min-h-0">
         <div className="flex flex-col gap-px p-1">
@@ -634,7 +657,7 @@ export function ModelSelectOverlay() {
 
               <div className="flex items-center justify-between px-3.5 shrink-0" style={{ height: 30, borderTop: "1px solid var(--border)" }}>
                 <span className="text-[10px] text-muted-foreground truncate">
-                  click to select \u00b7 <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close \u00b7 <span className="tabular-nums">{totalCount} provider{totalCount === 1 ? "" : "s"}</span>
+                  click to select \u00b7 <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close \u00b7 <span className="text-green-600">\u25cf</span> live / <span className="text-amber-600">\u25cf</span> config \u00b7 {liveCount}/{totalCount} synced
                 </span>
                 {selectedDisplayName && (
                   <span className="text-[10px] text-primary font-medium flex items-center gap-1">
