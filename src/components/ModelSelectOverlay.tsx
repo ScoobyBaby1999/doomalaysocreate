@@ -530,7 +530,7 @@ export function ModelSelectOverlay() {
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="text-[12px] font-semibold text-foreground">Select Model</span>
                   <span className="text-[10px] text-muted-foreground">
-                    {loading ? "loading\u2026" : `${filteredCount} models \u00b7 ${providers.length} providers`}
+                    {loading ? "loading" : `${filteredCount} models \u00b7 ${providers.length} providers`}
                   </span>
                   {!loading && providers.length > 0 && (
                     <button
@@ -547,10 +547,10 @@ export function ModelSelectOverlay() {
                       onClick={() => refreshProviders()}
                       disabled={refreshing}
                       className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-60"
-                      title={refreshing ? "syncing\u2026" : `${syncedLabel} \u00b7 ${liveCount}/${totalCount} providers live \u00b7 click to re-sync`}
+                       title={refreshing ? "syncing" : `${syncedLabel} \u00b7 ${liveCount}/${totalCount} providers live \u00b7 click to re-sync`}
                     >
                       <IcoRefresh spinning={refreshing} />
-                      <span className="hidden md:inline">{refreshing ? "syncing\u2026" : syncedLabel || "sync"}</span>
+                      <span className="hidden md:inline">{refreshing ? "syncing" : syncedLabel || "sync"}</span>
                     </button>
                   )}
                 </div>
