@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-
+import re
+import urllib.request
 from provider_sync.base import BaseSync, ModelInfo
 
 
@@ -11,6 +12,8 @@ class CloudflareSync(BaseSync):
     provider_name = "cloudflare"
     requires_auth = True
     env_var = "CF_API_TOKEN"
+
+    DOCS_URL = "https://developers.cloudflare.com/ai/models/index.md"
 
     def __init__(self, api_key: str | None = None, **kwargs) -> None:
         super().__init__(api_key, **kwargs)
@@ -22,6 +25,12 @@ class CloudflareSync(BaseSync):
         self.include_deprecated = kwargs.get("include_deprecated", False)
 
     def fetch_models(self) -> list[ModelInfo]:
+        models = self._fetch_from_api()
+        if not models:
+            models = self._fetch_from_docs()
+        return models
+
+    def _fetch_from_api(self) -> list[ModelInfo]:
         headers = self._build_auth_header()
         models: list[ModelInfo] = []
         seen: set[str] = set()
@@ -40,7 +49,7 @@ class CloudflareSync(BaseSync):
             url = f"{self.models_url}?{'&'.join(params)}"
             data = self._make_request(url, headers)
             if not data or not data.get("success"):
-                break
+                return []
 
             result_info = data.get("result_info", {})
             total_count = result_info.get("total_count", 0)
@@ -66,6 +75,41 @@ class CloudflareSync(BaseSync):
 
             page += 1
 
+        return models
+
+    def _fetch_from_docs(self) -> list[ModelInfo]:
+        try:
+            req = urllib.request.Request(self.DOCS_URL, headers={"User-Agent": "doomalaysocreate/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                content = resp.read().decode("utf-8")
+        except Exception:
+            return []
+
+        model_ids: list[str] = []
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith("@cf/"):
+                model_id = line.split("|")[0].strip()
+                if model_id.startswith("@cf/"):
+                    model_ids.append(model_id)
+
+        if not model_ids:
+            return []
+
+        models: list[ModelInfo] = []
+        seen: set[str] = set()
+        for model_id in model_ids:
+            if model_id in seen:
+                continue
+            seen.add(model_id)
+            normalized = self.normalize_model_id(model_id)
+            models.append(ModelInfo(
+                id=model_id,
+                normalized_id=normalized,
+                is_free=True,
+                context_length=None,
+                metadata={},
+            ))
         return models
 
     def filter_free_models(self, models: list[ModelInfo]) -> list[ModelInfo]:
