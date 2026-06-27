@@ -7,6 +7,8 @@ import re
 import urllib.request
 from provider_sync.base import BaseSync, ModelInfo
 
+_cached_cloudflare_models: list[ModelInfo] | None = None
+
 
 class CloudflareSync(BaseSync):
     provider_name = "cloudflare"
@@ -25,9 +27,14 @@ class CloudflareSync(BaseSync):
         self.include_deprecated = kwargs.get("include_deprecated", False)
 
     def fetch_models(self) -> list[ModelInfo]:
+        global _cached_cloudflare_models
         models = self._fetch_from_docs()
         if not models:
             models = self._fetch_from_api()
+        if models:
+            _cached_cloudflare_models = models
+        elif _cached_cloudflare_models is not None:
+            models = _cached_cloudflare_models
         return models
 
     def _fetch_from_api(self) -> list[ModelInfo]:
