@@ -455,7 +455,7 @@ def _build_provider_models(
         display_id = mid.split("/")[-1] if "/" in mid else mid
         logical_id = model_to_logical.get(display_id, display_id)
 
-        family = make_family(logical_id)
+        family = make_family(mid)
         fam_meta = registry.get(family, {})
 
         context_length = fam_meta.get("context", 0)
