@@ -86,12 +86,18 @@ class CloudflareSync(BaseSync):
             return []
 
         model_ids: list[str] = []
+        in_table = False
         for line in content.splitlines():
             line = line.strip()
-            if line.startswith("@cf/"):
-                model_id = line.split("|")[0].strip()
-                if model_id.startswith("@cf/"):
-                    model_ids.append(model_id)
+            if line.startswith("|") and "@cf/" in line:
+                # Table row: split by | and find the model column
+                parts = [p.strip() for p in line.split("|")]
+                for part in parts:
+                    if part.startswith("@cf/"):
+                        model_ids.append(part)
+                        break
+            elif line.startswith("|") and "---" in line:
+                in_table = True
 
         if not model_ids:
             return []
