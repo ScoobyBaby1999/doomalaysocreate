@@ -617,9 +617,9 @@ export function ModelSelectOverlay() {
                       onClick={() => setContextMin(c.value)}
                       className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
                       style={{
-                        borderColor: contextMin === c.value ? "var(--primary)" : "var(--border)",
-                        backgroundColor: contextMin === c.value ? "color-mix(in srgb, var(--primary) 10%, transparent)" : "transparent",
-                        color: contextMin === c.value ? "var(--primary)" : "var(--muted-foreground)",
+                        borderColor: contextMin === c.value ? "#14b8a680" : "var(--border)",
+                        backgroundColor: contextMin === c.value ? "#14b8a615" : "transparent",
+                        color: contextMin === c.value ? "#14b8a6" : "var(--muted-foreground)",
                       }}
                       aria-pressed={contextMin === c.value}
                     >
