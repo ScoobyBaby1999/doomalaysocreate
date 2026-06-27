@@ -396,13 +396,15 @@ def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[s
 
     live_set = set(live.keys())
 
-    # Fall back to static model lists for any provider the live sync didn't cover
+    # Fall back to static model lists for any provider the live sync didn't cover.
+    # Synced IDs are raw (e.g. "deepseek-ai/deepseek-v4-pro"); normalize for display
+    # by stripping the author prefix so models resolve through the logical catalog.
     result: dict[str, list[str]] = {}
     for entry in catalog_entries:
         name = entry["name"]
         synced = live.get(name)
         if synced:
-            result[name] = synced
+            result[name] = [m.split("/")[-1] if "/" in m else m for m in synced]
         else:
             result[name] = list(entry.get("models", []))
     return result, live_set

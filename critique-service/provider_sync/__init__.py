@@ -16,7 +16,8 @@ def sync_all_providers(registered_providers: dict[str, provider]) -> dict[str, l
         registered_providers: Dict of provider_name -> provider instance from Panel.provider_by_name
 
     Returns:
-        Dict mapping provider_name -> list of synced model IDs (normalized)
+        Dict mapping provider_name -> list of raw model IDs (e.g. ``deepseek-ai/deepseek-v4-pro``).
+        Slots are created with these raw IDs so call_slot sends the correct model name.
     """
     results: dict[str, list[str]] = {}
     catalog = load_provider_catalog()
@@ -54,9 +55,12 @@ def sync_all_providers(registered_providers: dict[str, provider]) -> dict[str, l
 
 
 def register_synced_models(panel: Any, sync_results: dict[str, list[str]]) -> None:
-    """Register newly discovered models as extra slots in the panel.
+    """Register newly discovered models as extra slots in the scheduler.
 
-    Called after sync_all_providers() to add any new models to the scheduler.
+    sync_results contains RAW model IDs (with author prefixes like
+    ``deepseek-ai/deepseek-v4-pro``) so call_slot sends the exact model name
+    the provider API expects.  Models already registered via models_catalog.json
+    (same provider/raw-id key) are skipped.
     """
     for provider_name, model_ids in sync_results.items():
         if not model_ids:

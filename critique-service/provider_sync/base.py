@@ -87,21 +87,26 @@ class BaseSync(ABC):
         return None
 
     def sync(self) -> list[str]:
-        """Public sync method: fetch, filter, normalize, return model IDs."""
+        """Public sync method: fetch, filter, deduplicate, return raw model IDs.
+
+        Deduplicates by normalized_id (strips author prefixes etc.) but returns
+        the RAW model IDs so call_slot sends the exact model name the provider
+        API expects.
+        """
         raw_models = self.fetch_models()
         if not raw_models:
             log_event("provider_sync_empty", provider=self.provider_name)
             return []
 
         filtered = self.filter_free_models(raw_models)
-        normalized = [self.normalize_model_id(m.normalized_id) for m in filtered]
 
         seen = set()
         deduped = []
-        for m in normalized:
-            if m not in seen:
-                seen.add(m)
-                deduped.append(m)
+        for m in filtered:
+            nid = self.normalize_model_id(m.normalized_id)
+            if nid not in seen:
+                seen.add(nid)
+                deduped.append(m.id)
 
         log_event(
             "provider_sync_ok",
