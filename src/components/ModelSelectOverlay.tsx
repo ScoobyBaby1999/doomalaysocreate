@@ -157,9 +157,9 @@ const FILTER_PILLS = [
 
 const CONTEXT_OPTIONS = [
   { value: 0, label: "Any" },
-  { value: 32768, label: "32K" },
-  { value: 131072, label: "128K" },
-  { value: 1048576, label: "1M" },
+  { value: 32000, label: "32K" },
+  { value: 128000, label: "128K" },
+  { value: 1000000, label: "1M" },
 ] as const;
 
 interface AttrSegment {
