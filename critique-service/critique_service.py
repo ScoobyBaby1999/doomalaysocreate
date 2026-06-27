@@ -795,6 +795,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _send_json(self, status: int, payload: dict, *, headers: dict | None = None) -> None:
+        self._last_status = status
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -957,6 +958,64 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
         return True
+
+    def _log_request(self, method: str, route: str, status: int, latency_ms: float, error: str | None = None) -> None:
+        """Safely records request metrics and structural metadata to the RAM ring buffer."""
+        from debug_log import log_entry
+        import hashlib
+        import base64
+        
+        auth = self.headers.get("Authorization", "").strip()
+        x_jwt = self.headers.get("X-JWT", "").strip()
+        
+        # Inferred auth type (no content value captured)
+        auth_type = "none"
+        if auth.startswith("Bearer "):
+            token = auth[len("Bearer "):].strip()
+            auth_type = "jwt" if token.count(".") == 2 else "rotation"
+        elif x_jwt:
+            auth_type = "jwt"
+            
+        # Resolve anonymous stable user hash for tracing
+        user_hash = None
+        try:
+            token = auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else x_jwt
+            if token and token.count(".") == 2:
+                payload_b64 = token.split(".")[1]
+                pad = 4 - len(payload_b64) % 4
+                payload_bytes = base64.urlsafe_b64decode(payload_b64 + "=" * (pad if pad != 4 else 0))
+                payload = json.loads(payload_bytes.decode("utf-8"))
+                uid = payload.get("sub")
+                if uid:
+                    # 8-character stable non-invertible correlation signature
+                    user_hash = hashlib.sha256(f"{uid}:anonymizing_salt_2026".encode()).hexdigest()[:8]
+        except Exception:
+            pass
+
+        # Assign correct debug log level based on response code
+        level = "INFO"
+        if status >= 500:
+            level = "ERROR"
+        elif status >= 400:
+            level = "WARN"
+
+        msg = f"{method} {route} -> {status} ({int(latency_ms)}ms)"
+        log_entry(
+            level=level,
+            cat="http",
+            fn=f"do_{method}",
+            msg=msg,
+            data={
+                "method": method,
+                "route": route,
+                "status": status,
+                "latency_ms": round(latency_ms, 2),
+                "auth_present": bool(auth or x_jwt),
+                "auth_type": auth_type,
+                "user_hash": user_hash,
+                "error": error
+            }
+        )
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 - quiet default logging
         return  # telemetry goes through oplog; suppress the stderr access log spam
@@ -3026,6 +3085,16 @@ def main() -> int:
     panel = Panel()
     if not panel.providers:
         log_event("startup_warning", msg="no providers have API keys - every judge will fail")
+
+    # Prime the provider catalog cache so /api/models returns cached data
+    # without re-syncing every provider on the first request. The Panel sync
+    # above already succeeded (cloudflare included); this runs the same sync
+    # through build_provider_catalog and caches the result for 10 minutes.
+    try:
+        from provider_sync.catalog import build_provider_catalog
+        build_provider_catalog()
+    except Exception as exc:
+        log_event("catalog_prime_warning", error=str(exc)[:500])
 
     # initialize SQLite database for GitHub + HF integration
     db.init_db()
