@@ -18,13 +18,14 @@ interface ModelSelectionState {
   selectedProviderName: string | null;
 
   focusedMode: boolean;
-  sortBy: string;
 
   overlayOpen: boolean;
   providersDialogOpen: boolean;
   providersDialogProvider: string | null;
 
   searchQuery: string;
+  activeFilters: string[];
+  contextMin: number;
 
   setBaseUrl: (url: string) => void;
   fetchProviders: () => Promise<void>;
@@ -32,11 +33,12 @@ interface ModelSelectionState {
   selectModel: (modelId: string, providerName: string) => void;
   clearSelection: () => void;
   toggleFocusedMode: () => void;
-  setSortBy: (sort: string) => void;
   openOverlay: () => void;
   closeOverlay: () => void;
   toggleOverlay: () => void;
   setSearchQuery: (q: string) => void;
+  toggleFilter: (filter: string) => void;
+  setContextMin: (min: number) => void;
   openProvidersDialog: (providerName?: string) => void;
   closeProvidersDialog: () => void;
   getSelectedModel: () => ProviderModel | null;
@@ -76,18 +78,19 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   selectedModelId: loadPersisted<string | null>(`${PREFIX}.selectedModelId`, null),
   selectedProviderName: loadPersisted<string | null>(`${PREFIX}.selectedProviderName`, null),
   focusedMode: loadPersisted<boolean>(`${PREFIX}.focusedMode`, false),
-  sortBy: loadPersisted<string>(`${PREFIX}.sortBy`, "default"),
 
   overlayOpen: false,
   providersDialogOpen: false,
   providersDialogProvider: null,
   searchQuery: "",
+  activeFilters: loadPersisted<string[]>(`${PREFIX}.activeFilters`, []),
+  contextMin: loadPersisted<number>(`${PREFIX}.contextMin`, 0),
 
   setBaseUrl: (url: string) => set({ baseUrl: url }),
 
   fetchProviders: async () => {
     const baseUrl = get().baseUrl;
-    if (baseUrl === undefined || baseUrl === null) { set({ loading: false }); return; }
+    if (!baseUrl) { set({ loading: false }); return; }
     set({ loading: true, error: null });
     try {
       const res = await fetch(`${baseUrl}/api/models`);
@@ -110,7 +113,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
 
   refreshProviders: async () => {
     const baseUrl = get().baseUrl;
-    if (baseUrl === undefined || baseUrl === null) { set({ refreshing: false }); return; }
+    if (!baseUrl) { set({ refreshing: false }); return; }
     set({ refreshing: true });
     try {
       const res = await fetch(`${baseUrl}/api/models?refresh=1`);
@@ -157,11 +160,6 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
     }
   },
 
-  setSortBy: (sort: string) => {
-    set({ sortBy: sort });
-    persist(`${PREFIX}.sortBy`, sort);
-  },
-
   openOverlay: () => set({ overlayOpen: true }),
   closeOverlay: () => set({ overlayOpen: false, searchQuery: "" }),
   toggleOverlay: () => {
@@ -170,6 +168,20 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   },
 
   setSearchQuery: (q: string) => set({ searchQuery: q }),
+
+  toggleFilter: (filter: string) => {
+    const { activeFilters } = get();
+    const next = activeFilters.includes(filter)
+      ? activeFilters.filter((f) => f !== filter)
+      : [...activeFilters, filter];
+    set({ activeFilters: next });
+    persist(`${PREFIX}.activeFilters`, next);
+  },
+
+  setContextMin: (min: number) => {
+    set({ contextMin: min });
+    persist(`${PREFIX}.contextMin`, min);
+  },
 
   openProvidersDialog: (providerName?: string) =>
     set({ providersDialogOpen: true, providersDialogProvider: providerName ?? null }),
