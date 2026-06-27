@@ -627,7 +627,7 @@ export function ModelSelectOverlay() {
                 {loading && (
                   <div className="flex items-center justify-center h-full">
                     <span className="inline-block size-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
-                    <span className="ml-2 text-[11px] text-muted-foreground">fetching\u2026</span>
+                    <span className="ml-2 text-[11px] text-muted-foreground">fetching</span>
                   </div>
                 )}
 
