@@ -339,11 +339,10 @@ function ProviderBox({
   }, [provider.name]);
 
   const hasDimmed = dimmed.length > 0;
-  if (matched.length === 0 && !hasDimmed) return null;
+  const empty = matched.length === 0 && !hasDimmed;
 
   return (
-    <motion.div
-      layout
+    <div
       className="flex flex-col rounded-lg border overflow-hidden"
       style={{ borderColor: `${provider.color}30` }}
     >
@@ -388,32 +387,40 @@ function ProviderBox({
       </button>
 
       <div className="flex flex-col gap-px p-1">
-        {matched.map((m) => (
-          <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} />
-        ))}
-        {hasDimmed && (
+        {empty ? (
+          <div className="flex items-center justify-center h-10 text-[10px] text-muted-foreground/50">
+            no models synced
+          </div>
+        ) : (
           <>
-            <button
-              onClick={() => setShowDimmed((v) => !v)}
-              className="flex items-center gap-1.5 px-1.5 py-1 mt-0.5 border-t border-border/30 text-[9px] text-muted-foreground/50 hover:text-muted-foreground/80 transition-colors cursor-pointer select-none"
-            >
-              <span
-                className="text-[10px] leading-none transition-transform duration-150"
-                style={{ transform: showDimmed ? "rotate(90deg)" : "rotate(0deg)" }}
-              >
-                {"\u25b8"}
-              </span>
-              <span className="text-[9px] leading-none">
-                {showDimmed ? `Hide ${dimmed.length} dimmed` : `Show ${dimmed.length} dimmed`}
-              </span>
-            </button>
-            {showDimmed && dimmed.map((m) => (
-              <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} dimmed />
+            {matched.map((m) => (
+              <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} />
             ))}
+            {hasDimmed && (
+              <>
+                <button
+                  onClick={() => setShowDimmed((v) => !v)}
+                  className="flex items-center gap-1.5 px-1.5 py-1 mt-0.5 border-t border-border/30 text-[9px] text-muted-foreground/50 hover:text-muted-foreground/80 transition-colors cursor-pointer select-none"
+                >
+                  <span
+                    className="text-[10px] leading-none transition-transform duration-150"
+                    style={{ transform: showDimmed ? "rotate(90deg)" : "rotate(0deg)" }}
+                  >
+                    {"\u25b8"}
+                  </span>
+                  <span className="text-[9px] leading-none">
+                    {showDimmed ? `Hide ${dimmed.length} dimmed` : `Show ${dimmed.length} dimmed`}
+                  </span>
+                </button>
+                {showDimmed && dimmed.map((m) => (
+                  <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} dimmed />
+                ))}
+              </>
+            )}
           </>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }
 
