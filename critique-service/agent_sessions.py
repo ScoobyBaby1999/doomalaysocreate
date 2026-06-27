@@ -70,16 +70,25 @@ AGENT_SYSTEM_PROMPT = (
     "file operations. Only use python_repl when shell isn't sufficient."
 )
 
-#   open-tier model routing: each entry is
-#   (env key, provider label, litellm model string, base_url or None).
+#   open-tier model routing: dynamically built from providers_catalog.json +
+#   a small static fallback for providers that are not in the catalog.
+#   Each entry is (env key, provider label, litellm model string, base_url or None).
 #   Order = priority for auto-pick (first present env var wins). The model
-#   picker (Part 2) surfaces EVERY entry whose key is set, not just the first.
+#   picker surfaces EVERY entry whose key is set, not just the first.
 #   Overridable via AGENT_OPEN_MODEL / AGENT_OPEN_BASE_URL / AGENT_OPEN_KEY_ENV.
-_OPEN_LLMS: list[tuple[str, str, str, str | None]] = [
-    ("OPENCODE_ZEN_API_KEY", "DeepSeek V4 Flash Free (Zen)", "openai/deepseek-v4-flash-free",
-     "https://opencode.ai/zen/v1"),
-    ("OPENCODE_GO_API_KEY",  "DeepSeek V4 Flash (Go)",      "openai/deepseek-v4-flash",
-     "https://opencode.ai/zen/go/v1"),
+
+# Providers in our catalog → fetch models + base_url dynamically.
+_PROVIDER_AGENT_MAP: dict[str, tuple[str, str]] = {
+    "nvidia": ("NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1"),
+    "opencode-zen": ("OPENCODE_ZEN_API_KEY", "https://opencode.ai/zen/v1"),
+    "opencode-go": ("OPENCODE_GO_API_KEY", "https://opencode.ai/zen/go/v1"),
+    "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
+    "cloudflare": ("CF_API_TOKEN", "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1"),
+    "github-models": ("GITHUB_TOKEN", "https://models.github.ai/inference"),
+}
+
+# Static fallback for providers not in the catalog.
+_OPEN_LLMS_STATIC: list[tuple[str, str, str, str | None]] = [
     ("MOONSHOT_API_KEY",   "Kimi (Moonshot)",   "moonshot/kimi-k2-0905-preview", None),
     ("GROQ_API_KEY",       "Groq Llama 3.3",    "groq/llama-3.3-70b-versatile",  None),
     ("OPENROUTER_API_KEY", "OpenRouter Qwen3",  "openrouter/qwen/qwen3-coder",   None),
@@ -88,9 +97,57 @@ _OPEN_LLMS: list[tuple[str, str, str, str | None]] = [
      "https://api.z.ai/api/paas/v4"),
     ("GEMINI_API_KEY",     "Gemini 2.5 Flash",  "gemini/gemini-2.5-flash",       None),
     ("GOOGLE_API_KEY",     "Gemini 2.5 Flash",  "gemini/gemini-2.5-flash",       None),
-    ("NVIDIA_API_KEY", "Kimi K2.6 (NVIDIA)", "openai/moonshotai/kimi-k2.6",
-      "https://integrate.api.nvidia.com/v1"),
 ]
+
+_open_models_cache: list[tuple[str, str, str, str | None]] | None = None
+
+
+def _build_open_models() -> list[tuple[str, str, str, str | None]]:
+    """Build open model entries from providers_catalog.json dynamically.
+
+    Each configured provider contributes ALL its models (env-var-gated), so
+    every model from NVIDIA, OpenCode Zen/Go etc. is available in the agent
+    without hardcoding model names.
+    """
+    global _open_models_cache
+    if _open_models_cache is not None:
+        return _open_models_cache
+
+    entries = list(_OPEN_LLMS_STATIC)
+    catalog_path = HERE / "providers_catalog.json"
+    try:
+        with open(catalog_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        _open_models_cache = entries
+        return entries
+
+    for prov in data.get("providers", []):
+        name = prov["name"]
+        cfg = _PROVIDER_AGENT_MAP.get(name)
+        if not cfg:
+            continue
+        env_key, base_url = cfg
+        for model_id in prov.get("models", []):
+            litellm_model = f"openai/{model_id}"
+            label = f"{model_id} ({prov.get('displayName', name)})"
+            entries.append((env_key, label, litellm_model, base_url))
+
+    _open_models_cache = entries
+    return entries
+
+
+def _resolve_open_model(user_model: str) -> tuple[str, str | None] | None:
+    """Match a user-provided model name (e.g. ``deepseek-v4-flash-free``) to a
+    litellm model string + base_url from the dynamic open-models list.
+
+    Returns ``(litellm_model, base_url)`` or ``None`` if no match.
+    """
+    user_last = user_model.split("/")[-1]
+    for _env, _label, model, base in _build_open_models():
+        if model == user_model or model.split("/")[-1] == user_last:
+            return (model, base)
+    return None
 
 
 def _installed(module: str) -> bool:
@@ -108,7 +165,7 @@ def _pick_open_llm() -> tuple[str, str, str | None] | None:
         return (key_env,
                 os.environ.get("AGENT_OPEN_MODEL", "groq/llama-3.3-70b-versatile"),
                 os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or None)
-    for env_key, _label, model, base_url in _OPEN_LLMS:
+    for env_key, _label, model, base_url in _build_open_models():
         if os.environ.get(env_key, "").strip():
             model = os.environ.get("AGENT_OPEN_MODEL", "").strip() or model
             base_url = os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or base_url
@@ -145,7 +202,7 @@ def agent_models() -> list[dict]:
                         "label": label, "default": model == default_model})
     if _open_sdk_installed():
         seen: set[str] = set()
-        for env_key, label, model, _base in _OPEN_LLMS:
+        for env_key, label, model, _base in _build_open_models():
             if os.environ.get(env_key, "").strip() and model not in seen:
                 seen.add(model)
                 out.append({"tier": "open", "provider": label, "model": model,
@@ -168,18 +225,11 @@ def agent_models() -> list[dict]:
 
 
 def _model_base_url(model: str) -> str | None:
-    """base_url for a chosen open model (matches the _OPEN_LLMS table)."""
-    for _env, _label, m, base in _OPEN_LLMS:
-        if m == model:
+    """base_url for a chosen open model (matches the dynamic model list)."""
+    model_last = model.split("/")[-1]
+    for _env, _label, m, base in _build_open_models():
+        if m == model or m.split("/")[-1] == model_last:
             return base
-    return os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or None
-
-
-def _model_key_env(model: str) -> str | None:
-    """which env var holds the API key for a chosen open model."""
-    for env, _label, m, _base in _OPEN_LLMS:
-        if m == model:
-            return env
     return None
 
 

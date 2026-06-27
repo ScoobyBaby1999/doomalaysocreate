@@ -1469,9 +1469,20 @@ class Handler(BaseHTTPRequestHandler):
         session_id = session_id.strip() if isinstance(session_id, str) else None
         model = payload.get("model")
         model = model.strip() if isinstance(model, str) and model.strip() else None
-        if model and not any(m["model"] == model for m in agent_sessions.agent_models()):
-            self._send_json(400, {"error": f"model not available: {model}"})
-            return
+        if model:
+            # Fuzzy-match: the frontend sends a normalized model ID
+            # (e.g. "deepseek-v4-flash-free") but the agent SDK needs the litellm
+            # format (e.g. "openai/deepseek-v4-flash-free"). Also check alias so
+            # models resolve regardless of provider prefix.
+            resolved = None
+            for m in agent_sessions.agent_models():
+                if m["model"] == model or m["model"].split("/")[-1] == model or m["model"].endswith("/" + model):
+                    resolved = m["model"]
+                    break
+            if not resolved:
+                self._send_json(400, {"error": f"model not available: {model}"})
+                return
+            model = resolved
         # optional workspace_id: link agent to a user workspace sandbox
         workspace_id = payload.get("workspace_id")
         workspace_id = workspace_id.strip() if isinstance(workspace_id, str) and workspace_id.strip() else None

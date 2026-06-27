@@ -26,6 +26,7 @@ from oplog import log_event
 
 HERE = Path(__file__).resolve().parent.parent
 CATALOG_PATH = HERE / "providers_catalog.json"
+MODELS_CATALOG_PATH = HERE / "models_catalog.json"
 
 _FETCH_TIMEOUT = 15
 _USER_AGENT = "doomalaysocreate/1.0"
@@ -34,6 +35,29 @@ _CACHE_TTL_S = 600  # 10 minutes
 _cache: dict[str, Any] | None = None
 _cache_at: float = 0
 _cache_lock = threading.Lock()
+
+# Reverse mapping: candidate display name (author-stripped) → logical catalog key.
+# Built once from models_catalog.json so _build_provider_models outputs logical
+# keys that resolve_candidates can find.
+_model_to_logical: dict[str, str] = {}
+_model_to_logical_loaded = False
+
+
+def _ensure_model_to_logical() -> dict[str, str]:
+    global _model_to_logical, _model_to_logical_loaded
+    if not _model_to_logical_loaded:
+        try:
+            with open(MODELS_CATALOG_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            for logical, spec in data.get("logical_models", {}).items():
+                for cand in spec.get("candidates", []):
+                    display = cand["model"].split("/")[-1] if "/" in cand["model"] else cand["model"]
+                    if display not in _model_to_logical:
+                        _model_to_logical[display] = logical
+        except (OSError, json.JSONDecodeError) as e:
+            log_event("models_catalog_load_error", error=str(e)[:500])
+        _model_to_logical_loaded = True
+    return _model_to_logical
 
 # ---------------------------------------------------------------------------
 # Family key normalisation — mirrors TypeScript family.ts
@@ -406,7 +430,7 @@ def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[s
         if synced:
             result[name] = [m.split("/")[-1] if "/" in m else m for m in synced]
         else:
-            result[name] = list(entry.get("models", []))
+            result[name] = [m.split("/")[-1] if "/" in m else m for m in entry.get("models", [])]
     return result, live_set
 
 
@@ -418,11 +442,18 @@ def _build_provider_models(
     model_ids: list[str],
     registry: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    model_to_logical = _ensure_model_to_logical()
     models: list[dict[str, Any]] = []
     for mid in model_ids:
         if not mid:
             continue
-        family = make_family(mid)
+
+        # Normalize: strip author prefix for display, then map to a logical
+        # catalog key so resolve_candidates can find the model.
+        display_id = mid.split("/")[-1] if "/" in mid else mid
+        logical_id = model_to_logical.get(display_id, display_id)
+
+        family = make_family(logical_id)
         fam_meta = registry.get(family, {})
 
         context_length = fam_meta.get("context", 0)
@@ -463,8 +494,8 @@ def _build_provider_models(
                 continue
 
         models.append({
-            "id": mid,
-            "displayName": fam_meta.get("display_name") or derive_display_name(mid),
+            "id": logical_id,
+            "displayName": fam_meta.get("display_name") or derive_display_name(logical_id),
             "contextLength": context_length,
             "family": family,
         })
