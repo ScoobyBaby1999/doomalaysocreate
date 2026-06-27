@@ -558,7 +558,7 @@ export function ModelSelectOverlay() {
                       ref={inputRef}
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="search\u2026"
+                      placeholder="search"
                       className="pl-8 pr-3 h-7 w-40 sm:w-52 text-[12px] bg-muted/20 border border-border/50 rounded-lg outline-none focus:border-ring/40 focus:bg-muted/40 transition-colors placeholder:text-muted-foreground/50"
                     />
                   </div>
@@ -658,7 +658,7 @@ export function ModelSelectOverlay() {
 
               <div className="flex items-center justify-between px-3.5 shrink-0" style={{ height: 30, borderTop: "1px solid var(--border)" }}>
                 <span className="text-[10px] text-muted-foreground truncate">
-                  click to select \u00b7 <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close \u00b7 {totalCount} provider{totalCount === 1 ? "" : "s"} \u00b7 synced {liveCount}/{totalCount}
+                  click to select &nbsp;<kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close &nbsp;{totalCount} provider{totalCount === 1 ? "" : "s"} &nbsp;synced {liveCount}/{totalCount}
                 </span>
                 {selectedDisplayName && (
                   <span className="text-[10px] text-primary font-medium flex items-center gap-1">
