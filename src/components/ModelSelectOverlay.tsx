@@ -336,12 +336,12 @@ function ProviderBox({
     useModelStore.getState().openProvidersDialog(provider.name);
   }, [provider.name]);
 
-  if (matched.length === 0 && dimmed.length === 0) return null;
+  const empty = matched.length === 0 && dimmed.length === 0;
 
   return (
     <div
       className="flex flex-col rounded-lg border overflow-hidden"
-      style={{ borderColor: `${provider.color}30`, height: 300 }}
+      style={{ borderColor: `${provider.color}30`, height: empty ? "auto" : 300 }}
     >
       <div
         className="flex items-center gap-2 px-2.5 shrink-0"
@@ -384,21 +384,27 @@ function ProviderBox({
       </button>
 
       <div className="overflow-y-auto flex-1 min-h-0">
-        <div className="flex flex-col gap-px p-1">
-          {matched.map((m) => (
-            <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} />
-          ))}
-          {dimmed.length > 0 && (
-            <>
-              <div className="flex items-center gap-2 px-1.5 py-1 mt-0.5 border-t border-border/30">
-                <span className="text-[9px] text-muted-foreground/50 leading-none">{dimmed.length} dimmed</span>
-              </div>
-              {dimmed.map((m) => (
-                <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} dimmed />
-              ))}
-            </>
-          )}
-        </div>
+        {empty ? (
+          <div className="flex items-center justify-center h-12 text-[10px] text-muted-foreground/60">
+            no models synced
+          </div>
+        ) : (
+          <div className="flex flex-col gap-px p-1">
+            {matched.map((m) => (
+              <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} />
+            ))}
+            {dimmed.length > 0 && (
+              <>
+                <div className="flex items-center gap-2 px-1.5 py-1 mt-0.5 border-t border-border/30">
+                  <span className="text-[9px] text-muted-foreground/50 leading-none">{dimmed.length} dimmed</span>
+                </div>
+                {dimmed.map((m) => (
+                  <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} dimmed />
+                ))}
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
