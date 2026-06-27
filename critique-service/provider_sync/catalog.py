@@ -50,6 +50,8 @@ def _ensure_model_to_logical() -> dict[str, str]:
             with open(MODELS_CATALOG_PATH, encoding="utf-8") as f:
                 data = json.load(f)
             for logical, spec in data.get("logical_models", {}).items():
+                if not isinstance(spec, dict):
+                    continue
                 for cand in spec.get("candidates", []):
                     display = cand["model"].split("/")[-1] if "/" in cand["model"] else cand["model"]
                     if display not in _model_to_logical:
