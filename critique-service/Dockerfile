@@ -3,6 +3,10 @@
 # assembles: backend (critique-service/*) at the root, frontend source under app/.
 # CPU basic / free is plenty - all real work is I/O-bound on the LLM provider APIs.
 
+# --- stage 0: privatemode proxy binary (static Go binary, extracted at build time) ---
+# Only ~25MB; COPY --from extracts it without needing Docker daemon at runtime.
+FROM ghcr.io/edgelesssys/privatemode/privatemode-proxy:latest AS privatemode
+
 # --- stage 1: build the web app (vite) so the runtime image ships only dist/ -------
 ARG VITE_MAIN_SPACE
 FROM node:22-alpine AS webbuild
@@ -28,6 +32,9 @@ WORKDIR /app
 # in its workspace. Kept minimal; cleaned in the same layer.
 RUN apt-get update && apt-get install -y --no-install-recommends git zip unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Privatemode proxy binary (static Go binary, no runtime deps).
+COPY --from=privatemode /bin/privatemode-proxy /usr/local/bin/privatemode-proxy
 
 COPY requirements.txt /app/requirements.txt
 # The Claude Agent SDK wheel bundles the Claude Code CLI (a self-contained binary),

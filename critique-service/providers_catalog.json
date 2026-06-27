@@ -147,6 +147,19 @@
       ],
       "sync_config": {"enabled": true, "params": {"variant": "go"}},
       "note": "OpenCode Go ($10/mo subscription, $5 first month). Includes GLM-5.2, Kimi K2.6/K2.7, DeepSeek V4 Pro/Flash, MiMo-V2.5, MiniMax M3/M2.7, Qwen3.7/3.6 Plus. Hosted in US, EU, SG. Auto-syncs new models from /v1/models at boot."
+    },
+    {
+      "name": "privatemodeai",
+      "pool": "core",
+      "env_var": "PRIVATEMODEAI_API_KEY",
+      "base_url": "http://localhost:8080/v1/chat/completions",
+      "models_url": "http://localhost:8080/v1/models",
+      "region": "eu",
+      "limits": {"rpm": 20, "rpd": null, "tpm": 200000, "tpd": 20000, "concurrency": 1, "monthly_credit": "5M initial tokens + 1M prompt + 1M completion/mo"},
+      "privacy": {"trains_on_data": false, "stability_tier": 1, "optout_url": "https://privatemode.ai/privacy"},
+      "models": [],
+      "sync_config": {"enabled": true, "params": {}},
+      "note": "Privacy-first via confidential computing (AMD SEV-SNP + NVIDIA CC). REQUIRES local proxy binary — auto-starts when PRIVATEMODEAI_API_KEY is set (adds ~15-30s boot for remote attestation). Hardware-enforced E2E encryption: Edgeless Systems, Scaleway, model vendors cannot see prompts. Free: 5M initial tokens, then 1M prompt + 1M completion/mo. Models (chat): kimi-k2.6 (256K ctx, vision, tool calls, multiplier 1x), gemma-4-31b (256K ctx, vision, tool calls, multiplier 1x), gpt-oss-120b (128K ctx, tool calls, multiplier 2x). Qwen3-Embedding 4B and speech models exist but are excluded from sync (chat completions only)."
     }
   ]
 }

@@ -2955,11 +2955,73 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self._sem.release()
 
 
+def _ensure_privatemode_proxy() -> None:
+    """Start the PrivateMode AI proxy if PRIVATEMODEAI_API_KEY is set.
+
+    The Privatemode proxy is a static Go binary that:
+      1. Performs remote attestation — cryptographically verifies the server-side
+         confidential computing enclave is genuine (AMD SEV-SNP + NVIDIA CC).
+      2. Exchanges AES-256-GCM keys with the verified AI worker.
+      3. Encrypts every prompt client-side before it leaves the machine.
+
+    No proxy = no API (there is no non-proxy endpoint). The proxy speaks standard
+    OpenAI /v1/chat/completions once running, so existing routing code works
+    unmodified. This function blocks until attestation completes (~15-30s) or
+    90s elapses. When PRIVATEMODEAI_API_KEY is unset, this is a no-op.
+
+    Privacy guarantee: Edgeless Systems, Scaleway (infra host), and model vendors
+    cannot see plaintext prompts or responses — verified by hardware, not policy.
+    Only metadata (IP, timestamp, token usage) is stored for up to 90 days.
+
+    Note: Docker already merges the proxy binary via multi-stage build
+    (see Dockerfile), so no additional dependency installation is needed here.
+    """
+    api_key = os.environ.get("PRIVATEMODEAI_API_KEY", "").strip()
+    if not api_key:
+        return
+
+    import subprocess
+    import urllib.request
+
+    log_event("privatemode_proxy_starting")
+    proxy_bin = "privatemode-proxy"
+    proc = subprocess.Popen(
+        [proxy_bin, "--apiKey", api_key, "--port", "8080"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+
+    # Attestation + startup takes ~15-30s. Poll /v1/models up to 90s.
+    deadline = time.monotonic() + 90
+    ready = False
+    while time.monotonic() < deadline:
+        try:
+            urllib.request.urlopen("http://localhost:8080/v1/models", timeout=3)
+            elapsed = int(time.monotonic() - (deadline - 90))
+            log_event("privatemode_proxy_ready", elapsed_s=elapsed)
+            ready = True
+            break
+        except Exception:
+            time.sleep(1)
+
+    if not ready:
+        log_event("privatemode_proxy_startup_failed", timeout_s=90)
+        proc.terminate()
+
+
 def main() -> int:
     _ensure_auth_secret()
     _ensure_encryption_key()
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", os.environ.get("APP_PORT", "7860")))
+
+    # Start the Privatemode proxy before initializing providers so the sync
+    # module can reach localhost:8080/v1/models. No-op if env var is unset.
+    # If the binary is missing (local dev without Docker build), skip gracefully.
+    try:
+        _ensure_privatemode_proxy()
+    except FileNotFoundError:
+        log_event("privatemode_proxy_missing")
 
     panel = Panel()
     if not panel.providers:

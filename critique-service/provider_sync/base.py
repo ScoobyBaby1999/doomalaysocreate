@@ -126,6 +126,7 @@ def get_provider_sync_class(provider_name: str) -> type[BaseSync] | None:
         "nvidia": "provider_sync.nvidia.NvidiaSync",
         "opencode-zen": "provider_sync.opencode.OpenCodeSync",
         "opencode-go": "provider_sync.opencode.OpenCodeSync",
+        "privatemodeai": "provider_sync.privatemodeai.PrivateModeAISync",
     }
     path = sync_map.get(provider_name)
     if not path:

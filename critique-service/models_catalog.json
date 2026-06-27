@@ -8,13 +8,15 @@
   "logical_models": {
     "kimi-k2.6": {
       "//": "Augmented 2026-06: added opencode-zen/opencode-go as lowest-priority fallback candidates.",
+      "//1": "Privatemode AI added 2026-06: confidential computing proxy, 256K context, vision+tool calling.",
       "family": "kimi-k2",
       "candidates": [
         {"provider": "nvidia", "model": "moonshotai/kimi-k2.6", "ctx": 262144},
         {"provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.6", "ctx": 262144},
         {"provider": "openrouter", "model": "moonshotai/kimi-k2.6:free", "ctx": 262144},
         {"provider": "opencode-zen", "model": "kimi-k2.6", "ctx": 131072},
-        {"provider": "opencode-go", "model": "kimi-k2.6", "ctx": 131072}
+        {"provider": "opencode-go", "model": "kimi-k2.6", "ctx": 131072},
+        {"provider": "privatemodeai", "model": "kimi-k2.6", "ctx": 256000}
       ]
     },
     "deepseek-v4-flash": {
@@ -87,7 +89,8 @@
     "gpt-oss-120b": {
       "family": "gpt-oss",
       "candidates": [
-        {"provider": "cloudflare", "model": "@cf/openai/gpt-oss-120b", "ctx": 128000}
+        {"provider": "cloudflare", "model": "@cf/openai/gpt-oss-120b", "ctx": 128000},
+        {"provider": "privatemodeai", "model": "gpt-oss-120b", "ctx": 128000}
       ]
     },
     "phi-4-reasoning": {
@@ -107,7 +110,8 @@
       "candidates": [
         {"provider": "nvidia", "model": "google/gemma-4-31b-it", "ctx": 131072},
         {"provider": "openrouter", "model": "google/gemma-4-31b-it:free", "ctx": 96000},
-        {"provider": "cloudflare", "model": "@cf/google/gemma-4-26b-a4b-it", "ctx": 262144}
+        {"provider": "cloudflare", "model": "@cf/google/gemma-4-26b-a4b-it", "ctx": 262144},
+        {"provider": "privatemodeai", "model": "gemma-4-31b", "ctx": 256000}
       ]
     },
 
