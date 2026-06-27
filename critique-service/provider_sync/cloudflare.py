@@ -85,19 +85,9 @@ class CloudflareSync(BaseSync):
         except Exception:
             return []
 
-        model_ids: list[str] = []
-        in_table = False
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith("|") and "@cf/" in line:
-                # Table row: split by | and find the model column
-                parts = [p.strip() for p in line.split("|")]
-                for part in parts:
-                    if part.startswith("@cf/"):
-                        model_ids.append(part)
-                        break
-            elif line.startswith("|") and "---" in line:
-                in_table = True
+        model_ids: list[str] = list(dict.fromkeys(
+            m.rstrip("/") for m in re.findall(r'/ai/models/(@cf/[^\s)"]+)', content)
+        ))
 
         if not model_ids:
             return []
