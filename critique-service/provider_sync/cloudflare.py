@@ -25,9 +25,9 @@ class CloudflareSync(BaseSync):
         self.include_deprecated = kwargs.get("include_deprecated", False)
 
     def fetch_models(self) -> list[ModelInfo]:
-        models = self._fetch_from_api()
+        models = self._fetch_from_docs()
         if not models:
-            models = self._fetch_from_docs()
+            models = self._fetch_from_api()
         return models
 
     def _fetch_from_api(self) -> list[ModelInfo]:
