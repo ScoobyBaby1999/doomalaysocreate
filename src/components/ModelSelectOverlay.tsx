@@ -37,19 +37,9 @@ function IcoRefresh({ spinning }: { spinning?: boolean }) {
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={spinning ? "animate-spin" : ""}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
   );
 }
-function IcoSort() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="12" y1="18" x2="20" y2="18"/></svg>
-  );
-}
-function IcoArrowUp() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
-  );
-}
 
 function fmtCtx(k: number): string {
-  if (!k) return "—";
+  if (!k) return "\u2014";
   if (k >= 1_000_000) return `${(k / 1_000_000).toFixed(k % 1_000_000 === 0 ? 0 : 1)}M`;
   if (k >= 1_000) return `${(k / 1_000).toFixed(0)}K`;
   return String(k);
@@ -74,120 +64,179 @@ function syncedAgoLabel(iso: string | null): string {
   return `synced ${hrs}h ago`;
 }
 
-function scoreColor(v: number): string {
-  if (v >= 70) return "#22c55e";
-  if (v >= 40) return "#f59e0b";
+function scoreColor(s: number): string {
+  if (s >= 70) return "#22c55e";
+  if (s >= 40) return "#f59e0b";
   return "#ef4444";
 }
 
-function scoreBg(v: number): string {
-  if (v >= 70) return "#22c55e18";
-  if (v >= 40) return "#f59e0b18";
-  return "#ef444418";
-}
-
 const CAP_COLORS: Record<string, string> = {
-  vision: "#a855f7",
-  tools: "#3b82f6",
   reasoning: "#f97316",
-  audio: "#06b6d4",
-  video: "#ec4899",
+  code: "#3b82f6",
+  tools: "#8b5cf6",
+  vision: "#22c55e",
+  speech: "#ec4899",
+  audio: "#ec4899",
 };
 
-function capColor(c: string): string {
-  return CAP_COLORS[c] || "#8b95a3";
+function capColor(cap: string): string | undefined {
+  const key = cap.toLowerCase();
+  return CAP_COLORS[key] ?? undefined;
 }
 
-interface Badge {
+function modelMatchesFilters(model: ProviderModel, activeFilters: string[], contextMin: number): boolean {
+  const caps = model.attributes?.capabilities ?? [];
+  const bm = model.attributes?.benchmarks;
+
+  if (contextMin > 0 && model.contextLength < contextMin) return false;
+  if (activeFilters.length === 0) return true;
+
+  return activeFilters.some((filter) => {
+    if (filter === "reasoning") {
+      if (caps.includes("reasoning")) return true;
+      if ((bm?.intelligence ?? 0) >= 20) return true;
+    }
+    if (filter === "code") {
+      if (caps.includes("code")) return true;
+      if ((bm?.coding ?? 0) >= 20 || (bm?.aaCoding ?? 0) >= 20) return true;
+    }
+    if (filter === "tools") {
+      if (caps.includes("tools") || caps.includes("tool use") || caps.includes("function calling")) return true;
+      if ((bm?.agentic ?? 0) >= 20) return true;
+    }
+    if (filter === "vision") {
+      if (caps.includes("vision")) return true;
+    }
+    if (filter === "speech") {
+      if (caps.includes("speech") || caps.includes("audio")) return true;
+    }
+    return false;
+  });
+}
+
+function bestFilterScore(model: ProviderModel, activeFilters: string[]): number {
+  const bm = model.attributes?.benchmarks;
+  let best = 0;
+  for (const filter of activeFilters) {
+    if (filter === "reasoning") best = Math.max(best, bm?.intelligence ?? 0);
+    if (filter === "code") best = Math.max(best, bm?.coding ?? 0, bm?.aaCoding ?? 0);
+    if (filter === "tools") best = Math.max(best, bm?.agentic ?? 0);
+  }
+  return best;
+}
+
+function sortByFilterScore(models: ProviderModel[], activeFilters: string[]): ProviderModel[] {
+  if (activeFilters.length === 0) return models;
+  return [...models].sort((a, b) => bestFilterScore(b, activeFilters) - bestFilterScore(a, activeFilters));
+}
+
+function defaultSort(models: ProviderModel[]): ProviderModel[] {
+  return [...models].sort((a, b) => {
+    const aCode = a.attributes?.benchmarks?.coding ?? 0;
+    const bCode = b.attributes?.benchmarks?.coding ?? 0;
+    const aIntel = a.attributes?.benchmarks?.intelligence ?? 0;
+    const bIntel = b.attributes?.benchmarks?.intelligence ?? 0;
+
+    const aTier = aCode >= 20 ? 0 : aIntel >= 20 ? 1 : 2;
+    const bTier = bCode >= 20 ? 0 : bIntel >= 20 ? 1 : 2;
+
+    if (aTier !== bTier) return aTier - bTier;
+    if (aTier === 0) return bCode - aCode;
+    if (aTier === 1) return bIntel - aIntel;
+    return 0;
+  });
+}
+
+const FILTER_PILLS = [
+  { id: "reasoning", label: "Reasoning", color: "#f97316" },
+  { id: "code", label: "Code", color: "#3b82f6" },
+  { id: "tools", label: "Tools", color: "#8b5cf6" },
+  { id: "vision", label: "Vision", color: "#22c55e" },
+  { id: "speech", label: "Speech", color: "#ec4899" },
+] as const;
+
+const CONTEXT_OPTIONS = [
+  { value: 0, label: "Any" },
+  { value: 32768, label: "32K" },
+  { value: 131072, label: "128K" },
+  { value: 1048576, label: "1M" },
+] as const;
+
+interface AttrSegment {
   text: string;
-  color: string;
-  bg: string;
-  title?: string;
+  color?: string;
 }
 
-function attributeBadges(a: ModelAttributes | undefined): Badge[] {
-  if (!a) return [];
-  const badges: Badge[] = [];
+function attributeSegments(a: ModelAttributes | undefined): AttrSegment[] | null {
+  if (!a) return null;
+  const segs: AttrSegment[] = [];
   const b = a.benchmarks;
   if (b) {
     if (typeof b.intelligence === "number") {
-      badges.push({ text: `AA ${b.intelligence}`, color: scoreColor(b.intelligence), bg: scoreBg(b.intelligence), title: "Artificial Analysis intelligence index" });
+      if (segs.length) segs.push({ text: " \u00b7 " });
+      segs.push({ text: `AA ${b.intelligence}`, color: scoreColor(b.intelligence) });
     }
     if (typeof b.coding === "number") {
-      badges.push({ text: `code ${b.coding}`, color: scoreColor(b.coding), bg: scoreBg(b.coding), title: "Artificial Analysis coding index" });
+      if (segs.length) segs.push({ text: " \u00b7 " });
+      segs.push({ text: `code ${b.coding}`, color: scoreColor(b.coding) });
     }
     if (typeof b.agentic === "number") {
-      badges.push({ text: `agent ${b.agentic}`, color: scoreColor(b.agentic), bg: scoreBg(b.agentic), title: "Artificial Analysis agentic index" });
+      if (segs.length) segs.push({ text: " \u00b7 " });
+      segs.push({ text: `agent ${b.agentic}`, color: scoreColor(b.agentic) });
     }
     if (typeof b.sweBench === "number") {
-      badges.push({ text: `SWE ${b.sweBench}`, color: scoreColor(b.sweBench), bg: scoreBg(b.sweBench), title: "SWE-bench" });
+      if (segs.length) segs.push({ text: " \u00b7 " });
+      segs.push({ text: `SWE ${b.sweBench}`, color: scoreColor(b.sweBench) });
     }
     if (typeof b.aaCoding === "number" && typeof b.sweBench === "undefined") {
-      badges.push({ text: `AA-code ${b.aaCoding}`, color: scoreColor(b.aaCoding), bg: scoreBg(b.aaCoding), title: "Artificial Analysis coding" });
+      if (segs.length) segs.push({ text: " \u00b7 " });
+      segs.push({ text: `AA-coding ${b.aaCoding}`, color: scoreColor(b.aaCoding) });
     }
   }
   if (a.ranks && a.ranks.length > 0) {
-    const top = a.ranks[0];
-    badges.push({ text: `${top.label} #${top.rank}`, color: "#8b95a3", bg: "#8b95a318", title: "Usage/spend popularity rank" });
+    const top = a.ranks.slice(0, 3).map((r) => `${r.label} #${r.rank}`).join(" \u00b7 ");
+    if (segs.length) segs.push({ text: " \u00b7 " });
+    segs.push({ text: top });
   }
   if (a.capabilities && a.capabilities.length > 0) {
-    for (const c of a.capabilities) {
-      badges.push({ text: c, color: capColor(c), bg: `${capColor(c)}18`, title: `Capability: ${c}` });
+    for (const cap of a.capabilities) {
+      if (segs.length) segs.push({ text: " \u00b7 " });
+      segs.push({ text: cap, color: capColor(cap) });
     }
   }
   if (a.pricing) {
-    const isFree = a.pricing.toLowerCase().includes("free");
-    badges.push({ text: a.pricing, color: isFree ? "#22c55e" : "#8b95a3", bg: isFree ? "#22c55e18" : "#8b95a318", title: "Pricing per million tokens" });
+    if (segs.length) segs.push({ text: " \u00b7 " });
+    segs.push({ text: a.pricing });
   }
-  return badges;
-}
 
-function attachSortKey(model: ProviderModel, sortBy: string): number {
-  if (sortBy === "intelligence") return model.attributes?.benchmarks?.intelligence ?? -1;
-  if (sortBy === "coding") return model.attributes?.benchmarks?.coding ?? -1;
-  if (sortBy === "agentic") return model.attributes?.benchmarks?.agentic ?? -1;
-  if (sortBy === "context") return model.contextLength ?? 0;
-  return 0;
+  if (segs.length === 0 && !a.note) return null;
+  return segs;
 }
-
-function sortModels(models: ProviderModel[], sortBy: string): ProviderModel[] {
-  if (sortBy === "default" || sortBy === "name") {
-    const s = [...models];
-    if (sortBy === "name") s.sort((a, b) => a.displayName.localeCompare(b.displayName));
-    return s;
-  }
-  return [...models].sort((a, b) => attachSortKey(b, sortBy) - attachSortKey(a, sortBy));
-}
-
-const SORT_OPTIONS = [
-  { key: "default", label: "Default" },
-  { key: "intelligence", label: "AA Intel" },
-  { key: "coding", label: "Code" },
-  { key: "agentic", label: "Agent" },
-  { key: "context", label: "Context" },
-  { key: "name", label: "Name" },
-];
 
 function ModelRow({
   model,
   isSelected,
   onSelect,
+  dimmed,
 }: {
   model: ProviderModel;
   isSelected: boolean;
   onSelect: () => void;
+  dimmed?: boolean;
 }) {
-  const badges = attributeBadges(model.attributes);
+  const segs = model.attributes ? attributeSegments(model.attributes) : null;
   const note = model.attributes?.note;
+  const hasSub = !!(segs || note);
 
   return (
     <button
       onClick={onSelect}
       className={`
         flex flex-col w-full text-left rounded px-1.5 transition-colors duration-100 cursor-pointer
-        ${isSelected ? "bg-primary/10" : "hover:bg-muted/60"}
+        ${isSelected ? "bg-primary/10" : dimmed ? "" : "hover:bg-muted/60"}
+        ${dimmed && !isSelected ? "opacity-35" : ""}
       `}
-      style={{ paddingTop: 4, paddingBottom: 4 }}
+      style={{ paddingTop: 3, paddingBottom: hasSub ? 3 : 3 }}
     >
       <span className="flex items-center w-full" style={{ height: 20 }}>
         <span
@@ -215,21 +264,20 @@ function ModelRow({
         </span>
       </span>
 
-      {(badges.length > 0 || note) && (
-        <span className="flex flex-wrap items-center gap-1 pl-6 pr-1 mt-1">
-          {badges.map((b, i) => (
-            <span
-              key={i}
-              className="inline-flex items-center px-1 py-px rounded text-[9px] font-medium leading-none"
-              style={{ color: b.color, backgroundColor: b.bg }}
-              title={b.title || b.text}
-            >
-              {b.text}
+      {hasSub && (
+        <span className="flex items-center w-full pl-6 pr-1 mt-0.5 min-h-[14px] overflow-hidden">
+          {segs && (
+            <span className="text-[9px] leading-none truncate" title={segs.map((s) => s.text).join("")}>
+              {segs.map((s, i) => (
+                <span key={i} style={s.color ? { color: dimmed ? undefined : s.color } : undefined}>
+                  {s.text}
+                </span>
+              ))}
             </span>
-          ))}
+          )}
           {note && (
             <span
-              className={`inline-flex items-center px-1 py-px rounded text-[9px] leading-none ${note.startsWith("⚠") ? "text-amber-600 dark:text-amber-500 bg-amber-500/10" : "text-muted-foreground/70 bg-muted/30"}`}
+              className={`text-[9px] leading-none truncate shrink-0 ${segs ? "ml-1.5" : ""} ${note.startsWith("\u26a0") ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground/70"}`}
               title={note}
             >
               {note}
@@ -246,33 +294,48 @@ function ProviderBox({
   selectedModelId,
   onSelect,
   searchQuery,
-  sortBy,
+  activeFilters,
+  contextMin,
 }: {
   provider: ProviderGroup;
   selectedModelId: string | null;
   onSelect: (model: ProviderModel) => void;
   searchQuery: string;
-  sortBy: string;
+  activeFilters: string[];
+  contextMin: number;
 }) {
-  const filtered = useMemo(() => {
-    let ms = provider.models;
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      ms = ms.filter(
-        (m) =>
-          m.displayName.toLowerCase().includes(q) ||
-          m.id.toLowerCase().includes(q) ||
-          (m.family?.toLowerCase().includes(q) ?? false)
-      );
+  const { matched, dimmed } = useMemo(() => {
+    const allModels = provider.models;
+    const searched = !searchQuery.trim()
+      ? allModels
+      : allModels.filter((m) => {
+          const q = searchQuery.toLowerCase();
+          return (
+            m.displayName.toLowerCase().includes(q) ||
+            m.id.toLowerCase().includes(q) ||
+            (m.family?.toLowerCase().includes(q) ?? false)
+          );
+        });
+    const m: ProviderModel[] = [];
+    const d: ProviderModel[] = [];
+    for (const mdl of searched) {
+      if (modelMatchesFilters(mdl, activeFilters, contextMin)) {
+        m.push(mdl);
+      } else {
+        d.push(mdl);
+      }
     }
-    return sortModels(ms, sortBy);
-  }, [provider.models, searchQuery, sortBy]);
+    return {
+      matched: activeFilters.length > 0 || contextMin > 0 ? sortByFilterScore(m, activeFilters) : defaultSort(m),
+      dimmed: d,
+    };
+  }, [provider.models, searchQuery, activeFilters, contextMin]);
 
   const openSettings = useCallback(() => {
     useModelStore.getState().openProvidersDialog(provider.name);
   }, [provider.name]);
 
-  if (filtered.length === 0) return null;
+  if (matched.length === 0 && dimmed.length === 0) return null;
 
   return (
     <div
@@ -295,7 +358,7 @@ function ProviderBox({
           onClick={openSettings}
           className="flex items-center justify-center size-5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
           aria-label={`Manage ${provider.displayName} privacy & keys`}
-          title={`${provider.manageLabel} ↗`}
+          title={`${provider.manageLabel} \u2197`}
         >
           <IcoSettings />
         </button>
@@ -303,8 +366,12 @@ function ProviderBox({
 
       <button
         onClick={openSettings}
-        className="flex items-center gap-1.5 px-2.5 shrink-0 text-left hover:bg-muted/40 transition-colors"
-        style={{ height: 24, borderBottom: `1px solid ${provider.color}12`, backgroundColor: `${provider.color}06` }}
+        className="flex items-center gap-1.5 px-2.5 shrink-0 text-left hover:brightness-95 dark:hover:brightness-110 transition-all"
+        style={{
+          height: 24,
+          borderBottom: `1px solid ${confidenceDotColor(provider.privacy.confidence)}25`,
+          backgroundColor: `${confidenceDotColor(provider.privacy.confidence)}0d`,
+        }}
         title={provider.privacy.notice}
       >
         <span className="shrink-0" style={{ color: confidenceDotColor(provider.privacy.confidence) }}>
@@ -317,9 +384,19 @@ function ProviderBox({
 
       <div className="overflow-y-auto flex-1 min-h-0">
         <div className="flex flex-col gap-px p-1">
-          {filtered.map((m) => (
+          {matched.map((m) => (
             <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} />
           ))}
+          {dimmed.length > 0 && (
+            <>
+              <div className="flex items-center gap-2 px-1.5 py-1 mt-0.5 border-t border-border/30">
+                <span className="text-[9px] text-muted-foreground/50 leading-none">{dimmed.length} dimmed</span>
+              </div>
+              {dimmed.map((m) => (
+                <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} dimmed />
+              ))}
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -338,13 +415,15 @@ export function ModelSelectOverlay() {
     selectedModelId,
     overlayOpen,
     searchQuery,
-    sortBy,
+    activeFilters,
+    contextMin,
     fetchProviders,
     refreshProviders,
     selectModel,
     closeOverlay,
     setSearchQuery,
-    setSortBy,
+    toggleFilter,
+    setContextMin,
     openProvidersDialog,
   } = useModelStore();
 
@@ -353,7 +432,6 @@ export function ModelSelectOverlay() {
   const syncedLabel = syncedAgoLabel(syncedAt);
 
   const inputRef = useRef<HTMLInputElement>(null);
-  const [showSort, setShowSort] = useState(false);
 
   useEffect(() => {
     if (providers.length === 0 && !loading) fetchProviders();
@@ -369,7 +447,7 @@ export function ModelSelectOverlay() {
   useEffect(() => {
     if (!overlayOpen) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { closeOverlay(); setShowSort(false); }
+      if (e.key === "Escape") closeOverlay();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -384,20 +462,22 @@ export function ModelSelectOverlay() {
   );
 
   const filteredCount = useMemo(() => {
-    if (!searchQuery.trim()) return totalModels;
-    const q = searchQuery.toLowerCase();
-    return providers.reduce(
-      (s, p) =>
-        s +
-        p.models.filter(
-          (m) =>
-            m.displayName.toLowerCase().includes(q) ||
-            m.id.toLowerCase().includes(q) ||
-            (m.family?.toLowerCase().includes(q) ?? false)
-        ).length,
-      0
-    );
-  }, [providers, searchQuery, totalModels]);
+    if (!searchQuery.trim() && activeFilters.length === 0 && contextMin === 0) return totalModels;
+    let count = 0;
+    const q = searchQuery.toLowerCase().trim();
+    for (const p of providers) {
+      for (const m of p.models) {
+        const matchesSearch =
+          !q ||
+          m.displayName.toLowerCase().includes(q) ||
+          m.id.toLowerCase().includes(q) ||
+          (m.family?.toLowerCase().includes(q) ?? false);
+        if (!matchesSearch) continue;
+        if (modelMatchesFilters(m, activeFilters, contextMin)) count++;
+      }
+    }
+    return count;
+  }, [providers, searchQuery, totalModels, activeFilters, contextMin]);
 
   const selectedDisplayName = useMemo(() => {
     if (!selectedModelId) return null;
@@ -408,7 +488,7 @@ export function ModelSelectOverlay() {
     return null;
   }, [selectedModelId, providers]);
 
-  const sortLabel = SORT_OPTIONS.find((o) => o.key === sortBy)?.label || "Default";
+  const anyFilterActive = activeFilters.length > 0 || contextMin > 0;
 
   return (
     <AnimatePresence>
@@ -420,7 +500,7 @@ export function ModelSelectOverlay() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
             className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm"
-            onClick={() => { closeOverlay(); setShowSort(false); }}
+            onClick={closeOverlay}
             aria-hidden="true"
           />
 
@@ -443,7 +523,7 @@ export function ModelSelectOverlay() {
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="text-[12px] font-semibold text-foreground">Select Model</span>
                   <span className="text-[10px] text-muted-foreground">
-                    {loading ? "loading…" : error ? `failed: ${error}` : providers.length === 0 ? "no provider data" : `${filteredCount} models · ${providers.length} providers`}
+                    {loading ? "loading\u2026" : `${filteredCount} models \u00b7 ${providers.length} providers`}
                   </span>
                   {!loading && providers.length > 0 && (
                     <button
@@ -460,42 +540,15 @@ export function ModelSelectOverlay() {
                       onClick={() => refreshProviders()}
                       disabled={refreshing}
                       className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-60"
-                      title={refreshing ? "syncing…" : `${syncedLabel} · ${liveCount}/${totalCount} providers live · click to re-sync`}
+                      title={refreshing ? "syncing\u2026" : `${syncedLabel} \u00b7 ${liveCount}/${totalCount} providers live \u00b7 click to re-sync`}
                     >
                       <IcoRefresh spinning={refreshing} />
-                      <span className="hidden md:inline">{refreshing ? "syncing…" : syncedLabel || "sync"}</span>
+                      <span className="hidden md:inline">{refreshing ? "syncing\u2026" : syncedLabel || "sync"}</span>
                     </button>
                   )}
                 </div>
 
-                <div className="flex items-center gap-2 relative">
-                  <button
-                    onClick={() => setShowSort(!showSort)}
-                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
-                    title={`Sort by: ${sortLabel}`}
-                  >
-                    <IcoSort />
-                    <span className="hidden sm:inline text-[10px]">{sortLabel}</span>
-                    <IcoArrowUp />
-                  </button>
-                  {showSort && (
-                    <>
-                      <div className="fixed inset-0 z-30" onClick={() => setShowSort(false)} />
-                      <div className="absolute top-full right-12 mt-1 w-36 bg-surface2 border border-border rounded-lg shadow-xl z-40 overflow-hidden">
-                        {SORT_OPTIONS.map((o) => (
-                          <button
-                            key={o.key}
-                            onClick={() => { setSortBy(o.key); setShowSort(false); }}
-                            className={`w-full text-left px-3 py-2 text-[11px] flex items-center gap-2 transition-colors ${sortBy === o.key ? "text-primary bg-primary/10 font-medium" : "text-foreground hover:bg-muted/40"}`}
-                          >
-                            {sortBy === o.key && <IcoDot />}
-                            <span className={sortBy === o.key ? "" : "ml-4"}>{o.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </>
-                  )}
-
+                <div className="flex items-center gap-2">
                   <div className="relative">
                     <span className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground">
                       <IcoSearch />
@@ -504,13 +557,13 @@ export function ModelSelectOverlay() {
                       ref={inputRef}
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="search…"
+                      placeholder="search\u2026"
                       className="pl-7 pr-2 h-6 w-36 sm:w-48 text-[11px] bg-muted/40 border border-border/60 rounded-md outline-none focus:border-ring/50 placeholder:text-muted-foreground/60"
                     />
                   </div>
 
                   <button
-                    onClick={() => { closeOverlay(); setShowSort(false); }}
+                    onClick={closeOverlay}
                     className="flex items-center justify-center size-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
                     aria-label="Close"
                   >
@@ -519,11 +572,55 @@ export function ModelSelectOverlay() {
                 </div>
               </div>
 
+              {providers.length > 0 && (
+                <div className="flex items-center gap-1.5 px-3.5 py-1 shrink-0 overflow-x-auto border-b border-border/30" style={{ height: 30 }}>
+                  {FILTER_PILLS.map((f) => (
+                    <button
+                      key={f.id}
+                      onClick={() => toggleFilter(f.id)}
+                      className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+                      style={{
+                        borderColor: activeFilters.includes(f.id) ? `${f.color}50` : "var(--border)",
+                        backgroundColor: activeFilters.includes(f.id) ? `${f.color}15` : "transparent",
+                        color: activeFilters.includes(f.id) ? f.color : "var(--muted-foreground)",
+                      }}
+                      aria-pressed={activeFilters.includes(f.id)}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                  <span className="w-px h-3 bg-border/40 mx-0.5 shrink-0" />
+                  {CONTEXT_OPTIONS.map((c) => (
+                    <button
+                      key={c.value}
+                      onClick={() => setContextMin(c.value)}
+                      className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+                      style={{
+                        borderColor: contextMin === c.value ? "var(--primary)" : "var(--border)",
+                        backgroundColor: contextMin === c.value ? "color-mix(in srgb, var(--primary) 10%, transparent)" : "transparent",
+                        color: contextMin === c.value ? "var(--primary)" : "var(--muted-foreground)",
+                      }}
+                      aria-pressed={contextMin === c.value}
+                    >
+                      {c.label}
+                    </button>
+                  ))}
+                  {anyFilterActive && (
+                    <button
+                      onClick={() => { activeFilters.forEach((f) => toggleFilter(f)); setContextMin(0); }}
+                      className="shrink-0 text-[9px] leading-none px-1.5 py-0.5 rounded text-muted-foreground/60 hover:text-foreground hover:bg-muted/40 transition-colors ml-auto"
+                    >
+                      clear
+                    </button>
+                  )}
+                </div>
+              )}
+
               <div className="flex-1 min-h-0 overflow-y-auto">
                 {loading && (
                   <div className="flex items-center justify-center h-full">
                     <span className="inline-block size-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
-                    <span className="ml-2 text-[11px] text-muted-foreground">fetching…</span>
+                    <span className="ml-2 text-[11px] text-muted-foreground">fetching\u2026</span>
                   </div>
                 )}
 
@@ -539,7 +636,7 @@ export function ModelSelectOverlay() {
                   </div>
                 )}
 
-                {!loading && !error && providers.length > 0 && (
+                {!loading && !error && (
                   <div className="p-3">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {providers.map((p) => (
@@ -549,7 +646,8 @@ export function ModelSelectOverlay() {
                           selectedModelId={selectedModelId}
                           onSelect={handleSelect}
                           searchQuery={searchQuery}
-                          sortBy={sortBy}
+                          activeFilters={activeFilters}
+                          contextMin={contextMin}
                         />
                       ))}
                     </div>
@@ -559,7 +657,7 @@ export function ModelSelectOverlay() {
 
               <div className="flex items-center justify-between px-3.5 shrink-0" style={{ height: 30, borderTop: "1px solid var(--border)" }}>
                 <span className="text-[10px] text-muted-foreground truncate">
-                  click to select · <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close · <span className="text-green-600">●</span> live / <span className="text-amber-600">●</span> config · {liveCount}/{totalCount} synced
+                  click to select \u00b7 <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close \u00b7 <span className="text-green-600">\u25cf</span> live / <span className="text-amber-600">\u25cf</span> config \u00b7 {liveCount}/{totalCount} synced
                 </span>
                 {selectedDisplayName && (
                   <span className="text-[10px] text-primary font-medium flex items-center gap-1">
@@ -575,5 +673,3 @@ export function ModelSelectOverlay() {
     </AnimatePresence>
   );
 }
-
-import { useState } from "react";
