@@ -230,6 +230,8 @@ class Panel:
         """
         sync_results = provider_sync.sync_all_providers(self.provider_by_name)
         provider_sync.register_synced_models(self, sync_results)
+        # Cache for catalog.py to reuse instead of re-syncing with fresh instances
+        provider_sync.set_panel_sync_cache(sync_results)
 
     def _ensure_slot(self, who: str) -> slot | None:
         if who in self.slot_by_who:
@@ -1021,6 +1023,9 @@ class Handler(BaseHTTPRequestHandler):
         return  # telemetry goes through oplog; suppress the stderr access log spam
 
     def do_GET(self) -> None:
+        start = time.time()
+        self._last_status = 200
+        error_msg = None
         try:
             self._do_GET()
         except Exception as exc:  # noqa: BLE001 — last-resort guard so a bug
@@ -1029,11 +1034,14 @@ class Handler(BaseHTTPRequestHandler):
             # _check_session bug) turns a clean 401 into an HTTP 500 that
             # surfaces to the user as "internal error" with no route context.
             try:
+                error_msg = repr(exc)[:300]
                 log_event("do_GET_unhandled", path=self.path,
-                          error=repr(exc)[:300])
+                          error=error_msg)
                 self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
             except Exception:
                 pass  # connection may already be closed
+        finally:
+            self._log_request("GET", self.path, self._last_status, (time.time() - start) * 1000, error_msg)
 
     def _do_GET(self) -> None:
         from urllib.parse import urlsplit
@@ -3085,16 +3093,6 @@ def main() -> int:
     panel = Panel()
     if not panel.providers:
         log_event("startup_warning", msg="no providers have API keys - every judge will fail")
-
-    # Prime the provider catalog cache so /api/models returns cached data
-    # without re-syncing every provider on the first request. The Panel sync
-    # above already succeeded (cloudflare included); this runs the same sync
-    # through build_provider_catalog and caches the result for 10 minutes.
-    try:
-        from provider_sync.catalog import build_provider_catalog
-        build_provider_catalog()
-    except Exception as exc:
-        log_event("catalog_prime_warning", error=str(exc)[:500])
 
     # initialize SQLite database for GitHub + HF integration
     db.init_db()

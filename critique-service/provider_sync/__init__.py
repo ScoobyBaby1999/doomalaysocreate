@@ -8,6 +8,22 @@ from typing import Any
 from providers import load_provider_catalog, provider
 from provider_sync.base import BaseSync, get_provider_sync_class
 
+# Cache of the Panel's last successful sync results.
+# Populated by Panel after sync_all() completes. Used by catalog.py to avoid
+# re-syncing with fresh provider instances that hit SSL errors.
+_panel_sync_cache: dict[str, list[str]] | None = None
+
+
+def get_panel_sync_cache() -> dict[str, list[str]] | None:
+    """Return the Panel's last successful sync results, if available."""
+    return _panel_sync_cache
+
+
+def set_panel_sync_cache(results: dict[str, list[str]]) -> None:
+    """Store the Panel's sync results for reuse by the catalog."""
+    global _panel_sync_cache
+    _panel_sync_cache = results
+
 
 def sync_all_providers(registered_providers: dict[str, provider]) -> dict[str, list[str]]:
     """Fetch live model lists from all registered providers that support sync.

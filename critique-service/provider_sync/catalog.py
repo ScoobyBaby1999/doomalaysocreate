@@ -418,33 +418,38 @@ def _fetch_openrouter_family() -> tuple[list[dict[str, Any]], dict[str, dict[str
 # Sync provider model lists
 # ---------------------------------------------------------------------------
 def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[str]], set[str]]:
-    """Call sync_all_providers to get live model ID lists, falling back to
-    the static catalog models list for any provider that fails to sync.
+    """Get live model ID lists, first trying the Panel's cached sync results
+    (which succeeded at startup), falling back to a fresh sync if unavailable.
 
     Returns (model_map, live_set) where model_map maps provider_name → model IDs
     and live_set contains names of providers whose data came from a live sync.
     """
-    from provider_sync import sync_all_providers
+    from provider_sync import get_panel_sync_cache, sync_all_providers
     from providers import make_provider_registry
 
-    # Build a minimal provider registry from the catalog (only configured keys)
-    try:
-        reg = make_provider_registry()
-    except Exception:
-        reg = []
+    # Try Panel's cached sync results first (avoids SSL errors from fresh instances)
+    cached = get_panel_sync_cache()
+    if cached:
+        live = dict(cached)
+        live_set = set(live.keys())
+    else:
+        # Fallback: fresh sync with new provider instances
+        try:
+            reg = make_provider_registry()
+        except Exception:
+            reg = []
 
-    provider_map: dict[str, Any] = {}
-    for p in reg:
-        if hasattr(p, "name"):
-            provider_map[p.name] = p
+        provider_map: dict[str, Any] = {}
+        for p in reg:
+            if hasattr(p, "name"):
+                provider_map[p.name] = p
 
-    live: dict[str, list[str]] = {}
-    try:
-        live = sync_all_providers(provider_map)
-    except Exception as e:
-        log_event("catalog_sync_error", error=str(e)[:500])
-
-    live_set = set(live.keys())
+        live: dict[str, list[str]] = {}
+        try:
+            live = sync_all_providers(provider_map)
+        except Exception as e:
+            log_event("catalog_sync_error", error=str(e)[:500])
+        live_set = set(live.keys())
 
     # Fall back to static model lists for any provider the live sync didn't cover.
     # Synced IDs are raw (e.g. "deepseek-ai/deepseek-v4-pro"); normalize for display
