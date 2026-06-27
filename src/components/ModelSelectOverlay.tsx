@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useCallback, useRef } from "react";
+import { useEffect, useMemo, useCallback, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useModelStore, type ProviderGroup, type ProviderModel, type ModelAttributes } from "../lib/model-store";
 
@@ -304,6 +304,8 @@ function ProviderBox({
   activeFilters: string[];
   contextMin: number;
 }) {
+  const [showDimmed, setShowDimmed] = useState(false);
+
   const { matched, dimmed } = useMemo(() => {
     const allModels = provider.models;
     const searched = !searchQuery.trim()
@@ -335,12 +337,14 @@ function ProviderBox({
     useModelStore.getState().openProvidersDialog(provider.name);
   }, [provider.name]);
 
-  if (matched.length === 0 && dimmed.length === 0) return null;
+  const hasDimmed = dimmed.length > 0;
+  if (matched.length === 0 && !hasDimmed) return null;
 
   return (
-    <div
+    <motion.div
+      layout
       className="flex flex-col rounded-lg border overflow-hidden"
-      style={{ borderColor: `${provider.color}30`, height: 300 }}
+      style={{ borderColor: `${provider.color}30` }}
     >
       <div
         className="flex items-center gap-2 px-2.5 shrink-0"
@@ -382,24 +386,33 @@ function ProviderBox({
         </span>
       </button>
 
-      <div className="overflow-y-auto flex-1 min-h-0">
-        <div className="flex flex-col gap-px p-1">
-          {matched.map((m) => (
-            <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} />
-          ))}
-          {dimmed.length > 0 && (
-            <>
-              <div className="flex items-center gap-2 px-1.5 py-1 mt-0.5 border-t border-border/30">
-                <span className="text-[9px] text-muted-foreground/50 leading-none">{dimmed.length} dimmed</span>
-              </div>
-              {dimmed.map((m) => (
-                <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} dimmed />
-              ))}
-            </>
-          )}
-        </div>
+      <div className="flex flex-col gap-px p-1">
+        {matched.map((m) => (
+          <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} />
+        ))}
+        {hasDimmed && (
+          <>
+            <button
+              onClick={() => setShowDimmed((v) => !v)}
+              className="flex items-center gap-1.5 px-1.5 py-1 mt-0.5 border-t border-border/30 text-[9px] text-muted-foreground/50 hover:text-muted-foreground/80 transition-colors cursor-pointer select-none"
+            >
+              <span
+                className="text-[10px] leading-none transition-transform duration-150"
+                style={{ transform: showDimmed ? "rotate(90deg)" : "rotate(0deg)" }}
+              >
+                {"\u25b8"}
+              </span>
+              <span className="text-[9px] leading-none">
+                {showDimmed ? `Hide ${dimmed.length} dimmed` : `Show ${dimmed.length} dimmed`}
+              </span>
+            </button>
+            {showDimmed && dimmed.map((m) => (
+              <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} dimmed />
+            ))}
+          </>
+        )}
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -638,17 +651,18 @@ export function ModelSelectOverlay() {
 
                 {!loading && !error && (
                   <div className="p-3">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="flex flex-wrap items-start gap-3">
                       {providers.map((p) => (
-                        <ProviderBox
-                          key={p.name}
-                          provider={p}
-                          selectedModelId={selectedModelId}
-                          onSelect={handleSelect}
-                          searchQuery={searchQuery}
-                          activeFilters={activeFilters}
-                          contextMin={contextMin}
-                        />
+                        <div key={p.name} className="w-full md:w-[calc(50%-6px)]">
+                          <ProviderBox
+                            provider={p}
+                            selectedModelId={selectedModelId}
+                            onSelect={handleSelect}
+                            searchQuery={searchQuery}
+                            activeFilters={activeFilters}
+                            contextMin={contextMin}
+                          />
+                        </div>
                       ))}
                     </div>
                   </div>
