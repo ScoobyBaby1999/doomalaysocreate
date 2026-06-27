@@ -90,7 +90,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
 
   fetchProviders: async () => {
     const baseUrl = get().baseUrl;
-    if (!baseUrl) { set({ loading: false }); return; }
+    if (baseUrl == null) { set({ loading: false }); return; }
     set({ loading: true, error: null });
     try {
       const res = await fetch(`${baseUrl}/api/models`);
@@ -113,7 +113,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
 
   refreshProviders: async () => {
     const baseUrl = get().baseUrl;
-    if (!baseUrl) { set({ refreshing: false }); return; }
+    if (baseUrl == null) { set({ refreshing: false }); return; }
     set({ refreshing: true });
     try {
       const res = await fetch(`${baseUrl}/api/models?refresh=1`);
