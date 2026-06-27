@@ -455,6 +455,11 @@ def _build_provider_models(
             existing = attributes.get("note", "")
             attributes["note"] = f"{existing} {free_note}".strip() if existing else free_note
 
+        if bm and not attributes.get("capabilities"):
+            all_low = all(isinstance(v, (int, float)) and v < 20 for v in bm.values())
+            if all_low:
+                continue
+
         models.append({
             "id": mid,
             "displayName": fam_meta.get("display_name") or derive_display_name(mid),

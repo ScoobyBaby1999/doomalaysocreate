@@ -34,7 +34,7 @@ class CloudflareSync(BaseSync):
                 params.append("hide_experimental=false")
             if self.include_deprecated:
                 params.append("include_deprecated=true")
-            params.append(f"per_page=200")
+            params.append(f"per_page=500")
             params.append(f"page={page}")
 
             url = f"{self.models_url}?{'&'.join(params)}"
@@ -44,7 +44,7 @@ class CloudflareSync(BaseSync):
 
             result_info = data.get("result_info", {})
             total_count = result_info.get("total_count", 0)
-            per_page = result_info.get("per_page", 200)
+            per_page = result_info.get("per_page", 500)
             total_pages = -(-total_count // per_page) if total_count > 0 else 1
 
             for item in data.get("result", []):
