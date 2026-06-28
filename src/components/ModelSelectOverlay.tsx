@@ -710,9 +710,7 @@ function CondensedList({
     const hid: CondensedModel[] = [];
     for (const m of searched) {
       if (condensedModelMatchesFilters(m, activeFilters, contextMin)) {
-        const hasKey = m.hosts.some((h) => h.hasApiKey);
-        if (hasKey) avail.push(m);
-        else hid.push(m);
+        avail.push(m);
       } else {
         hid.push(m);
       }
