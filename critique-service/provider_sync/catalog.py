@@ -456,17 +456,25 @@ def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[s
         live_set = set(live.keys())
 
     # Fall back to static model lists for any provider the live sync didn't cover.
+    # A live sync that returned empty means the sync failed — don't mark as live,
+    # fall back to static model list instead.
+    # Synced IDs are raw (e.g. "deepseek-ai/deepseek-v4-pro"). We return a dict
+    # mapping {stripped_display_name: raw_id} so _build_provider_models can
+    # construct slot IDs for pinned routing.
     # Synced IDs are raw (e.g. "deepseek-ai/deepseek-v4-pro"); normalize for display
     # by stripping the author prefix so models resolve through the logical catalog.
-    result: dict[str, list[str]] = {}
+    result: dict[str, dict[str, str]] = {}
+    actual_live: set[str] = set()
     for entry in catalog_entries:
         name = entry["name"]
         synced = live.get(name)
         if synced:
-            result[name] = [m.split("/")[-1] if "/" in m else m for m in synced]
+            result[name] = {m.split("/")[-1] if "/" in m else m: m for m in synced}
+            actual_live.add(name)
         else:
-            result[name] = [m.split("/")[-1] if "/" in m else m for m in entry.get("models", [])]
-    return result, live_set
+            static = entry.get("models", [])
+            result[name] = {m.split("/")[-1] if "/" in m else m: m for m in static}
+    return result, actual_live
 
 
 # ---------------------------------------------------------------------------
@@ -474,21 +482,18 @@ def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[s
 # ---------------------------------------------------------------------------
 def _build_provider_models(
     provider_name: str,
-    model_ids: list[str],
+    model_ids: dict[str, str],  # {stripped_display: raw_id}
     registry: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     model_to_logical = _ensure_model_to_logical()
     models: list[dict[str, Any]] = []
-    for mid in model_ids:
-        if not mid:
+    for display_id, raw_id in model_ids.items():
+        if not display_id:
             continue
 
-        # Normalize: strip author prefix for display, then map to a logical
-        # catalog key so resolve_candidates can find the model.
-        display_id = mid.split("/")[-1] if "/" in mid else mid
         logical_id = model_to_logical.get(display_id, display_id)
 
-        family = make_family(mid)
+        family = make_family(raw_id)
         fam_meta = registry.get(family, {})
 
         context_length = fam_meta.get("context", 0)
@@ -501,7 +506,7 @@ def _build_provider_models(
         if caps:
             attributes["capabilities"] = caps
         else:
-            dc = derive_capabilities_from_name(mid)
+            dc = derive_capabilities_from_name(raw_id)
             if dc:
                 attributes["capabilities"] = dc
 
@@ -533,6 +538,7 @@ def _build_provider_models(
             "displayName": fam_meta.get("display_name") or derive_display_name(logical_id),
             "contextLength": context_length,
             "family": family,
+            "slotId": f"{provider_name}/{raw_id}",
         })
         if attributes:
             models[-1]["attributes"] = attributes
@@ -745,6 +751,11 @@ def _build_condensed_catalog_inner() -> dict[str, Any]:
             entry["attributes"] = attributes
         condensed.append(entry)
 
+    if not condensed:
+        log_event("condensed_catalog_empty_warning",
+                  logical_count=len(logical_models),
+                  family_registry_size=len(family_registry),
+                  live_providers=list(live_providers))
     log_event("condensed_catalog_built", count=len(condensed))
     return {"models": condensed}
 

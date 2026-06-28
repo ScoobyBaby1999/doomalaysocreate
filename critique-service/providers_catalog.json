@@ -47,7 +47,14 @@
       "region": "global",
       "limits": {"rpm": 30, "rpd": 10000, "tpm": null, "tpd": null, "concurrency": 2, "monthly_credit": "Workers AI free allocation (neurons/day)"},
       "privacy": {"trains_on_data": false, "stability_tier": 1, "optout_url": "https://www.cloudflare.com/privacypolicy/"},
-      "models": [],
+      "models": [
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "@cf/openai/gpt-oss-120b",
+        "@cf/moonshotai/kimi-k2.6",
+        "@cf/google/gemma-4-26b-a4b-it",
+        "@cf/qwen/qwen2.5-coder-32b-instruct",
+        "@cf/nvidia/nemotron-3-120b-a12b"
+      ],
       "sync_config": {"enabled": true, "params": {"hide_experimental": false, "include_deprecated": true}},
       "note": "fast. CF DEFAULTS max_tokens=256 - always pass it explicitly (we do). newer slots (kimi 262k / nemotron-120b 256k / gemma-4 256k ctx) expose reasoning_effort + chat_template_kwargs (see reasoning_catalog); legacy slots (llama-3.3 24k / qwen-coder 32k ctx) have no reasoning params. r1-distill REMOVED 2026-06: captest showed it confidently proposing a deadlock-inducing fix."
     },
