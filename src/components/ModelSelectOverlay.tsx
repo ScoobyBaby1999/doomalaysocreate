@@ -834,11 +834,9 @@ export function ModelSelectOverlay() {
   }, [providers.length, loading, fetchProviders]);
 
   useEffect(() => {
-    if (overlayOpen) {
-      const { condensedFetched, condensedLoading } = useModelStore.getState();
-      if (!condensedFetched && !condensedLoading) fetchCondensedModels();
-      const t = setTimeout(() => inputRef.current?.focus(), 200);
-      return () => clearTimeout(t);
+    if (overlayOpen && !condensedLoading) {
+      const s = useModelStore.getState();
+      if (!s.condensedFetchedAt || Date.now() - s.condensedFetchedAt > 10 * 60 * 1000) fetchCondensedModels();
     }
   }, [overlayOpen, fetchCondensedModels]);
 
@@ -1104,7 +1102,7 @@ export function ModelSelectOverlay() {
 
                 {!condensedView && !loading && !error && (
                   <div className="p-3 overflow-y-auto max-h-full">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 auto-rows-auto">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
                       {providers.map((p) => (
                         <div key={p.name} className="min-w-0">
                           <ProviderBox

@@ -34,6 +34,7 @@ interface ModelSelectionState {
   condensedModels: CondensedModel[];
   condensedLoading: boolean;
   condensedFetched: boolean;
+  condensedFetchedAt: number;
   condensedView: boolean;
   providerPriorityOverrides: Record<string, string[]>;
   globalProviderPriority: string[] | null;
@@ -111,6 +112,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   condensedModels: [],
   condensedLoading: false,
   condensedFetched: false,
+  condensedFetchedAt: 0,
   condensedView: loadPersisted<boolean>(`${PREFIX}.condensedView`, false),
   providerPriorityOverrides: loadPersisted<Record<string, string[]>>(`${PREFIX}.providerPriorityOverrides`, {}),
   globalProviderPriority: loadPersisted<string[] | null>(`${PREFIX}.globalProviderPriority`, null),
@@ -227,16 +229,18 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
     set({ providersDialogOpen: false, providersDialogProvider: null }),
 
   fetchCondensedModels: async () => {
-    const baseUrl = get().baseUrl;
-    if (!baseUrl) { set({ condensedLoading: false, condensedFetched: true }); return; }
+    const { baseUrl, condensedFetchedAt } = get();
+    if (!baseUrl) { set({ condensedLoading: false }); return; }
+    const CACHE_TTL = 10 * 60 * 1000;
+    if (condensedFetchedAt && Date.now() - condensedFetchedAt < CACHE_TTL) return;
     set({ condensedLoading: true });
     try {
       const res = await fetch(`${baseUrl}/api/models/condensed`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      set({ condensedModels: data.models ?? [], condensedLoading: false, condensedFetched: true });
+      set({ condensedModels: data.models ?? [], condensedLoading: false, condensedFetched: true, condensedFetchedAt: Date.now() });
     } catch {
-      set({ condensedLoading: false, condensedFetched: true });
+      set({ condensedLoading: false });
     }
   },
 
