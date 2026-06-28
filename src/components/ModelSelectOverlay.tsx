@@ -808,6 +808,7 @@ export function ModelSelectOverlay() {
     contextMin,
     condensedModels,
     condensedLoading,
+    condensedFetchedAt,
     condensedView,
     fetchProviders,
     fetchCondensedModels,
@@ -834,11 +835,11 @@ export function ModelSelectOverlay() {
   }, [providers.length, loading, fetchProviders]);
 
   useEffect(() => {
-    if (overlayOpen && !condensedLoading) {
+    if (overlayOpen && condensedView && !condensedLoading) {
       const s = useModelStore.getState();
       if (!s.condensedFetchedAt || Date.now() - s.condensedFetchedAt > 10 * 60 * 1000) fetchCondensedModels();
     }
-  }, [overlayOpen, fetchCondensedModels]);
+  }, [overlayOpen, condensedView, fetchCondensedModels]);
 
   useEffect(() => {
     if (!overlayOpen) return;
@@ -1102,9 +1103,9 @@ export function ModelSelectOverlay() {
 
                 {!condensedView && !loading && !error && (
                   <div className="p-3 overflow-y-auto max-h-full">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+                    <div className="sm:columns-2 columns-1" style={{ columnGap: '0.75rem' }}>
                       {providers.map((p) => (
-                        <div key={p.name} className="min-w-0">
+                        <div key={p.name} className="break-inside-avoid mb-3 min-w-0">
                           <ProviderBox
                             provider={p}
                             selectedModelId={selectedModelId}
@@ -1121,7 +1122,12 @@ export function ModelSelectOverlay() {
                   </div>
                 )}
 
-                {condensedView && !condensedLoading && (
+                {condensedView && !condensedLoading && condensedFetchedAt === 0 && (
+                  <div className="flex items-center justify-center h-32 text-[10px] text-muted-foreground/50">
+                    loading condensed models...
+                  </div>
+                )}
+                {condensedView && !condensedLoading && condensedFetchedAt !== 0 && (
                   <div className="p-3 relative">
                     <CondensedList
                       models={condensedModels}
