@@ -21,7 +21,7 @@ export function Chat({ settings }: { settings: Settings }) {
   const [privacy] = useState<Privacy>("strict");
   const listRef = useRef<VirtuosoHandle>(null);
 
-  const { setBaseUrl, fetchProviders, focusedMode, selectedModelId, providers, toggleFocusedMode } = useModelStore();
+  const { setBaseUrl, fetchProviders, focusedMode, selectedModelId, selectedSlotId, providers, toggleFocusedMode } = useModelStore();
 
   useEffect(() => {
     setBaseUrl(settings.baseUrl);
@@ -31,7 +31,7 @@ export function Chat({ settings }: { settings: Settings }) {
   const selectedModelDisplay = selectedModelId
     ? (() => {
         for (const p of providers) {
-          const m = p.models.find((m) => m.id === selectedModelId);
+          const m = p.models.find((m) => m.id === selectedModelId || m.slotId === selectedSlotId);
           if (m) return m.displayName;
         }
         return selectedModelId;
@@ -47,8 +47,8 @@ export function Chat({ settings }: { settings: Settings }) {
     setTurns((t) => [...t, { id, prompt }]);
     const client = new PanelClient(settings);
     const body: Record<string, unknown> = { input: prompt, role: "critiquer", effort, privacy, profile: "app" };
-    if (focusedMode && selectedModelId) {
-      body.panel = [selectedModelId];
+    if (focusedMode && selectedSlotId) {
+      body.panel = [selectedSlotId];
     }
     try {
       await client.runPanel(

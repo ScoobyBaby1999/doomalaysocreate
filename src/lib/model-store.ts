@@ -16,6 +16,8 @@ interface ModelSelectionState {
 
   selectedModelId: string | null;
   selectedProviderName: string | null;
+  /** Full slot id "provider/model" for pinned routing (e.g. "nvidia/z-ai/glm-5.1") */
+  selectedSlotId: string | null;
 
   focusedMode: boolean;
 
@@ -92,6 +94,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
 
   selectedModelId: loadPersisted<string | null>(`${PREFIX}.selectedModelId`, null),
   selectedProviderName: loadPersisted<string | null>(`${PREFIX}.selectedProviderName`, null),
+  selectedSlotId: loadPersisted<string | null>(`${PREFIX}.selectedSlotId`, null),
   focusedMode: loadPersisted<boolean>(`${PREFIX}.focusedMode`, false),
 
   overlayOpen: false,
@@ -157,17 +160,19 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
     }
   },
 
-  selectModel: (modelId: string, providerName: string) => {
-    set({ selectedModelId: modelId, selectedProviderName: providerName, overlayOpen: false, focusedMode: true });
+  selectModel: (modelId: string, providerName: string, slotId?: string) => {
+    set({ selectedModelId: modelId, selectedProviderName: providerName, selectedSlotId: slotId ?? modelId, overlayOpen: false, focusedMode: true });
     persist(`${PREFIX}.selectedModelId`, modelId);
     persist(`${PREFIX}.selectedProviderName`, providerName);
+    persist(`${PREFIX}.selectedSlotId`, slotId ?? modelId);
     persist(`${PREFIX}.focusedMode`, true);
   },
 
   clearSelection: () => {
-    set({ selectedModelId: null, selectedProviderName: null, focusedMode: false });
+    set({ selectedModelId: null, selectedProviderName: null, selectedSlotId: null, focusedMode: false });
     persist(`${PREFIX}.selectedModelId`, null);
     persist(`${PREFIX}.selectedProviderName`, null);
+    persist(`${PREFIX}.selectedSlotId`, null);
     persist(`${PREFIX}.focusedMode`, false);
   },
 
@@ -252,9 +257,20 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
     const model = condensedModels.find((m) => m.logical === logical);
     if (!model) return;
     const ordered = get().getOrderedHosts(logical, model.hosts);
-    const best = ordered.find((h) => h.hasApiKey && h.syncedLive);
+    const best =
+      ordered.find((h) => h.hasApiKey && h.syncedLive) ??
+      ordered.find((h) => h.hasApiKey) ??
+      ordered.find((h) => h.syncedLive) ??
+      ordered[0];
     if (best) {
-      get().selectModel(best.modelId, best.provider);
+      // store LOGICAL model ID (e.g. "glm-5.1") so it matches provider model
+      // ids in the Providers view AND condensed model logical keys
+      const slotId = `${best.provider}/${best.modelId}`;
+      set({ selectedModelId: model.logical, selectedProviderName: best.provider, selectedSlotId: slotId, overlayOpen: false, focusedMode: false });
+      persist(`${PREFIX}.selectedModelId`, model.logical);
+      persist(`${PREFIX}.selectedProviderName`, best.provider);
+      persist(`${PREFIX}.selectedSlotId`, slotId);
+      persist(`${PREFIX}.focusedMode`, false);
     }
   },
 
@@ -275,8 +291,16 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   },
 
   getSelectedModel: () => {
-    const { selectedModelId, providers } = get();
+    const { selectedModelId, selectedSlotId, providers } = get();
     if (!selectedModelId) return null;
+    // try slotId match first (pinned provider selection)
+    if (selectedSlotId) {
+      for (const p of providers) {
+        const m = p.models.find((m) => m.slotId === selectedSlotId);
+        if (m) return m;
+      }
+    }
+    // fall back to logical model ID match
     for (const p of providers) {
       const m = p.models.find((m) => m.id === selectedModelId);
       if (m) return m;

@@ -18,6 +18,8 @@ export interface ProviderModel {
   contextLength: number;
   family?: string;
   attributes?: ModelAttributes;
+  /** Full slot id "provider/model" for pinned routing (e.g. "nvidia/z-ai/glm-5.1") */
+  slotId?: string;
 }
 
 export interface ProviderPrivacy {

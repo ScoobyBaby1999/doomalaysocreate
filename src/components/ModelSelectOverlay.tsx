@@ -516,7 +516,7 @@ function CondensedModelRow({
         <div className="flex items-center gap-1 flex-shrink-0 overflow-hidden" style={{ maxWidth: 180 }}>
           {getOrderedHostsForModel(model).map((host, i) => (
             <ProviderBadge
-              key={host.provider}
+              key={`${host.provider}-${host.modelId}`}
               host={host}
               priority={i + 1}
               onClick={() => onReorder(model.logical)}
@@ -613,7 +613,7 @@ function ReorderPopover({
       <div className="flex flex-col gap-0.5">
         {localOrder.map((host, i) => (
           <div
-            key={host.provider}
+            key={`${host.provider}-${host.modelId}`}
             className="flex items-center gap-2 px-1.5 py-1 rounded text-[10px]"
             style={{ opacity: host.hasApiKey ? 1 : 0.4 }}
           >
@@ -735,6 +735,7 @@ function CondensedList({
   const selectedLogical = useMemo(() => {
     if (!selectedModelId) return null;
     for (const model of models) {
+      if (model.logical === selectedModelId) return model.logical;
       if (model.hosts.some((h) => h.modelId === selectedModelId)) return model.logical;
     }
     return null;
@@ -859,7 +860,7 @@ export function ModelSelectOverlay() {
 
   const handleSelect = useCallback(
     (model: ProviderModel, providerName: string) => {
-      selectModel(model.id, providerName);
+      selectModel(model.id, providerName, model.slotId);
     },
     [selectModel]
   );
@@ -895,8 +896,8 @@ export function ModelSelectOverlay() {
       const m = p.models.find((m) => m.id === selectedModelId);
       if (m) return m.displayName;
     }
-    if (!condensedView) return null;
     for (const m of condensedModels) {
+      if (m.logical === selectedModelId) return m.displayName;
       if (m.hosts.some((h) => h.modelId === selectedModelId)) return m.displayName;
     }
     return null;
@@ -1145,7 +1146,7 @@ export function ModelSelectOverlay() {
 
               <div className="flex items-center justify-between px-3.5 shrink-0" style={{ height: 30, borderTop: "1px solid var(--border)" }}>
                 <span className="text-[10px] text-muted-foreground truncate">
-                  click to select &nbsp;<kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close &nbsp;{totalCount} provider{totalCount === 1 ? "" : "s"} &nbsp;synced {liveCount}/{totalCount}
+                  click to select &nbsp;<kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close{totalCount > 0 ? ` &nbsp;${totalCount} provider${totalCount === 1 ? "" : "s"} &nbsp;synced ${liveCount}/${totalCount}` : ""}
                 </span>
                 {selectedDisplayName && (
                   <span className="text-[10px] text-primary font-medium flex items-center gap-1">
