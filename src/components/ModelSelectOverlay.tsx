@@ -831,11 +831,12 @@ export function ModelSelectOverlay() {
 
   useEffect(() => {
     if (overlayOpen) {
-      if (condensedModels.length === 0 && !condensedLoading) fetchCondensedModels();
+      const { condensedFetched, condensedLoading } = useModelStore.getState();
+      if (!condensedFetched && !condensedLoading) fetchCondensedModels();
       const t = setTimeout(() => inputRef.current?.focus(), 200);
       return () => clearTimeout(t);
     }
-  }, [overlayOpen, condensedModels.length, condensedLoading, fetchCondensedModels]);
+  }, [overlayOpen, fetchCondensedModels]);
 
   useEffect(() => {
     if (!overlayOpen) return;
