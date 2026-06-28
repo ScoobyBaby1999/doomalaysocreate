@@ -50,6 +50,27 @@ export interface SyncStatusEntry {
   modelCount: number;
 }
 
+export interface CondensedHost {
+  provider: string;
+  providerDisplayName: string;
+  icon: string;
+  color: string;
+  modelId: string;
+  contextLength: number;
+  hasApiKey: boolean;
+  syncedLive: boolean;
+  defaultPriority: number;
+}
+
+export interface CondensedModel {
+  logical: string;
+  displayName: string;
+  family: string;
+  contextLength: number;
+  attributes?: ModelAttributes;
+  hosts: CondensedHost[];
+}
+
 export interface SyncResult {
   providers: ProviderGroup[];
   totalModels: number;

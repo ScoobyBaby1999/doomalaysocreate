@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useCallback, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useModelStore, type ProviderGroup, type ProviderModel, type ModelAttributes } from "../lib/model-store";
+import { useModelStore, type ProviderGroup, type ProviderModel, type ModelAttributes, type CondensedHost, type CondensedModel } from "../lib/model-store";
 
 function IcoX() {
   return (
@@ -424,6 +424,372 @@ function ProviderBox({
   );
 }
 
+function ProviderBadge({
+  host,
+  priority,
+  onClick,
+}: {
+  host: CondensedHost;
+  priority: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[9px] leading-none transition-colors cursor-pointer hover:brightness-110"
+      style={{
+        borderColor: host.hasApiKey ? `${host.color}50` : "var(--border)",
+        backgroundColor: host.hasApiKey ? `${host.color}12` : "transparent",
+        color: host.hasApiKey ? host.color : "var(--muted-foreground)",
+        opacity: host.hasApiKey ? 1 : 0.4,
+      }}
+      title={`${host.providerDisplayName}${host.hasApiKey ? "" : " (no API key)"}`}
+    >
+      <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: host.color }} />
+      <span className="truncate max-w-[64px]">{host.providerDisplayName}</span>
+      <span
+        className="inline-flex items-center justify-center size-3 rounded-full text-[7px] font-bold leading-none"
+        style={{ backgroundColor: `${host.color}30`, color: host.color }}
+      >
+        {priority}
+      </span>
+    </button>
+  );
+}
+
+function CondensedModelRow({
+  model,
+  isSelected,
+  onSelect,
+  onReorder,
+  dimmed,
+}: {
+  model: CondensedModel;
+  isSelected: boolean;
+  onSelect: () => void;
+  onReorder: (logical: string) => void;
+  dimmed?: boolean;
+}) {
+  const segs = model.attributes ? attributeSegments(model.attributes) : null;
+  const note = model.attributes?.note;
+  const hasSub = !!(segs || note);
+
+  return (
+    <div
+      className={`flex flex-col w-full text-left rounded px-1.5 transition-colors duration-100 ${dimmed ? "" : ""}`}
+      style={{ paddingTop: 3, paddingBottom: hasSub ? 3 : 3 }}
+    >
+      <span className="flex items-center w-full" style={{ height: 20 }}>
+        <button
+          onClick={onSelect}
+          className="flex items-center flex-1 min-w-0 cursor-pointer text-left"
+        >
+          <span
+            className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
+            style={{
+              width: 14,
+              height: 14,
+              fontSize: 0,
+              border: isSelected ? "none" : "1.5px solid var(--border)",
+              backgroundColor: isSelected ? "var(--primary)" : "transparent",
+            }}
+          >
+            {isSelected && <IcoCheck />}
+          </span>
+
+          <span
+            className={`text-[11px] leading-none truncate flex-1 ${isSelected ? "text-primary font-medium" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
+            title={model.logical}
+          >
+            {model.displayName}
+          </span>
+
+          <span className="flex-shrink-0 mr-2 text-[9px] text-muted-foreground tabular-nums">
+            {fmtCtx(model.contextLength)}
+          </span>
+        </button>
+
+        <div className="flex items-center gap-1 flex-shrink-0 overflow-hidden" style={{ maxWidth: 180 }}>
+          {getOrderedHostsForModel(model).map((host, i) => (
+            <ProviderBadge
+              key={host.provider}
+              host={host}
+              priority={i + 1}
+              onClick={() => onReorder(model.logical)}
+            />
+          ))}
+        </div>
+      </span>
+
+      {hasSub && (
+        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-6 pr-1">
+          {segs && segs.map((s, i) =>
+            s.text === " \u00b7 " ? null : (
+              <span
+                key={i}
+                className="text-[9px] leading-none px-1 py-px rounded-sm"
+                style={s.color ? { color: dimmed ? undefined : s.color, backgroundColor: `${s.color}12` } : { color: dimmed ? undefined : "var(--muted-foreground)" }}
+              >
+                {s.text}
+              </span>
+            )
+          )}
+          {note && (
+            <span
+              className={`text-[9px] leading-none px-1 py-px rounded-sm ${note.startsWith("\u26a0") ? "text-amber-600 dark:text-amber-500 bg-amber-500/10" : "text-muted-foreground/70 bg-muted/30"}`}
+            >
+              {note}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  function getOrderedHostsForModel(m: CondensedModel): CondensedHost[] {
+    const store = useModelStore.getState();
+    return store.getOrderedHosts(m.logical, m.hosts);
+  }
+}
+
+function persistLocal(key: string, value: unknown) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
+}
+
+function ReorderPopover({
+  logical,
+  model,
+  onClose,
+}: {
+  logical: string;
+  model: CondensedModel;
+  onClose: () => void;
+}) {
+  const store = useModelStore.getState();
+  const ordered = store.getOrderedHosts(logical, model.hosts);
+  const globalActive = store.globalProviderPriority !== null;
+  const hasOverride = !!store.providerPriorityOverrides[logical];
+  const [localOrder, setLocalOrder] = useState<CondensedHost[]>(ordered);
+
+  useEffect(() => {
+    const current = useModelStore.getState().getOrderedHosts(logical, model.hosts);
+    setLocalOrder(current);
+  }, [logical, model.hosts]);
+
+  function moveUp(idx: number) {
+    if (idx <= 0) return;
+    const next = [...localOrder];
+    [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+    setLocalOrder(next);
+    useModelStore.getState().setProviderPriority(logical, next.map((h) => h.provider));
+  }
+
+  function moveDown(idx: number) {
+    if (idx >= localOrder.length - 1) return;
+    const next = [...localOrder];
+    [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+    setLocalOrder(next);
+    useModelStore.getState().setProviderPriority(logical, next.map((h) => h.provider));
+  }
+
+  function resetOrder() {
+    const s = useModelStore.getState();
+    const overrides = { ...s.providerPriorityOverrides };
+    delete overrides[logical];
+    useModelStore.setState({ providerPriorityOverrides: overrides });
+    persistLocal("doomalaysocreate.model-store.providerPriorityOverrides", overrides);
+    setLocalOrder([...model.hosts].sort((a, b) => a.defaultPriority - b.defaultPriority));
+  }
+
+  return (
+    <div className="absolute z-50 mt-1 right-0 min-w-[200px] rounded-lg border border-border/70 bg-background/95 backdrop-blur-xl shadow-lg shadow-black/20 p-2" onClick={(e) => e.stopPropagation()}>
+      <div className="text-[10px] font-semibold text-foreground mb-1.5 px-1">
+        {model.displayName}
+        <span className="text-muted-foreground font-normal ml-1">priority</span>
+      </div>
+
+      <div className="flex flex-col gap-0.5">
+        {localOrder.map((host, i) => (
+          <div
+            key={host.provider}
+            className="flex items-center gap-2 px-1.5 py-1 rounded text-[10px]"
+            style={{ opacity: host.hasApiKey ? 1 : 0.4 }}
+          >
+            <span className="inline-flex items-center justify-center size-3.5 rounded-full text-[7px] font-bold shrink-0"
+              style={{ backgroundColor: `${host.color}30`, color: host.color }}>
+              {i + 1}
+            </span>
+            <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: host.color }} />
+            <span className="flex-1 truncate text-foreground">{host.providerDisplayName}</span>
+            <div className="flex gap-0.5">
+              <button
+                onClick={() => moveUp(i)}
+                disabled={i === 0}
+                className="size-4 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+                title="Move up"
+              >
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
+              </button>
+              <button
+                onClick={() => moveDown(i)}
+                disabled={i === localOrder.length - 1}
+                className="size-4 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+                title="Move down"
+              >
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {hasOverride && (
+        <button
+          onClick={resetOrder}
+          className="w-full mt-1.5 text-[9px] text-muted-foreground/60 hover:text-foreground text-center py-1 rounded transition-colors"
+        >
+          Reset to default
+        </button>
+      )}
+      {globalActive && !hasOverride && (
+        <div className="mt-1.5 text-[8px] text-muted-foreground/50 text-center px-1">
+          Using global provider order. Set per-model override above.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Re-export from model-store for ReorderPopover use
+function condensedModelMatchesFilters(model: CondensedModel, activeFilters: string[], contextMin: number): boolean {
+  if (contextMin > 0 && model.contextLength < contextMin) return false;
+  if (activeFilters.length === 0) return true;
+  const caps = model.attributes?.capabilities ?? [];
+  const bm = model.attributes?.benchmarks;
+  return activeFilters.some((filter) => {
+    if (filter === "reasoning") return caps.includes("reasoning") || (bm?.intelligence ?? 0) >= 20;
+    if (filter === "code") return caps.includes("code") || (bm?.coding ?? 0) >= 20 || (bm?.aaCoding ?? 0) >= 20;
+    if (filter === "tools") return caps.includes("tools") || caps.includes("tool use") || (bm?.agentic ?? 0) >= 20;
+    if (filter === "vision") return caps.includes("vision");
+    if (filter === "speech") return caps.includes("speech") || caps.includes("audio");
+    return false;
+  });
+}
+
+function CondensedList({
+  models,
+  searchQuery,
+  activeFilters,
+  contextMin,
+  selectedModelId,
+  onSelect,
+  onReorder,
+}: {
+  models: CondensedModel[];
+  searchQuery: string;
+  activeFilters: string[];
+  contextMin: number;
+  selectedModelId: string | null;
+  onSelect: (model: CondensedModel) => void;
+  onReorder: (logical: string) => void;
+}) {
+  const [showHidden, setShowHidden] = useState(false);
+
+  const { available, hidden } = useMemo(() => {
+    const searched = !searchQuery.trim()
+      ? models
+      : models.filter((m) => {
+          const q = searchQuery.toLowerCase();
+          return (
+            m.displayName.toLowerCase().includes(q) ||
+            m.logical.toLowerCase().includes(q) ||
+            (m.family?.toLowerCase().includes(q) ?? false) ||
+            m.hosts.some((h) => h.providerDisplayName.toLowerCase().includes(q))
+          );
+        });
+
+    const avail: CondensedModel[] = [];
+    const hid: CondensedModel[] = [];
+    for (const m of searched) {
+      if (condensedModelMatchesFilters(m, activeFilters, contextMin)) {
+        const hasKey = m.hosts.some((h) => h.hasApiKey);
+        if (hasKey) avail.push(m);
+        else hid.push(m);
+      } else {
+        hid.push(m);
+      }
+    }
+
+    return {
+      available: activeFilters.length > 0 || contextMin > 0
+        ? avail.sort((a, b) => {
+            const sa = bestFilterScore({ id: a.logical, displayName: a.displayName, contextLength: a.contextLength, attributes: a.attributes } as ProviderModel, activeFilters);
+            const sb = bestFilterScore({ id: b.logical, displayName: b.displayName, contextLength: b.contextLength, attributes: b.attributes } as ProviderModel, activeFilters);
+            return sb - sa;
+          })
+        : defaultSort(avail.map((m) => ({ id: m.logical, displayName: m.displayName, contextLength: m.contextLength, attributes: m.attributes } as ProviderModel))).map((pm) => avail.find((m) => m.logical === pm.id)!).filter(Boolean),
+      hidden: hid,
+    };
+  }, [models, searchQuery, activeFilters, contextMin]);
+
+  const selectedLogical = useMemo(() => {
+    if (!selectedModelId) return null;
+    for (const model of models) {
+      if (model.hosts.some((h) => h.modelId === selectedModelId)) return model.logical;
+    }
+    return null;
+  }, [selectedModelId, models]);
+
+  return (
+    <div className="flex flex-col gap-px p-1">
+      {available.length === 0 && hidden.length === 0 && (
+        <div className="flex items-center justify-center h-16 text-[10px] text-muted-foreground/50">
+          no models match
+        </div>
+      )}
+
+      {available.map((m) => (
+        <CondensedModelRow
+          key={m.logical}
+          model={m}
+          isSelected={selectedLogical === m.logical}
+          onSelect={() => onSelect(m)}
+          onReorder={onReorder}
+        />
+      ))}
+
+      {hidden.length > 0 && (
+        <>
+          <button
+            onClick={() => setShowHidden((v) => !v)}
+            className="flex items-center gap-1.5 px-1.5 py-1 mt-1 border-t border-border/30 text-[9px] text-muted-foreground/50 hover:text-muted-foreground/80 transition-colors cursor-pointer select-none"
+          >
+            <span
+              className="text-[10px] leading-none transition-transform duration-150"
+              style={{ transform: showHidden ? "rotate(90deg)" : "rotate(0deg)" }}
+            >
+              {"\u25b8"}
+            </span>
+            <span className="text-[9px] leading-none">
+              {showHidden ? `Hide ${hidden.length} hidden` : `Hidden models (${hidden.length})`}
+            </span>
+          </button>
+          {showHidden && hidden.map((m) => (
+            <CondensedModelRow
+              key={m.logical}
+              model={m}
+              isSelected={selectedLogical === m.logical}
+              onSelect={() => onSelect(m)}
+              onReorder={onReorder}
+              dimmed
+            />
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 export function ModelSelectOverlay() {
   const {
     providers,
@@ -438,14 +804,20 @@ export function ModelSelectOverlay() {
     searchQuery,
     activeFilters,
     contextMin,
+    condensedModels,
+    condensedLoading,
+    condensedView,
     fetchProviders,
+    fetchCondensedModels,
     refreshProviders,
     selectModel,
+    condensedSelect,
     closeOverlay,
     setSearchQuery,
     toggleFilter,
     setContextMin,
     openProvidersDialog,
+    setCondensedView,
   } = useModelStore();
 
   const liveCount = syncStatus.filter((s) => s.live).length;
@@ -453,6 +825,7 @@ export function ModelSelectOverlay() {
   const syncedLabel = syncedAgoLabel(syncedAt);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const [reorderLogical, setReorderLogical] = useState<string | null>(null);
 
   useEffect(() => {
     if (providers.length === 0 && !loading) fetchProviders();
@@ -460,19 +833,27 @@ export function ModelSelectOverlay() {
 
   useEffect(() => {
     if (overlayOpen) {
+      if (condensedModels.length === 0 && !condensedLoading) fetchCondensedModels();
       const t = setTimeout(() => inputRef.current?.focus(), 200);
       return () => clearTimeout(t);
     }
-  }, [overlayOpen]);
+  }, [overlayOpen, condensedModels.length, condensedLoading, fetchCondensedModels]);
 
   useEffect(() => {
     if (!overlayOpen) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeOverlay();
+      if (e.key === "Escape") {
+        if (reorderLogical) { setReorderLogical(null); return; }
+        closeOverlay();
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [overlayOpen, closeOverlay]);
+  }, [overlayOpen, closeOverlay, reorderLogical]);
+
+  useEffect(() => {
+    if (!overlayOpen) setReorderLogical(null);
+  }, [overlayOpen]);
 
   const handleSelect = useCallback(
     (model: ProviderModel) => {
@@ -480,6 +861,13 @@ export function ModelSelectOverlay() {
       selectModel(model.id, provider?.name ?? "");
     },
     [providers, selectModel]
+  );
+
+  const handleCondensedSelect = useCallback(
+    (model: CondensedModel) => {
+      condensedSelect(model.logical);
+    },
+    [condensedSelect]
   );
 
   const filteredCount = useMemo(() => {
@@ -506,10 +894,19 @@ export function ModelSelectOverlay() {
       const m = p.models.find((m) => m.id === selectedModelId);
       if (m) return m.displayName;
     }
+    if (!condensedView) return null;
+    for (const m of condensedModels) {
+      if (m.hosts.some((h) => h.modelId === selectedModelId)) return m.displayName;
+    }
     return null;
-  }, [selectedModelId, providers]);
+  }, [selectedModelId, providers, condensedModels, condensedView]);
 
   const anyFilterActive = activeFilters.length > 0 || contextMin > 0;
+
+  const reorderModel = useMemo(() => {
+    if (!reorderLogical) return null;
+    return condensedModels.find((m) => m.logical === reorderLogical) ?? null;
+  }, [reorderLogical, condensedModels]);
 
   return (
     <AnimatePresence>
@@ -521,7 +918,7 @@ export function ModelSelectOverlay() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
             className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm"
-            onClick={closeOverlay}
+            onClick={() => { if (reorderLogical) setReorderLogical(null); else closeOverlay(); }}
             aria-hidden="true"
           />
 
@@ -541,31 +938,40 @@ export function ModelSelectOverlay() {
               aria-label="Select a model"
             >
               <div className="flex items-center justify-between gap-3 px-3.5 shrink-0" style={{ height: 40, borderBottom: "1px solid var(--border)" }}>
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-[12px] font-semibold text-foreground">Select Model</span>
-                  <span className="text-[10px] text-muted-foreground">
-                    {loading ? "loading" : `${filteredCount} models \u00b7 ${providers.length} providers`}
-                  </span>
-                  {!loading && providers.length > 0 && (
-                    <button
-                      onClick={() => openProvidersDialog()}
-                      className="inline-flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
-                      title="Providers & privacy settings"
-                    >
-                      <IcoSettings />
-                      <span className="hidden sm:inline">Providers</span>
-                    </button>
-                  )}
-                  {!loading && providers.length > 0 && (
-                    <button
-                      onClick={() => refreshProviders()}
-                      disabled={refreshing}
-                      className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-60"
-                       title={refreshing ? "syncing" : `${syncedLabel} \u00b7 ${liveCount}/${totalCount} providers live \u00b7 click to re-sync`}
-                    >
-                      <IcoRefresh spinning={refreshing} />
-                      <span className="hidden md:inline">{refreshing ? "syncing" : syncedLabel || "sync"}</span>
-                    </button>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-[12px] font-semibold text-foreground shrink-0">Select</span>
+                  <button
+                    onClick={() => setCondensedView(false)}
+                    className={`text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors shrink-0 ${!condensedView ? "bg-foreground/10 border-foreground/30 text-foreground font-medium" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+                  >
+                    Providers
+                  </button>
+                  <button
+                    onClick={() => setCondensedView(true)}
+                    className={`text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors shrink-0 ${condensedView ? "bg-foreground/10 border-foreground/30 text-foreground font-medium" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+                  >
+                    Models
+                  </button>
+                  {!condensedView && !loading && providers.length > 0 && (
+                    <>
+                      <button
+                        onClick={() => openProvidersDialog()}
+                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+                        title="Providers & privacy settings"
+                      >
+                        <IcoSettings />
+                        <span className="hidden sm:inline">Privacy</span>
+                      </button>
+                      <button
+                        onClick={() => refreshProviders()}
+                        disabled={refreshing}
+                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-60 shrink-0"
+                         title={refreshing ? "syncing" : `${syncedLabel} \u00b7 ${liveCount}/${totalCount} providers live \u00b7 click to re-sync`}
+                      >
+                        <IcoRefresh spinning={refreshing} />
+                        <span className="hidden md:inline">{refreshing ? "syncing" : syncedLabel || "sync"}</span>
+                      </button>
+                    </>
                   )}
                 </div>
 
@@ -579,7 +985,7 @@ export function ModelSelectOverlay() {
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="search"
-                      className="pl-8 pr-3 h-7 w-40 sm:w-52 text-[12px] bg-muted/20 border border-border/50 rounded-lg outline-none focus:border-ring/40 focus:bg-muted/40 transition-colors placeholder:text-muted-foreground/50"
+                      className="pl-8 pr-3 h-7 w-32 sm:w-44 text-[12px] bg-muted/20 border border-border/50 rounded-lg outline-none focus:border-ring/40 focus:bg-muted/40 transition-colors placeholder:text-muted-foreground/50"
                     />
                   </div>
 
@@ -634,18 +1040,35 @@ export function ModelSelectOverlay() {
                       clear
                     </button>
                   )}
+                  {condensedView && (
+                    <span className="text-[9px] text-muted-foreground/50 ml-auto shrink-0 tabular-nums">
+                      {condensedModels.length} models
+                    </span>
+                  )}
+                  {!condensedView && !loading && (
+                    <span className="text-[9px] text-muted-foreground/50 ml-auto shrink-0 tabular-nums">
+                      {filteredCount} models
+                    </span>
+                  )}
                 </div>
               )}
 
               <div className="flex-1 min-h-0 overflow-y-auto">
-                {loading && (
+                {!condensedView && loading && (
                   <div className="flex items-center justify-center h-full">
                     <span className="inline-block size-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
                     <span className="ml-2 text-[11px] text-muted-foreground">fetching</span>
                   </div>
                 )}
 
-                {error && (
+                {condensedView && condensedLoading && (
+                  <div className="flex items-center justify-center h-full">
+                    <span className="inline-block size-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
+                    <span className="ml-2 text-[11px] text-muted-foreground">fetching</span>
+                  </div>
+                )}
+
+                {!condensedView && error && (
                   <div className="flex flex-col items-center justify-center h-full gap-2">
                     <span className="text-[11px] text-destructive">{error}</span>
                     <button
@@ -657,7 +1080,7 @@ export function ModelSelectOverlay() {
                   </div>
                 )}
 
-                {!loading && !error && (
+                {!condensedView && !loading && !error && (
                   <div className="p-3">
                     <div className="flex flex-wrap items-start gap-3">
                       {providers.map((p) => (
@@ -673,6 +1096,27 @@ export function ModelSelectOverlay() {
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {condensedView && !condensedLoading && (
+                  <div className="p-3 relative">
+                    <CondensedList
+                      models={condensedModels}
+                      searchQuery={searchQuery}
+                      activeFilters={activeFilters}
+                      contextMin={contextMin}
+                      selectedModelId={selectedModelId}
+                      onSelect={handleCondensedSelect}
+                      onReorder={setReorderLogical}
+                    />
+                    {reorderModel && reorderLogical && (
+                      <ReorderPopover
+                        logical={reorderLogical}
+                        model={reorderModel}
+                        onClose={() => setReorderLogical(null)}
+                      />
+                    )}
                   </div>
                 )}
               </div>
