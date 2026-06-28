@@ -393,8 +393,8 @@ function ProviderBox({
           </div>
         ) : (
           <>
-            {matched.map((m) => (
-              <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m, provider.name)} />
+{matched.map((m) => (
+              <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id && (!condensedView ? selectedProviderName === provider.name : true)} onSelect={() => onSelect(m, provider.name)} />
             ))}
             {hasDimmed && (
               <>
@@ -408,12 +408,12 @@ function ProviderBox({
                   >
                     {"\u25b8"}
                   </span>
-                  <span className="text-[9px] leading-none">
+                  <span className="text=[9px] leading-none">
                     {showDimmed ? `Hide ${dimmed.length} dimmed` : `Show ${dimmed.length} dimmed`}
                   </span>
                 </button>
                 {showDimmed && dimmed.map((m) => (
-                  <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m, provider.name)} dimmed />
+                  <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id && (!condensedView ? selectedProviderName === provider.name : true)} onSelect={() => onSelect(m, provider.name)} dimmed />
                 ))}
               </>
             )}
@@ -796,6 +796,7 @@ export function ModelSelectOverlay() {
     syncedAt,
     syncStatus,
     selectedModelId,
+    selectedProviderName,
     overlayOpen,
     searchQuery,
     activeFilters,
