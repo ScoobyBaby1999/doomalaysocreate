@@ -667,5 +667,6 @@ async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: di
     except httpx.HTTPError as e:
         duration = round(time.monotonic() - t_call, 2)
         log_event("call_fail", **log_base, http_status=status,
-                  fail_code="http", reason=repr(e)[:300], duration_s=duration)
+                  fail_code="http", reason=repr(e)[:300], duration_s=duration,
+                  url=p.url[:120] if p.url else None)
         raise ProviderError(f"http:{e!r}")
