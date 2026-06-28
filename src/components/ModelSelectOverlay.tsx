@@ -559,11 +559,9 @@ function persistLocal(key: string, value: unknown) {
 function ReorderPopover({
   logical,
   model,
-  onClose,
 }: {
   logical: string;
   model: CondensedModel;
-  onClose: () => void;
 }) {
   const store = useModelStore.getState();
   const ordered = store.getOrderedHosts(logical, model.hosts);
@@ -1114,7 +1112,6 @@ export function ModelSelectOverlay() {
                       <ReorderPopover
                         logical={reorderLogical}
                         model={reorderModel}
-                        onClose={() => setReorderLogical(null)}
                       />
                     )}
                   </div>
