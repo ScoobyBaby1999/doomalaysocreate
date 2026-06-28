@@ -1065,6 +1065,12 @@ class Handler(BaseHTTPRequestHandler):
                 "categories": debug_log.list_log_categories(),
             })
             return
+        if route == "/api/debug/diagnose":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            self._handle_debug_diagnose()
+            return
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
             self._conscious_dispatch("GET")
@@ -1208,9 +1214,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, panel.metrics.aggregates(profile))
             return
         # --- Provider model catalog (public, no auth) ---
-        if route == "/api/models":
+        if route == "/api/models" or route == "/api/models/condensed":
             from urllib.parse import parse_qs
-            from provider_sync.catalog import build_provider_catalog
+            from provider_sync.catalog import build_provider_catalog, build_condensed_catalog
+            if route == "/api/models/condensed":
+                result = build_condensed_catalog()
+                self._send_json(200, result)
+                return
             q = parse_qs(urlsplit(self.path).query)
             refresh = q.get("refresh", ["0"])[0] in ("1", "true", "yes")
             result = build_provider_catalog(force_refresh=refresh)
@@ -1680,10 +1690,14 @@ class Handler(BaseHTTPRequestHandler):
         login because the rotation secret isn't in the user's localStorage."""
         if not self._auth_ok():
             if not _auth_configured():
-                self._send_json(503, {"error": "no auth secret configured on server "
-                                               "(set CRITIQUE_TOKEN or CRITIQUE_ROTATION_SECRET)"})
+                err = "no auth secret configured on server (set CRITIQUE_TOKEN or CRITIQUE_ROTATION_SECRET)"
+                self._send_json(503, {"error": err})
             else:
-                self._send_json(401, {"error": "missing or invalid bearer token"})
+                err = "missing or invalid bearer token"
+                self._send_json(401, {"error": err})
+            from debug_log import log_entry
+            log_entry(level="WARN", cat="auth", fn="_auth_and_body", msg=err,
+                      data={"path": self.path, "method": self.command})
             return None
         return self._read_json_body()
 
@@ -1829,7 +1843,11 @@ class Handler(BaseHTTPRequestHandler):
                     payload = jwt_auth.verify_jwt(x_jwt, allow_any_aud=True)
 
         if not payload:
-            self._send_json(401, {"error": "invalid or expired session token"})
+            err = "invalid or expired session token"
+            self._send_json(401, {"error": err})
+            from debug_log import log_entry
+            log_entry(level="WARN", cat="auth", fn="_require_user", msg=err,
+                      data={"path": self.path, "method": self.command})
             return None
 
         user_id = payload["sub"]
@@ -2318,6 +2336,40 @@ class Handler(BaseHTTPRequestHandler):
         workspaces = github_integration.list_workspaces(user_id)
         self._send_json(200, {"workspaces": workspaces})
 
+    def _handle_debug_diagnose(self) -> None:
+        """AI-readable summary of recent system health and errors."""
+        import debug_log
+        logs = debug_log.get_recent_logs(tail=200)
+        
+        errors = [l for l in logs if l.get("level") in ("ERROR", "WARN")]
+        http_errors = [l for l in logs if l.get("cat") == "http" and l.get("data", {}).get("status", 200) >= 400]
+        
+        # Group identical error messages to find patterns
+        patterns = {}
+        for e in errors:
+            msg = e.get("msg", "unknown error")
+            patterns[msg] = patterns.get(msg, 0) + 1
+            
+        sorted_patterns = sorted(patterns.items(), key=lambda x: x[1], reverse=True)
+        
+        health = "OK"
+        if errors:
+            health = "DEGRADED" if len(errors) < 10 else "CRITICAL"
+            
+        self._send_json(200, {
+            "system_status": health,
+            "total_recent_logs": len(logs),
+            "error_count": len(errors),
+            "http_failure_count": len(http_errors),
+            "top_issues": [
+                {"issue": msg, "count": count} for msg, count in sorted_patterns[:5]
+            ],
+            "recent_critical_events": [
+                {"ts": l.get("ts"), "msg": l.get("msg"), "cat": l.get("cat")}
+                for l in errors[-5:]
+            ]
+        })
+
     def _handle_workspace_get(self, ws_id: str) -> None:
         user_id = self._require_user()
         if not user_id:
@@ -2629,18 +2681,45 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, result)
 
     def do_POST(self) -> None:
+        start = time.time()
+        self._last_status = 200
+        error_msg = None
         try:
             self._do_POST()
         except Exception as exc:  # noqa: BLE001 — last-resort guard (same as do_GET)
             try:
+                error_msg = repr(exc)[:300]
                 log_event("do_POST_unhandled", path=self.path,
-                          error=repr(exc)[:300])
+                          error=error_msg)
                 self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
             except Exception:
                 pass
+        finally:
+            self._log_request("POST", self.path, self._last_status, (time.time() - start) * 1000, error_msg)
 
     def _do_POST(self) -> None:
         route = self.path.rstrip("/")
+        # --- Debug log ingestion (auth-gated) ---
+        if route == "/api/debug/log":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            payload = self._read_json_body()
+            if not payload:
+                self._send_json(400, {"error": "request body is required"})
+                return
+            
+            from debug_log import log_entry
+            log_entry(
+                level=payload.get("level", "INFO"),
+                cat=payload.get("cat", "frontend"),
+                fn=payload.get("fn", "browser"),
+                msg=payload.get("msg", ""),
+                data=payload.get("data"),
+                ms=payload.get("ms")
+            )
+            self._send_json(200, {"ok": True})
+            return
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
             self._conscious_dispatch("POST")
@@ -2772,15 +2851,21 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(201, {"saved": summary})
 
     def do_DELETE(self) -> None:
+        start = time.time()
+        self._last_status = 200
+        error_msg = None
         try:
             self._do_DELETE()
         except Exception as exc:  # noqa: BLE001 — last-resort guard (same as do_GET)
             try:
+                error_msg = repr(exc)[:300]
                 log_event("do_DELETE_unhandled", path=self.path,
-                          error=repr(exc)[:300])
+                          error=error_msg)
                 self._send_json(500, {"error": f"internal error: {type(exc).__name__}"})
             except Exception:
                 pass
+        finally:
+            self._log_request("DELETE", self.path, self._last_status, (time.time() - start) * 1000, error_msg)
 
     def _do_DELETE(self) -> None:
         from urllib.parse import urlsplit

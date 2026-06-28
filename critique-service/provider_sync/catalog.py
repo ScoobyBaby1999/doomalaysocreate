@@ -618,6 +618,102 @@ def build_provider_catalog(force_refresh: bool = False) -> dict[str, Any]:
         return result
 
 
+def build_condensed_catalog() -> dict[str, Any]:
+    """Build a de-duplicated model catalog grouped by logical model family.
+
+    Returns a CondensedModel[] list where each entry represents one logical
+    model (e.g. "nemotron-ultra") with all hosts that serve it, API key
+    availability, and sync status. Used by the frontend condensed tab.
+    """
+    catalog = _load_catalog()
+    display_map = _PROVIDER_DISPLAY
+    _, family_registry = _fetch_openrouter_family()
+
+    # Load logical models catalog
+    try:
+        with open(MODELS_CATALOG_PATH, encoding="utf-8") as f:
+            models_data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        log_event("condensed_catalog_load_error", error=str(e)[:500])
+        return {"models": []}
+    logical_models = models_data.get("logical_models", {})
+
+    # Check API key presence for each provider
+    provider_keys: dict[str, bool] = {}
+    for entry in catalog:
+        name = entry["name"]
+        env_vars = entry.get("env_var", [])
+        if isinstance(env_vars, str):
+            env_vars = [env_vars]
+        has_key = all(os.environ.get(v, "").strip() for v in env_vars if v)
+        provider_keys[name] = has_key
+
+    # Get sync status from Panel's cache
+    from provider_sync import get_panel_sync_cache
+    sync_cache = get_panel_sync_cache()
+    live_providers: set[str] = set()
+    if sync_cache:
+        live_providers = set(sync_cache.keys())
+
+    # Build condensed model entries
+    condensed: list[dict[str, Any]] = []
+    for logical in sorted(logical_models.keys()):
+        spec = logical_models[logical]
+        if not isinstance(spec, dict):
+            continue
+        family: str = spec.get("family", logical) or logical
+        candidates: list[dict[str, Any]] = spec.get("candidates", [])
+        if not candidates:
+            continue
+
+        fam_meta = family_registry.get(family, {})
+        hosts: list[dict[str, Any]] = []
+        for i, cand in enumerate(candidates):
+            prov_name = cand["provider"]
+            model_id = cand["model"]
+            ctx = cand.get("ctx", 0) or 0
+            disp = display_map.get(prov_name, {})
+            hosts.append({
+                "provider": prov_name,
+                "providerDisplayName": disp.get("displayName", prov_name),
+                "icon": disp.get("icon", "Box"),
+                "color": disp.get("color", "#888"),
+                "modelId": f"{prov_name}/{model_id}",
+                "contextLength": ctx,
+                "hasApiKey": provider_keys.get(prov_name, False),
+                "syncedLive": prov_name in live_providers,
+                "defaultPriority": i + 1,
+            })
+
+        # Merge attributes from family registry
+        attributes: dict[str, Any] = {}
+        caps = fam_meta.get("capabilities")
+        if caps:
+            attributes["capabilities"] = caps
+        bm = fam_meta.get("benchmarks")
+        if bm:
+            attributes["benchmarks"] = bm
+        pricing = fam_meta.get("pricing")
+        if pricing:
+            attributes["pricing"] = pricing
+
+        ctx_max = max((h["contextLength"] for h in hosts), default=0)
+        display_name = fam_meta.get("display_name") or derive_display_name(logical)
+
+        entry: dict[str, Any] = {
+            "logical": logical,
+            "displayName": display_name,
+            "family": family,
+            "contextLength": ctx_max,
+            "hosts": hosts,
+        }
+        if attributes:
+            entry["attributes"] = attributes
+        condensed.append(entry)
+
+    return {"models": condensed}
+
+
 def _load_catalog() -> list[dict]:
     try:
         with open(CATALOG_PATH, encoding="utf-8") as f:
