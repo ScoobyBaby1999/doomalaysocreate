@@ -643,7 +643,7 @@ def build_condensed_catalog(force_refresh: bool = False) -> dict[str, Any]:
         try:
             result = _build_condensed_catalog_inner()
         except Exception as e:
-            log_event("condensed_catalog_error", error=str(e)[:1000])
+            log_event("condensed_catalog_error", error=repr(e)[:1000])
             return {"models": []}
 
         _condensed_cache = result
@@ -655,7 +655,13 @@ def _build_condensed_catalog_inner() -> dict[str, Any]:
     """Core logic for building the condensed catalog (no caching wrapper)."""
     catalog = _load_catalog()
     display_map = _PROVIDER_DISPLAY
-    _, family_registry = _fetch_openrouter_family()
+
+    # Fetch OpenRouter family registry (non-fatal if it fails)
+    family_registry: dict[str, dict[str, Any]] = {}
+    try:
+        _, family_registry = _fetch_openrouter_family()
+    except Exception as e:
+        log_event("condensed_catalog_or_error", error=repr(e)[:500])
 
     # Load logical models catalog
     try:
@@ -706,7 +712,7 @@ def _build_condensed_catalog_inner() -> dict[str, Any]:
                 "providerDisplayName": disp.get("displayName", prov_name),
                 "icon": disp.get("icon", "Box"),
                 "color": disp.get("color", "#888"),
-                "modelId": f"{prov_name}/{model_id}",
+                "modelId": model_id,
                 "contextLength": ctx,
                 "hasApiKey": provider_keys.get(prov_name, False),
                 "syncedLive": prov_name in live_providers,
@@ -739,6 +745,7 @@ def _build_condensed_catalog_inner() -> dict[str, Any]:
             entry["attributes"] = attributes
         condensed.append(entry)
 
+    log_event("condensed_catalog_built", count=len(condensed))
     return {"models": condensed}
 
 
