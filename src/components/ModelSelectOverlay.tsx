@@ -300,7 +300,7 @@ function ProviderBox({
 }: {
   provider: ProviderGroup;
   selectedModelId: string | null;
-  onSelect: (model: ProviderModel) => void;
+  onSelect: (model: ProviderModel, providerName: string) => void;
   searchQuery: string;
   activeFilters: string[];
   contextMin: number;
@@ -394,7 +394,7 @@ function ProviderBox({
         ) : (
           <>
             {matched.map((m) => (
-              <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} />
+              <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m, provider.name)} />
             ))}
             {hasDimmed && (
               <>
@@ -413,7 +413,7 @@ function ProviderBox({
                   </span>
                 </button>
                 {showDimmed && dimmed.map((m) => (
-                  <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m)} dimmed />
+                  <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id} onSelect={() => onSelect(m, provider.name)} dimmed />
                 ))}
               </>
             )}
@@ -855,11 +855,10 @@ export function ModelSelectOverlay() {
   }, [overlayOpen]);
 
   const handleSelect = useCallback(
-    (model: ProviderModel) => {
-      const provider = providers.find((p) => p.models.some((m) => m.id === model.id));
-      selectModel(model.id, provider?.name ?? "");
+    (model: ProviderModel, providerName: string) => {
+      selectModel(model.id, providerName);
     },
-    [providers, selectModel]
+    [selectModel]
   );
 
   const handleCondensedSelect = useCallback(
