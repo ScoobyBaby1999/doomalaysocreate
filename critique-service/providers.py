@@ -275,6 +275,9 @@ def make_provider_registry() -> list[provider]:
         url = entry["base_url"]
         for var in requires:
             url = url.replace("{" + var + "}", os.environ.get(var, "").strip())
+        #       Log resolved URL (masked) so we can diagnose Cloudflare ConnectError
+        masked_url = url.replace(api_key, "***API_KEY***") if api_key else url
+        log_event("provider_url_resolved", provider=name, url=masked_url[:120])
         limits = entry.get("limits", {}) or {}
         privacy = entry.get("privacy", {}) or {}
         providers.append(provider(

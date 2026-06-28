@@ -508,7 +508,8 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
             data = response.json()
         except ValueError as e:
             log_event("call_fail", **log_base, http_status=status,
-                      fail_code="json", reason=f"non-json: {e!r}", duration_s=duration)
+                      fail_code="json", reason=f"non-json: {e!r}", duration_s=duration,
+                      url=p.url[:120] if p.url else None)
             raise ProviderError(f"json:{e!r}")
 
         # openrouter quirk: upstream errors arrive as http 200 with a body
@@ -556,7 +557,8 @@ async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict
     except httpx.HTTPError as e:
         duration = round(time.monotonic() - t_call, 2)
         log_event("call_fail", **log_base, http_status=status,
-                  fail_code="http", reason=repr(e)[:300], duration_s=duration)
+                  fail_code="http", reason=repr(e)[:300], duration_s=duration,
+                  url=p.url[:120] if p.url else None)
         raise ProviderError(f"http:{e!r}")
 
 

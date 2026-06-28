@@ -106,8 +106,8 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
     """Build open model entries from providers_catalog.json dynamically.
 
     Each configured provider contributes ALL its models (env-var-gated), so
-    every model from NVIDIA, OpenCode Zen/Go etc. is available in the agent
-    without hardcoding model names.
+    every model from NVIDIA, Cloudflare, PrivateMode AI etc. is available in
+    the agent without hardcoding model names.
     """
     global _open_models_cache
     if _open_models_cache is not None:
@@ -124,14 +124,24 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
 
     for prov in data.get("providers", []):
         name = prov["name"]
-        cfg = _PROVIDER_AGENT_MAP.get(name)
-        if not cfg:
+        env_var = prov.get("env_var", "")
+        if isinstance(env_var, list):
+            env_var = env_var[0] if env_var else ""
+        if not env_var:
             continue
-        env_key, base_url = cfg
+
+        # Resolve {VAR} placeholders in base_url from the environment.
+        base_url = prov.get("base_url", "")
+        for var in prov.get("requires", []):
+            base_url = base_url.replace("{" + var + "}", os.environ.get(var, "").strip())
+        # LiteLLM appends /chat/completions for openai/ models, so strip it.
+        if base_url.endswith("/chat/completions"):
+            base_url = base_url[:-len("/chat/completions")]
+
         for model_id in prov.get("models", []):
             litellm_model = f"openai/{model_id}"
             label = f"{model_id} ({prov.get('displayName', name)})"
-            entries.append((env_key, label, litellm_model, base_url))
+            entries.append((env_var, label, litellm_model, base_url or None))
 
     _open_models_cache = entries
     return entries
@@ -223,6 +233,14 @@ def agent_models() -> list[dict]:
             out[0]["default"] = True
     return out
 
+
+def _model_key_env(model: str) -> str | None:
+    """Env var name for the API key of a chosen open model."""
+    model_last = model.split("/")[-1]
+    for env_key, _label, m, _base in _build_open_models():
+        if m == model or m.split("/")[-1] == model_last:
+            return env_key
+    return None
 
 def _model_base_url(model: str) -> str | None:
     """base_url for a chosen open model (matches the dynamic model list)."""

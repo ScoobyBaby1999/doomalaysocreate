@@ -659,13 +659,16 @@ def build_condensed_catalog(force_refresh: bool = False) -> dict[str, Any]:
 
 def _build_condensed_catalog_inner() -> dict[str, Any]:
     """Core logic for building the condensed catalog (no caching wrapper)."""
+    log_event("condensed_catalog_build_start")
     catalog = _load_catalog()
+    log_event("condensed_catalog_loaded_providers", count=len(catalog), catalog_path=str(MODELS_CATALOG_PATH))
     display_map = _PROVIDER_DISPLAY
 
     # Fetch OpenRouter family registry (non-fatal if it fails)
     family_registry: dict[str, dict[str, Any]] = {}
     try:
         _, family_registry = _fetch_openrouter_family()
+        log_event("condensed_catalog_family_fetched", size=len(family_registry))
     except Exception as e:
         log_event("condensed_catalog_or_error", error=repr(e)[:500])
 
@@ -677,6 +680,7 @@ def _build_condensed_catalog_inner() -> dict[str, Any]:
         log_event("condensed_catalog_load_error", error=str(e)[:500])
         return {"models": []}
     logical_models = models_data.get("logical_models", {})
+    log_event("condensed_catalog_logical_loaded", count=len(logical_models))
 
     # Check API key presence for each provider
     provider_keys: dict[str, bool] = {}
