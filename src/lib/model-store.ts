@@ -230,7 +230,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
 
   fetchCondensedModels: async () => {
     const { baseUrl, condensedFetchedAt } = get();
-    if (!baseUrl) { set({ condensedLoading: false }); return; }
+    if (baseUrl == null) { set({ condensedLoading: false }); return; }
     const CACHE_TTL = 10 * 60 * 1000;
     if (condensedFetchedAt && Date.now() - condensedFetchedAt < CACHE_TTL) return;
     set({ condensedLoading: true });
