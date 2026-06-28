@@ -36,6 +36,10 @@ _cache: dict[str, Any] | None = None
 _cache_at: float = 0
 _cache_lock = threading.Lock()
 
+_condensed_cache: dict[str, Any] | None = None
+_condensed_cache_at: float = 0
+_condensed_cache_lock = threading.Lock()
+
 # Reverse mapping: candidate display name (author-stripped) → logical catalog key.
 # Built once from models_catalog.json so _build_provider_models outputs logical
 # keys that resolve_candidates can find.
@@ -618,13 +622,37 @@ def build_provider_catalog(force_refresh: bool = False) -> dict[str, Any]:
         return result
 
 
-def build_condensed_catalog() -> dict[str, Any]:
+def build_condensed_catalog(force_refresh: bool = False) -> dict[str, Any]:
     """Build a de-duplicated model catalog grouped by logical model family.
 
-    Returns a CondensedModel[] list where each entry represents one logical
-    model (e.g. "nemotron-ultra") with all hosts that serve it, API key
-    availability, and sync status. Used by the frontend condensed tab.
+    Caches the result in-process for ``_CACHE_TTL_S`` (10 minutes), same
+    pattern as ``build_provider_catalog``.  Returns a CondensedModel[] list
+    where each entry represents one logical model (e.g. "nemotron-ultra")
+    with all hosts that serve it, API key availability, and sync status.
     """
+    global _condensed_cache, _condensed_cache_at
+
+    now = time.time()
+    if not force_refresh and _condensed_cache is not None and now - _condensed_cache_at < _CACHE_TTL_S:
+        return _condensed_cache
+
+    with _condensed_cache_lock:
+        if _condensed_cache is not None and not force_refresh and now - _condensed_cache_at < _CACHE_TTL_S:
+            return _condensed_cache
+
+        try:
+            result = _build_condensed_catalog_inner()
+        except Exception as e:
+            log_event("condensed_catalog_error", error=str(e)[:1000])
+            return {"models": []}
+
+        _condensed_cache = result
+        _condensed_cache_at = time.time()
+        return result
+
+
+def _build_condensed_catalog_inner() -> dict[str, Any]:
+    """Core logic for building the condensed catalog (no caching wrapper)."""
     catalog = _load_catalog()
     display_map = _PROVIDER_DISPLAY
     _, family_registry = _fetch_openrouter_family()
