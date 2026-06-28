@@ -293,6 +293,8 @@ function ModelRow({
 function ProviderBox({
   provider,
   selectedModelId,
+  selectedProviderName,
+  condensedView,
   onSelect,
   searchQuery,
   activeFilters,
@@ -300,6 +302,8 @@ function ProviderBox({
 }: {
   provider: ProviderGroup;
   selectedModelId: string | null;
+  selectedProviderName: string | null;
+  condensedView: boolean;
   onSelect: (model: ProviderModel, providerName: string) => void;
   searchQuery: string;
   activeFilters: string[];
@@ -1105,6 +1109,8 @@ export function ModelSelectOverlay() {
                           <ProviderBox
                             provider={p}
                             selectedModelId={selectedModelId}
+                            selectedProviderName={selectedProviderName}
+                            condensedView={condensedView}
                             onSelect={handleSelect}
                             searchQuery={searchQuery}
                             activeFilters={activeFilters}
