@@ -39,7 +39,7 @@ interface ModelSelectionState {
   setBaseUrl: (url: string) => void;
   fetchProviders: () => Promise<void>;
   refreshProviders: () => Promise<void>;
-  selectModel: (modelId: string, providerName: string) => void;
+  selectModel: (modelId: string, providerName: string, slotId?: string) => void;
   clearSelection: () => void;
   toggleFocusedMode: () => void;
   openOverlay: () => void;
