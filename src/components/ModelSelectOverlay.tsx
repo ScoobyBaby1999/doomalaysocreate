@@ -969,6 +969,26 @@ export function ModelSelectOverlay() {
                       </button>
                     </>
                   )}
+                  {condensedView && !condensedLoading && (
+                    <>
+                      <button
+                        onClick={() => openProvidersDialog()}
+                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+                        title="Providers & privacy settings"
+                      >
+                        <IcoSettings />
+                        <span className="hidden sm:inline">Privacy</span>
+                      </button>
+                      <button
+                        onClick={() => fetchCondensedModels()}
+                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+                        title="Refresh condensed catalog"
+                      >
+                        <IcoRefresh />
+                        <span className="hidden md:inline">refresh</span>
+                      </button>
+                    </>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -1078,9 +1098,9 @@ export function ModelSelectOverlay() {
 
                 {!condensedView && !loading && !error && (
                   <div className="p-3">
-                    <div className="flex flex-wrap items-start gap-3">
+                    <div className="flex flex-col gap-3">
                       {providers.map((p) => (
-                        <div key={p.name} className="w-full md:w-[calc(50%-6px)]">
+                        <div key={p.name} className="w-full">
                           <ProviderBox
                             provider={p}
                             selectedModelId={selectedModelId}
