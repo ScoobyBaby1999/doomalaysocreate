@@ -1103,10 +1103,10 @@ export function ModelSelectOverlay() {
                 )}
 
                 {!condensedView && !loading && !error && (
-                  <div className="p-3">
-                    <div className="flex flex-col gap-3">
+                  <div className="p-3 overflow-y-auto max-h-full">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 auto-rows-auto">
                       {providers.map((p) => (
-                        <div key={p.name} className="w-full">
+                        <div key={p.name} className="min-w-0">
                           <ProviderBox
                             provider={p}
                             selectedModelId={selectedModelId}

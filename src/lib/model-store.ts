@@ -13,6 +13,8 @@ interface ModelSelectionState {
   syncStatus: SyncStatusEntry[];
 
   baseUrl: string;
+  lastFetchedAt: number | null;
+  cacheBaseUrl: string | null;
 
   selectedModelId: string | null;
   selectedProviderName: string | null;
@@ -91,6 +93,8 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   syncStatus: [],
 
   baseUrl: "",
+  lastFetchedAt: null,
+  cacheBaseUrl: null,
 
   selectedModelId: loadPersisted<string | null>(`${PREFIX}.selectedModelId`, null),
   selectedProviderName: loadPersisted<string | null>(`${PREFIX}.selectedProviderName`, null),
@@ -114,8 +118,12 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   setBaseUrl: (url: string) => set({ baseUrl: url }),
 
   fetchProviders: async () => {
-    const baseUrl = get().baseUrl;
+    const { baseUrl, lastFetchedAt, cacheBaseUrl } = get();
     if (baseUrl == null) { set({ loading: false }); return; }
+    const CACHE_TTL = 5 * 60 * 1000; // 5 min
+    if (cacheBaseUrl === baseUrl && lastFetchedAt && Date.now() - lastFetchedAt < CACHE_TTL) {
+      return; // cache fresh
+    }
     set({ loading: true, error: null });
     try {
       const res = await fetch(`${baseUrl}/api/models`);
@@ -127,6 +135,8 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
         syncedAt: data.syncedAt ?? null,
         syncStatus: data.syncStatus ?? [],
         loading: false,
+        lastFetchedAt: Date.now(),
+        cacheBaseUrl: baseUrl,
       });
     } catch (err) {
       set({
@@ -139,7 +149,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   refreshProviders: async () => {
     const baseUrl = get().baseUrl;
     if (baseUrl == null) { set({ refreshing: false }); return; }
-    set({ refreshing: true });
+    set({ refreshing: true, lastFetchedAt: null }); // bypass cache
     try {
       const res = await fetch(`${baseUrl}/api/models?refresh=1`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
