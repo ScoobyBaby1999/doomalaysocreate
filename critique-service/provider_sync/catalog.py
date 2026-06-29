@@ -447,6 +447,31 @@ def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[s
             result[name] = {m.split("/")[-1] if "/" in m else m: m for m in synced}
             actual_live.add(name)
 
+    # Docs-only fallback for providers whose sync failed but can list models
+    # without an API key (requires_auth=False). Runs a fresh fetch_models()
+    # with api_key=None so the result is independent of registration.
+    for entry in catalog_entries:
+        name = entry["name"]
+        if name in actual_live:
+            continue
+        try:
+            sync_class = get_provider_sync_class(name)
+        except Exception:
+            sync_class = None
+        if not sync_class or getattr(sync_class, "requires_auth", True):
+            continue
+        try:
+            sync_instance = sync_class(api_key=None)
+            models = sync_instance.fetch_models()
+            if models:
+                result[name] = {
+                    m.id.split("/")[-1] if "/" in m.id else m.id: m.id
+                    for m in models
+                }
+                actual_live.add(name)
+        except Exception as e:
+            log_event(f"sync_docs_fallback_error", provider=name, error=str(e)[:500])
+
     return result, actual_live
 
 
