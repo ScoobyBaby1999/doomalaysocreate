@@ -451,6 +451,20 @@ def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[s
         else:
             static = entry.get("models", [])
             result[name] = {m.split("/")[-1] if "/" in m else m: m for m in static}
+
+    # Cloudflare docs-only fallback: scrape the docs page for model IDs even
+    # when Cloudflare isn't registered as a provider (no CF_API_TOKEN/CF_ACCOUNT_ID).
+    if "cloudflare" not in actual_live:
+        try:
+            from provider_sync.cloudflare import CloudflareSync
+            cf = CloudflareSync(api_key=None)
+            cf_models = cf._fetch_from_docs()
+            if cf_models:
+                result["cloudflare"] = {m.id.split("/")[-1] if "/" in m.id else m.id: m.id for m in cf_models}
+                actual_live.add("cloudflare")
+        except Exception as e:
+            log_event("cloudflare_docs_fallback_error", error=str(e)[:500])
+
     return result, actual_live
 
 

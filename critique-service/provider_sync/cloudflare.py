@@ -20,9 +20,9 @@ class CloudflareSync(BaseSync):
     def __init__(self, api_key: str | None = None, **kwargs) -> None:
         super().__init__(api_key, **kwargs)
         self.account_id = kwargs.get("account_id") or kwargs.get("cf_account_id") or os.environ.get("CF_ACCOUNT_ID", "")
-        if not self.account_id:
-            raise ValueError("CF_ACCOUNT_ID required for Cloudflare sync")
-        self.models_url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/models/search"
+        self.models_url = None
+        if self.account_id:
+            self.models_url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/models/search"
         self.hide_experimental = kwargs.get("hide_experimental", False)
         self.include_deprecated = kwargs.get("include_deprecated", False)
 
@@ -38,6 +38,8 @@ class CloudflareSync(BaseSync):
         return models
 
     def _fetch_from_api(self) -> list[ModelInfo]:
+        if not self.models_url:
+            return []
         headers = self._build_auth_header()
         models: list[ModelInfo] = []
         seen: set[str] = set()
