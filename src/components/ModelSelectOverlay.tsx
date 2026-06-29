@@ -428,162 +428,39 @@ function ProviderBox({
   );
 }
 
-function ProviderBadge({
-  host,
-  priority,
-  onClick,
-}: {
-  host: CondensedHost;
-  priority: number;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[9px] leading-none transition-colors cursor-pointer hover:brightness-110"
-      style={{
-        borderColor: host.hasApiKey ? `${host.color}50` : "var(--border)",
-        backgroundColor: host.hasApiKey ? `${host.color}12` : "transparent",
-        color: host.hasApiKey ? host.color : "var(--muted-foreground)",
-        opacity: host.hasApiKey ? 1 : 0.4,
-      }}
-      title={`${host.providerDisplayName}${host.hasApiKey ? "" : " (no API key)"}`}
-    >
-      <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: host.color }} />
-      <span className="truncate max-w-[64px]">{host.providerDisplayName}</span>
-      <span
-        className="inline-flex items-center justify-center size-3 rounded-full text-[7px] font-bold leading-none"
-        style={{ backgroundColor: `${host.color}30`, color: host.color }}
-      >
-        {priority}
-      </span>
-    </button>
-  );
-}
-
 function CondensedModelRow({
   model,
   isSelected,
   onSelect,
-  onReorder,
+  expanded,
+  onToggleExpand,
   dimmed,
 }: {
   model: CondensedModel;
   isSelected: boolean;
   onSelect: () => void;
-  onReorder: (logical: string) => void;
+  expanded: boolean;
+  onToggleExpand: () => void;
   dimmed?: boolean;
 }) {
   const segs = model.attributes ? attributeSegments(model.attributes) : null;
   const note = model.attributes?.note;
   const hasSub = !!(segs || note);
-
-  return (
-    <div
-      className={`flex flex-col w-full text-left rounded px-1.5 transition-colors duration-100 ${dimmed ? "" : ""}`}
-      style={{ paddingTop: 3, paddingBottom: hasSub ? 3 : 3 }}
-    >
-      <span className="flex items-center w-full" style={{ height: 20 }}>
-        <button
-          onClick={onSelect}
-          className="flex items-center flex-1 min-w-0 cursor-pointer text-left"
-        >
-          <span
-            className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
-            style={{
-              width: 14,
-              height: 14,
-              fontSize: 0,
-              border: isSelected ? "none" : "1.5px solid var(--border)",
-              backgroundColor: isSelected ? "var(--primary)" : "transparent",
-            }}
-          >
-            {isSelected && <IcoCheck />}
-          </span>
-
-          <span
-            className={`text-[11px] leading-none truncate flex-1 ${isSelected ? "text-primary font-medium" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
-            title={model.logical}
-          >
-            {model.displayName}
-          </span>
-
-          <span className="flex-shrink-0 mr-2 text-[9px] text-muted-foreground tabular-nums">
-            {fmtCtx(model.contextLength)}
-          </span>
-        </button>
-
-        <div className="flex items-center gap-1 flex-shrink-0 overflow-hidden" style={{ maxWidth: 180 }}>
-          {getOrderedHostsForModel(model).map((host, i) => (
-            <ProviderBadge
-              key={`${host.provider}-${host.modelId}`}
-              host={host}
-              priority={i + 1}
-              onClick={() => onReorder(model.logical)}
-            />
-          ))}
-        </div>
-      </span>
-
-      {hasSub && (
-        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-6 pr-1">
-          {segs && segs.map((s, i) =>
-            s.text === " \u00b7 " ? null : (
-              <span
-                key={i}
-                className="text-[9px] leading-none px-1 py-px rounded-sm"
-                style={s.color ? { color: dimmed ? undefined : s.color, backgroundColor: `${s.color}12` } : { color: dimmed ? undefined : "var(--muted-foreground)" }}
-              >
-                {s.text}
-              </span>
-            )
-          )}
-          {note && (
-            <span
-              className={`text-[9px] leading-none px-1 py-px rounded-sm ${note.startsWith("\u26a0") ? "text-amber-600 dark:text-amber-500 bg-amber-500/10" : "text-muted-foreground/70 bg-muted/30"}`}
-            >
-              {note}
-            </span>
-          )}
-        </div>
-      )}
-    </div>
+  const [localOrder, setLocalOrder] = useState<CondensedHost[]>(() =>
+    useModelStore.getState().getOrderedHosts(model.logical, model.hosts)
   );
 
-  function getOrderedHostsForModel(m: CondensedModel): CondensedHost[] {
-    const store = useModelStore.getState();
-    return store.getOrderedHosts(m.logical, m.hosts);
-  }
-}
-
-function persistLocal(key: string, value: unknown) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
-}
-
-function ReorderPopover({
-  logical,
-  model,
-}: {
-  logical: string;
-  model: CondensedModel;
-}) {
-  const store = useModelStore.getState();
-  const ordered = store.getOrderedHosts(logical, model.hosts);
-  const globalActive = store.globalProviderPriority !== null;
-  const hasOverride = !!store.providerPriorityOverrides[logical];
-  const [localOrder, setLocalOrder] = useState<CondensedHost[]>(ordered);
-
   useEffect(() => {
-    const current = useModelStore.getState().getOrderedHosts(logical, model.hosts);
+    const current = useModelStore.getState().getOrderedHosts(model.logical, model.hosts);
     setLocalOrder(current);
-  }, [logical, model.hosts]);
+  }, [model.logical, model.hosts]);
 
   function moveUp(idx: number) {
     if (idx <= 0) return;
     const next = [...localOrder];
     [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
     setLocalOrder(next);
-    useModelStore.getState().setProviderPriority(logical, next.map((h) => h.provider));
+    useModelStore.getState().setProviderPriority(model.logical, next.map((h) => h.provider));
   }
 
   function moveDown(idx: number) {
@@ -591,78 +468,107 @@ function ReorderPopover({
     const next = [...localOrder];
     [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
     setLocalOrder(next);
-    useModelStore.getState().setProviderPriority(logical, next.map((h) => h.provider));
+    useModelStore.getState().setProviderPriority(model.logical, next.map((h) => h.provider));
   }
 
-  function resetOrder() {
-    const s = useModelStore.getState();
-    const overrides = { ...s.providerPriorityOverrides };
-    delete overrides[logical];
-    useModelStore.setState({ providerPriorityOverrides: overrides });
-    persistLocal("doomalaysocreate.model-store.providerPriorityOverrides", overrides);
-    setLocalOrder([...model.hosts].sort((a, b) => a.defaultPriority - b.defaultPriority));
-  }
+  const topHost = localOrder[0];
 
   return (
-    <div className="absolute z-50 mt-1 right-0 min-w-[200px] rounded-lg border border-border/70 bg-background/95 backdrop-blur-xl shadow-lg shadow-black/20 p-2" onClick={(e) => e.stopPropagation()}>
-      <div className="text-[10px] font-semibold text-foreground mb-1.5 px-1">
-        {model.displayName}
-        <span className="text-muted-foreground font-normal ml-1">priority</span>
-      </div>
-
-      <div className="flex flex-col gap-0.5">
-        {localOrder.map((host, i) => (
-          <div
-            key={`${host.provider}-${host.modelId}`}
-            className="flex items-center gap-2 px-1.5 py-1 rounded text-[10px]"
-            style={{ opacity: host.hasApiKey ? 1 : 0.4 }}
+    <div className="flex flex-col w-full text-left rounded px-1.5 transition-colors duration-100"
+      style={{ paddingTop: 3, paddingBottom: hasSub ? 3 : 3 }}
+    >
+      <span className="flex items-center w-full" style={{ height: 20 }}>
+        <button onClick={onSelect} className="flex items-center flex-1 min-w-0 cursor-pointer text-left">
+          <span
+            className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
+            style={{ width: 14, height: 14, fontSize: 0, border: isSelected ? "none" : "1.5px solid var(--border)", backgroundColor: isSelected ? "var(--primary)" : "transparent" }}
           >
-            <span className="inline-flex items-center justify-center size-3.5 rounded-full text-[7px] font-bold shrink-0"
-              style={{ backgroundColor: `${host.color}30`, color: host.color }}>
-              {i + 1}
-            </span>
-            <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: host.color }} />
-            <span className="flex-1 truncate text-foreground">{host.providerDisplayName}</span>
-            <div className="flex gap-0.5">
-              <button
-                onClick={() => moveUp(i)}
-                disabled={i === 0}
-                className="size-4 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
-                title="Move up"
-              >
-                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
-              </button>
-              <button
-                onClick={() => moveDown(i)}
-                disabled={i === localOrder.length - 1}
-                className="size-4 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
-                title="Move down"
-              >
-                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
+            {isSelected && <IcoCheck />}
+          </span>
+          <span
+            className={`text-[11px] leading-none truncate flex-1 ${isSelected ? "text-primary font-medium" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
+            title={model.logical}
+          >
+            {model.displayName}
+          </span>
+          <span className="flex-shrink-0 mr-2 text-[9px] text-muted-foreground tabular-nums">
+            {fmtCtx(model.contextLength)}
+          </span>
+        </button>
+      </span>
 
-      {hasOverride && (
-        <button
-          onClick={resetOrder}
-          className="w-full mt-1.5 text-[9px] text-muted-foreground/60 hover:text-foreground text-center py-1 rounded transition-colors"
+      {topHost && !expanded && (
+        <button onClick={onToggleExpand}
+          className="flex items-center gap-1.5 w-full pl-6 pr-1 py-0.5 rounded text-[10px] transition-colors hover:bg-muted/30 cursor-pointer text-left"
+          title={localOrder.length > 1 ? "Click to show all provider options" : "Only one provider available"}
         >
-          Reset to default
+          <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: topHost.color }} />
+          <span className="truncate text-foreground/80 min-w-0">{topHost.modelId}</span>
+          <span className="tabular-nums text-muted-foreground/60 shrink-0">{fmtCtx(topHost.contextLength)}</span>
+          <span className="text-muted-foreground/50 shrink-0">{topHost.providerDisplayName}</span>
+          {localOrder.length > 1 && <span className="ml-auto text-muted-foreground/40 text-[9px] shrink-0">{"\u25be"}</span>}
         </button>
       )}
-      {globalActive && !hasOverride && (
-        <div className="mt-1.5 text-[8px] text-muted-foreground/50 text-center px-1">
-          Using global provider order. Set per-model override above.
+
+      {expanded && (
+        <div className="flex flex-col gap-0.5 pl-6 pr-1 mt-0.5">
+          {localOrder.map((host, i) => (
+            <div key={`${host.provider}-${host.modelId}`}
+              className="flex items-center gap-1.5 py-0.5 rounded text-[10px]"
+              style={{ opacity: host.hasApiKey ? 1 : 0.4 }}
+            >
+              <span className="inline-flex items-center justify-center size-3.5 rounded-full text-[7px] font-bold shrink-0"
+                style={{ backgroundColor: `${host.color}30`, color: host.color }}>
+                {i + 1}
+              </span>
+              <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: host.color }} />
+              <span className="truncate text-foreground/80 flex-1 min-w-0">{host.modelId}</span>
+              <span className="tabular-nums text-muted-foreground/60 shrink-0 mr-1">{fmtCtx(host.contextLength)}</span>
+              <span className="text-muted-foreground/50 shrink-0">{host.providerDisplayName}</span>
+              <div className="flex gap-px ml-1 shrink-0">
+                <button
+                  onClick={(e) => { e.stopPropagation(); moveUp(i); }}
+                  disabled={i === 0}
+                  className="size-4 flex items-center justify-center rounded text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+                  title="Higher priority"
+                >
+                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); moveDown(i); }}
+                  disabled={i === localOrder.length - 1}
+                  className="size-4 flex items-center justify-center rounded text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+                  title="Lower priority"
+                >
+                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {hasSub && (
+        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-6 pr-1">
+          {segs && segs.map((s, i) =>
+            s.text === " \u00b7 " ? null : (
+              <span key={i} className="text-[9px] leading-none px-1 py-px rounded-sm"
+                style={s.color ? { color: dimmed ? undefined : s.color, backgroundColor: `${s.color}12` } : { color: dimmed ? undefined : "var(--muted-foreground)" }}>
+                {s.text}
+              </span>
+            )
+          )}
+          {note && (
+            <span className={`text-[9px] leading-none px-1 py-px rounded-sm ${note.startsWith("\u26a0") ? "text-amber-600 dark:text-amber-500 bg-amber-500/10" : "text-muted-foreground/70 bg-muted/30"}`}>
+              {note}
+            </span>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-// Re-export from model-store for ReorderPopover use
 function condensedModelMatchesFilters(model: CondensedModel, activeFilters: string[], contextMin: number): boolean {
   if (contextMin > 0 && model.contextLength < contextMin) return false;
   if (activeFilters.length === 0) return true;
@@ -685,7 +591,8 @@ function CondensedList({
   contextMin,
   selectedModelId,
   onSelect,
-  onReorder,
+  expandedLogical,
+  onToggleExpand,
 }: {
   models: CondensedModel[];
   searchQuery: string;
@@ -693,7 +600,8 @@ function CondensedList({
   contextMin: number;
   selectedModelId: string | null;
   onSelect: (model: CondensedModel) => void;
-  onReorder: (logical: string) => void;
+  expandedLogical: string | null;
+  onToggleExpand: (logical: string | null) => void;
 }) {
   const [showHidden, setShowHidden] = useState(false);
 
@@ -755,7 +663,8 @@ function CondensedList({
           model={m}
           isSelected={selectedLogical === m.logical}
           onSelect={() => onSelect(m)}
-          onReorder={onReorder}
+          expanded={expandedLogical === m.logical}
+          onToggleExpand={() => onToggleExpand(expandedLogical === m.logical ? null : m.logical)}
         />
       ))}
 
@@ -781,7 +690,8 @@ function CondensedList({
               model={m}
               isSelected={selectedLogical === m.logical}
               onSelect={() => onSelect(m)}
-              onReorder={onReorder}
+              expanded={expandedLogical === m.logical}
+              onToggleExpand={() => onToggleExpand(expandedLogical === m.logical ? null : m.logical)}
               dimmed
             />
           ))}
@@ -826,7 +736,7 @@ export function ModelSelectOverlay() {
   const syncedLabel = syncedAgoLabel(syncedAt);
 
   const inputRef = useRef<HTMLInputElement>(null);
-  const [reorderLogical, setReorderLogical] = useState<string | null>(null);
+  const [expandedLogical, setExpandedLogical] = useState<string | null>(null);
 
   useEffect(() => {
     if (providers.length === 0 && !loading) fetchProviders();
@@ -836,16 +746,16 @@ export function ModelSelectOverlay() {
     if (!overlayOpen) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (reorderLogical) { setReorderLogical(null); return; }
+        if (expandedLogical) { setExpandedLogical(null); return; }
         closeOverlay();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [overlayOpen, closeOverlay, reorderLogical]);
+  }, [overlayOpen, closeOverlay, expandedLogical]);
 
   useEffect(() => {
-    if (!overlayOpen) setReorderLogical(null);
+    if (!overlayOpen) setExpandedLogical(null);
   }, [overlayOpen]);
 
   const handleSelect = useCallback(
@@ -895,11 +805,6 @@ export function ModelSelectOverlay() {
 
   const anyFilterActive = activeFilters.length > 0 || contextMin > 0;
 
-  const reorderModel = useMemo(() => {
-    if (!reorderLogical) return null;
-    return condensedModels.find((m) => m.logical === reorderLogical) ?? null;
-  }, [reorderLogical, condensedModels]);
-
   return (
     <AnimatePresence>
       {overlayOpen && (
@@ -910,7 +815,7 @@ export function ModelSelectOverlay() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
             className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm"
-            onClick={() => { if (reorderLogical) setReorderLogical(null); else closeOverlay(); }}
+            onClick={() => { if (expandedLogical) setExpandedLogical(null); else closeOverlay(); }}
             aria-hidden="true"
           />
 
@@ -1122,14 +1027,9 @@ export function ModelSelectOverlay() {
                       contextMin={contextMin}
                       selectedModelId={selectedModelId}
                       onSelect={handleCondensedSelect}
-                      onReorder={setReorderLogical}
+                      expandedLogical={expandedLogical}
+                      onToggleExpand={setExpandedLogical}
                     />
-                    {reorderModel && reorderLogical && (
-                      <ReorderPopover
-                        logical={reorderLogical}
-                        model={reorderModel}
-                      />
-                    )}
                   </div>
                 )}
               </div>
