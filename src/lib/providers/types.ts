@@ -78,4 +78,5 @@ export interface SyncResult {
   totalModels: number;
   syncedAt: string;
   syncStatus: SyncStatusEntry[];
+  logical: CondensedModel[];
 }

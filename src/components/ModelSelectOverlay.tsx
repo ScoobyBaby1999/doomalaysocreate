@@ -807,8 +807,6 @@ export function ModelSelectOverlay() {
     activeFilters,
     contextMin,
     condensedModels,
-    condensedLoading,
-    condensedFetchedAt,
     condensedView,
     fetchProviders,
     fetchCondensedModels,
@@ -833,13 +831,6 @@ export function ModelSelectOverlay() {
   useEffect(() => {
     if (providers.length === 0 && !loading) fetchProviders();
   }, [providers.length, loading, fetchProviders]);
-
-  useEffect(() => {
-    if (overlayOpen && condensedView && !condensedLoading) {
-      const s = useModelStore.getState();
-      if (!s.condensedFetchedAt || Date.now() - s.condensedFetchedAt > 10 * 60 * 1000) fetchCondensedModels();
-    }
-  }, [overlayOpen, condensedView, fetchCondensedModels]);
 
   useEffect(() => {
     if (!overlayOpen) return;
@@ -900,7 +891,7 @@ export function ModelSelectOverlay() {
       if (m.hosts.some((h) => h.modelId === selectedModelId)) return m.displayName;
     }
     return null;
-  }, [selectedModelId, providers, condensedModels, condensedView]);
+  }, [selectedModelId, providers, condensedModels]);
 
   const anyFilterActive = activeFilters.length > 0 || contextMin > 0;
 
@@ -974,7 +965,7 @@ export function ModelSelectOverlay() {
                       </button>
                     </>
                   )}
-                  {condensedView && !condensedLoading && (
+                  {condensedView && (
                     <>
                       <button
                         onClick={() => openProvidersDialog()}
@@ -1082,7 +1073,7 @@ export function ModelSelectOverlay() {
                   </div>
                 )}
 
-                {condensedView && condensedLoading && (
+                {condensedView && loading && (
                   <div className="flex items-center justify-center h-full">
                     <span className="inline-block size-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
                     <span className="ml-2 text-[11px] text-muted-foreground">fetching</span>
@@ -1122,12 +1113,7 @@ export function ModelSelectOverlay() {
                   </div>
                 )}
 
-                {condensedView && !condensedLoading && condensedFetchedAt === 0 && (
-                  <div className="flex items-center justify-center h-32 text-[10px] text-muted-foreground/50">
-                    loading condensed models...
-                  </div>
-                )}
-                {condensedView && !condensedLoading && condensedFetchedAt !== 0 && (
+                {condensedView && !loading && (
                   <div className="p-3 relative">
                     <CondensedList
                       models={condensedModels}

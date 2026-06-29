@@ -32,8 +32,6 @@ interface ModelSelectionState {
   contextMin: number;
 
   condensedModels: CondensedModel[];
-  condensedLoading: boolean;
-  condensedFetched: boolean;
   condensedFetchedAt: number;
   condensedView: boolean;
   providerPriorityOverrides: Record<string, string[]>;
@@ -110,8 +108,6 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   contextMin: loadPersisted<number>(`${PREFIX}.contextMin`, 0),
 
   condensedModels: [],
-  condensedLoading: false,
-  condensedFetched: false,
   condensedFetchedAt: 0,
   condensedView: loadPersisted<boolean>(`${PREFIX}.condensedView`, false),
   providerPriorityOverrides: loadPersisted<Record<string, string[]>>(`${PREFIX}.providerPriorityOverrides`, {}),
@@ -136,6 +132,8 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
         totalModels: data.totalModels,
         syncedAt: data.syncedAt ?? null,
         syncStatus: data.syncStatus ?? [],
+        condensedModels: data.logical ?? [],
+        condensedFetchedAt: Date.now(),
         loading: false,
         lastFetchedAt: Date.now(),
         cacheBaseUrl: baseUrl,
@@ -161,6 +159,8 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
         totalModels: data.totalModels,
         syncedAt: data.syncedAt ?? null,
         syncStatus: data.syncStatus ?? [],
+        condensedModels: data.logical ?? [],
+        condensedFetchedAt: Date.now(),
         refreshing: false,
         error: null,
       });
@@ -229,18 +229,9 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
     set({ providersDialogOpen: false, providersDialogProvider: null }),
 
   fetchCondensedModels: async (force?: boolean) => {
-    const { baseUrl, condensedFetchedAt } = get();
-    if (baseUrl == null) { set({ condensedLoading: false }); return; }
-    const CACHE_TTL = 10 * 60 * 1000;
-    if (!force && condensedFetchedAt && Date.now() - condensedFetchedAt < CACHE_TTL) return;
-    set({ condensedLoading: true });
-    try {
-      const res = await fetch(`${baseUrl}/api/models/condensed`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      set({ condensedModels: data.models ?? [], condensedLoading: false, condensedFetched: true, condensedFetchedAt: Date.now() });
-    } catch {
-      set({ condensedLoading: false });
+    if (force) {
+      await get().refreshProviders();
+      return;
     }
   },
 
