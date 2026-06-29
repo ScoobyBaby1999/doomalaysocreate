@@ -33,7 +33,6 @@ import repopack
 from promptcache import PromptCache
 from providers import (
     load_benchmarks,
-    load_models_catalog,
     load_reasoning_catalog,
     make_provider_registry,
     make_slot,
@@ -174,16 +173,14 @@ class Panel:
         self.provider_by_name: dict[str, provider] = {p.name: p for p in self.providers}
         base_slots = make_slot_registry(self.providers)
         self.slot_by_who: dict[str, slot] = {s.who: s for s in base_slots}
-        self.logical_models: dict[str, dict] = load_models_catalog()
+        self.logical_models: dict[str, dict] = {}
+        self.ctx_by_who: dict[str, int] = {}
 
         cfg = _load_panel_cfg()
         self.default_panel: list[str] = cfg["judges"]
         self.max_parallel: int = cfg["max_parallel"]
         self.default_rubric: str = cfg["rubric"]
 
-        #   per-slot context windows (who -> tokens), shared with the scheduler BY
-        #   REFERENCE so ctx-aware routing sees every slot registered below.
-        self.ctx_by_who: dict[str, int] = {}
         #   one shared scheduler over EVERY known slot (base catalog + logical
         #   candidates + panel-named) drives rotation + cross-provider failover;
         #   one shared metrics store captures per-profile cost/throttle/latency.
@@ -194,21 +191,12 @@ class Panel:
         self.benchmarks = load_benchmarks()
         self.cache = PromptCache()
 
-        #   pre-register logical-model candidate slots + default-panel slots so they
-        #   join rotation from boot. also index each candidate's context window for
-        #   repo-pack budget fitting + ctx-aware orchestrator routing.
-        for spec in self.logical_models.values():
-            for cand in spec.get("candidates", []):
-                who = f"{cand['provider']}/{cand['model']}"
-                self._ensure_slot(who)
-                if cand.get("ctx"):
-                    self.ctx_by_who[who] = int(cand["ctx"])
+        #   pre-register default-panel slots so they join rotation from boot.
         for who in self.default_panel:
             self._ensure_slot(who)
 
         #   Auto-sync model lists from all providers with /v1/models endpoints.
-        #   Any new model IDs not yet in the static catalog will be registered
-        #   as extra slots so they join rotation without a code deploy.
+        #   Discovers new models dynamically and builds logical_models for routing.
         self._sync_all_provider_models()
 
     def judge_ctx(self, who: str) -> int:
@@ -222,16 +210,36 @@ class Panel:
         return max(vals) if vals else DEFAULT_CTX_TOKENS
 
     def _sync_all_provider_models(self) -> None:
-        """Fetch live model lists from all providers with /v1/models endpoints and
-        register any newly discovered models as extra slots.
-
-        Called at boot after scheduler init. If endpoints are unreachable,
-        gracefully degrades to the static model list.
+        """Fetch live model lists from all providers, register new slots, and
+        build logical_models mapping dynamically (no static catalog).
         """
         sync_results = provider_sync.sync_all_providers(self.provider_by_name)
         provider_sync.register_synced_models(self, sync_results)
-        # Cache for catalog.py to reuse instead of re-syncing with fresh instances
         provider_sync.set_panel_sync_cache(sync_results)
+        self._rebuild_logical_models(sync_results)
+
+    def _rebuild_logical_models(self, sync_results: dict[str, list[str]]) -> None:
+        """Build logical_models routing map from live-synced provider model lists.
+
+        Groups provider models by family so logical→candidate resolution can
+        find slots without a static models_catalog.json.
+        """
+        from provider_sync.catalog import make_family
+        groups: dict[str, dict] = {}
+        for provider_name in sorted(sync_results.keys()):
+            model_ids = sync_results[provider_name]
+            for model_id in model_ids:
+                family = make_family(model_id)
+                if family not in groups:
+                    groups[family] = {"family": family, "candidates": []}
+                groups[family]["candidates"].append({
+                    "provider": provider_name,
+                    "model": model_id,
+                })
+
+        self.logical_models = {}
+        for family, spec in groups.items():
+            self.logical_models[family] = spec
 
     def _ensure_slot(self, who: str) -> slot | None:
         if who in self.slot_by_who:

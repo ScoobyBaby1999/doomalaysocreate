@@ -93,7 +93,7 @@ class CloudflareSync(BaseSync):
             return []
 
         model_ids: list[str] = list(dict.fromkeys(
-            m.rstrip("/") for m in re.findall(r'/ai/models/(@cf/[^\s)"]+)', content)
+            m.rstrip("/") for m in re.findall(r'/ai/models/(@[a-z0-9._-]+/[^\s)"]+)', content)
         ))
 
         if not model_ids:

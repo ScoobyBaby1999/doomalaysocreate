@@ -2,8 +2,9 @@
 
 Assembles the SyncResult shape the frontend expects (mirrors the TypeScript
 sync.ts orchestrator in temporaryshidy). Combines live-synced model data with
-static host-policy config from providers_catalog.json + the Ts reference's
-config.ts privacy/display fields.
+host-policy config from providers_catalog.json + privacy/display fields.
+
+All model data comes from live provider API syncs — no static model lists.
 
 Usage:
     from provider_sync.catalog import build_provider_catalog
@@ -26,7 +27,6 @@ from oplog import log_event
 
 HERE = Path(__file__).resolve().parent.parent
 CATALOG_PATH = HERE / "providers_catalog.json"
-MODELS_CATALOG_PATH = HERE / "models_catalog.json"
 
 _FETCH_TIMEOUT = 15
 _USER_AGENT = "doomalaysocreate/1.0"
@@ -35,35 +35,6 @@ _CACHE_TTL_S = 600  # 10 minutes
 _cache: dict[str, Any] | None = None
 _cache_at: float = 0
 _cache_lock = threading.Lock()
-
-_condensed_cache: dict[str, Any] | None = None
-_condensed_cache_at: float = 0
-_condensed_cache_lock = threading.Lock()
-
-# Reverse mapping: candidate display name (author-stripped) → logical catalog key.
-# Built once from models_catalog.json so _build_provider_models outputs logical
-# keys that resolve_candidates can find.
-_model_to_logical: dict[str, str] = {}
-_model_to_logical_loaded = False
-
-
-def _ensure_model_to_logical() -> dict[str, str]:
-    global _model_to_logical, _model_to_logical_loaded
-    if not _model_to_logical_loaded:
-        try:
-            with open(MODELS_CATALOG_PATH, encoding="utf-8") as f:
-                data = json.load(f)
-            for logical, spec in data.get("logical_models", {}).items():
-                if not isinstance(spec, dict):
-                    continue
-                for cand in spec.get("candidates", []):
-                    display = cand["model"].split("/")[-1] if "/" in cand["model"] else cand["model"]
-                    if display not in _model_to_logical:
-                        _model_to_logical[display] = logical
-        except (OSError, json.JSONDecodeError) as e:
-            log_event("models_catalog_load_error", error=str(e)[:500])
-        _model_to_logical_loaded = True
-    return _model_to_logical
 
 # ---------------------------------------------------------------------------
 # Family key normalisation — mirrors TypeScript family.ts
@@ -491,14 +462,12 @@ def _build_provider_models(
     model_ids: dict[str, str],  # {stripped_display: raw_id}
     registry: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    model_to_logical = _ensure_model_to_logical()
     models: list[dict[str, Any]] = []
     for display_id, raw_id in model_ids.items():
         if not display_id:
             continue
 
-        logical_id = model_to_logical.get(display_id, display_id)
-
+        logical_id = display_id
         family = make_family(raw_id)
         fam_meta = registry.get(family, {})
 
@@ -737,142 +706,6 @@ def _build_logical_catalog(
 
     log_event("logical_catalog_built", count=len(result))
     return result
-
-
-def build_condensed_catalog(force_refresh: bool = False) -> dict[str, Any]:
-    """Build a de-duplicated model catalog grouped by logical model family.
-
-    Caches the result in-process for ``_CACHE_TTL_S`` (10 minutes), same
-    pattern as ``build_provider_catalog``.  Returns a CondensedModel[] list
-    where each entry represents one logical model (e.g. "nemotron-ultra")
-    with all hosts that serve it, API key availability, and sync status.
-    """
-    global _condensed_cache, _condensed_cache_at
-
-    now = time.time()
-    if not force_refresh and _condensed_cache is not None and now - _condensed_cache_at < _CACHE_TTL_S:
-        return _condensed_cache
-
-    with _condensed_cache_lock:
-        if _condensed_cache is not None and not force_refresh and now - _condensed_cache_at < _CACHE_TTL_S:
-            return _condensed_cache
-
-        try:
-            result = _build_condensed_catalog_inner()
-        except Exception as e:
-            log_event("condensed_catalog_error", error=repr(e)[:1000])
-            return {"models": []}
-
-        _condensed_cache = result
-        _condensed_cache_at = time.time()
-        return result
-
-
-def _build_condensed_catalog_inner() -> dict[str, Any]:
-    """Core logic for building the condensed catalog (no caching wrapper)."""
-    log_event("condensed_catalog_build_start")
-    catalog = _load_catalog()
-    log_event("condensed_catalog_loaded_providers", count=len(catalog), catalog_path=str(MODELS_CATALOG_PATH))
-    display_map = _PROVIDER_DISPLAY
-
-    # Fetch OpenRouter family registry (non-fatal if it fails)
-    family_registry: dict[str, dict[str, Any]] = {}
-    try:
-        _, family_registry = _fetch_openrouter_family()
-        log_event("condensed_catalog_family_fetched", size=len(family_registry))
-    except Exception as e:
-        log_event("condensed_catalog_or_error", error=repr(e)[:500])
-
-    # Load logical models catalog
-    try:
-        with open(MODELS_CATALOG_PATH, encoding="utf-8") as f:
-            models_data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        log_event("condensed_catalog_load_error", error=str(e)[:500])
-        return {"models": []}
-    logical_models = models_data.get("logical_models", {})
-    log_event("condensed_catalog_logical_loaded", count=len(logical_models))
-
-    # Check API key presence for each provider
-    provider_keys: dict[str, bool] = {}
-    for entry in catalog:
-        name = entry["name"]
-        env_vars = entry.get("env_var", [])
-        if isinstance(env_vars, str):
-            env_vars = [env_vars]
-        has_key = all(os.environ.get(v, "").strip() for v in env_vars if v)
-        provider_keys[name] = has_key
-
-    # Get sync status from Panel's cache
-    from provider_sync import get_panel_sync_cache
-    sync_cache = get_panel_sync_cache()
-    live_providers: set[str] = set()
-    if sync_cache:
-        live_providers = set(sync_cache.keys())
-
-    # Build condensed model entries
-    condensed: list[dict[str, Any]] = []
-    for logical in sorted(logical_models.keys()):
-        spec = logical_models[logical]
-        if not isinstance(spec, dict):
-            continue
-        family: str = spec.get("family", logical) or logical
-        candidates: list[dict[str, Any]] = spec.get("candidates", [])
-        if not candidates:
-            continue
-
-        fam_meta = family_registry.get(family, {})
-        hosts: list[dict[str, Any]] = []
-        for i, cand in enumerate(candidates):
-            prov_name = cand["provider"]
-            model_id = cand["model"]
-            ctx = cand.get("ctx", 0) or 0
-            disp = display_map.get(prov_name, {})
-            hosts.append({
-                "provider": prov_name,
-                "providerDisplayName": disp.get("displayName", prov_name),
-                "icon": disp.get("icon", "Box"),
-                "color": disp.get("color", "#888"),
-                "modelId": model_id,
-                "contextLength": ctx,
-                "hasApiKey": provider_keys.get(prov_name, False),
-                "syncedLive": prov_name in live_providers,
-                "defaultPriority": i + 1,
-            })
-
-        # Merge attributes from family registry
-        attributes: dict[str, Any] = {}
-        caps = fam_meta.get("capabilities")
-        if caps:
-            attributes["capabilities"] = caps
-        bm = fam_meta.get("benchmarks")
-        if bm:
-            attributes["benchmarks"] = bm
-        pricing = fam_meta.get("pricing")
-        if pricing:
-            attributes["pricing"] = pricing
-
-        ctx_max = max((h["contextLength"] for h in hosts), default=0)
-        display_name = fam_meta.get("display_name") or derive_display_name(logical)
-
-        entry: dict[str, Any] = {
-            "logical": logical,
-            "displayName": display_name,
-            "family": family,
-            "contextLength": ctx_max,
-            "hosts": hosts,
-        }
-        if attributes:
-            entry["attributes"] = attributes
-        condensed.append(entry)
-
-    if not condensed:
-        log_event("condensed_catalog_empty_warning",
-                  logical_count=len(logical_models),
-                  family_registry_size=len(family_registry),
-                  live_providers=list(live_providers))
-    log_event("condensed_catalog_built", count=len(condensed))
-    return {"models": condensed}
 
 
 def _load_catalog() -> list[dict]:
