@@ -20,7 +20,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -671,78 +670,29 @@ def _build_logical_catalog(
             if ctx > group["contextLength"]:
                 group["contextLength"] = ctx
 
-    # Build per-group attributes from the family registry
-    group_attrs: dict[str, dict[str, Any]] = {}
-    for family in groups:
-        fam_meta = family_registry.get(family, {})
-        attrs: dict[str, Any] = {}
-        if fam_meta.get("capabilities"):
-            attrs["capabilities"] = fam_meta["capabilities"]
-        if fam_meta.get("benchmarks"):
-            attrs["benchmarks"] = fam_meta["benchmarks"]
-        if fam_meta.get("pricing"):
-            attrs["pricing"] = fam_meta["pricing"]
-        if fam_meta.get("ranks"):
-            attrs["ranks"] = fam_meta["ranks"]
-        if fam_meta.get("free_note"):
-            attrs["note"] = fam_meta["free_note"]
-        group_attrs[family] = attrs
-
-    # Merge groups whose attributes (capabilities, benchmarks, pricing, context)
-    # are identical — variant names like "kimi-latest" vs "kimi-2.6" that share
-    # the same capabilities, cost, and context collapse into one logical entry.
-    def _fingerprint(family: str) -> tuple | None:
-        a = group_attrs[family]
-        caps = tuple(sorted(a.get("capabilities", [])))
-        bm = a.get("benchmarks", {})
-        bm_sig = (bm.get("intelligence"), bm.get("coding"), bm.get("agentic"))
-        pricing = a.get("pricing", "")
-        if not caps and bm_sig == (None, None, None) and not pricing:
-            return None  # no meaningful metadata — don't merge
-        return (caps, bm_sig, pricing, groups[family]["contextLength"])
-
-    sig_map: dict[tuple, list[str]] = defaultdict(list)
-    for family in groups:
-        sig = _fingerprint(family)
-        if sig is None:
-            sig_map[(family,)].append(family)  # unique sentinel, never merges
-        else:
-            sig_map[sig].append(family)
-
-    merged_groups: dict[str, dict[str, Any]] = {}
-    for sig, families in sig_map.items():
-        if len(families) == 1:
-            merged_groups[families[0]] = groups[families[0]]
-        else:
-            primary = sorted(families, key=lambda f: (-len(groups[f]["hosts"]), f))[0]
-            entry = dict(groups[primary])
-            entry["hosts"] = list(groups[primary]["hosts"])
-            for f in families:
-                if f == primary:
-                    continue
-                entry["hosts"].extend(groups[f]["hosts"])
-            seen: set[tuple[str, str]] = set()
-            deduped: list[dict[str, Any]] = []
-            for h in entry["hosts"]:
-                k = (h["provider"], h["modelId"])
-                if k not in seen:
-                    seen.add(k)
-                    deduped.append(h)
-            entry["hosts"] = deduped
-            for i, h in enumerate(entry["hosts"]):
-                h["defaultPriority"] = i + 1
-            ctx = max((h["contextLength"] for h in entry["hosts"]), default=0)
-            entry["contextLength"] = ctx
-            entry["family"] = primary
-            entry["logical"] = primary
-            merged_groups[primary] = entry
-            log_event("logical_merge", primary=primary, merged=", ".join(families))
-
-    # Build final result from merged groups
+    # Merge family-registry attributes per group
     result: list[dict[str, Any]] = []
-    for family in sorted(merged_groups.keys()):
-        group = merged_groups[family]
-        attrs = group_attrs.get(family, {})
+    for family in sorted(groups.keys()):
+        group = groups[family]
+        fam_meta = family_registry.get(family, {})
+        attributes: dict[str, Any] = {}
+
+        caps = fam_meta.get("capabilities")
+        if caps:
+            attributes["capabilities"] = caps
+        bm = fam_meta.get("benchmarks")
+        if bm:
+            attributes["benchmarks"] = bm
+        pricing = fam_meta.get("pricing")
+        if pricing:
+            attributes["pricing"] = pricing
+        ranks = fam_meta.get("ranks")
+        if ranks:
+            attributes["ranks"] = ranks
+        free_note = fam_meta.get("free_note")
+        if free_note:
+            attributes["note"] = free_note
+
         entry: dict[str, Any] = {
             "logical": group["logical"],
             "displayName": group["displayName"],
@@ -750,8 +700,8 @@ def _build_logical_catalog(
             "contextLength": group["contextLength"],
             "hosts": group["hosts"],
         }
-        if attrs:
-            entry["attributes"] = attrs
+        if attributes:
+            entry["attributes"] = attributes
         result.append(entry)
 
     log_event("logical_catalog_built", count=len(result))
