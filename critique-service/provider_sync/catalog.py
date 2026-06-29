@@ -432,9 +432,7 @@ def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[s
             log_event("catalog_sync_error", error=str(e)[:500])
         live_set = set(live.keys())
 
-    # Fall back to static model lists for any provider the live sync didn't cover.
-    # A live sync that returned empty means the sync failed — don't mark as live,
-    # fall back to static model list instead.
+    # A live sync that returned empty means the sync failed — provider gets no models.
     # Synced IDs are raw (e.g. "deepseek-ai/deepseek-v4-pro"). We return a dict
     # mapping {stripped_display_name: raw_id} so _build_provider_models can
     # construct slot IDs for pinned routing.
@@ -448,9 +446,6 @@ def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[s
         if synced:
             result[name] = {m.split("/")[-1] if "/" in m else m: m for m in synced}
             actual_live.add(name)
-        else:
-            static = entry.get("models", [])
-            result[name] = {m.split("/")[-1] if "/" in m else m: m for m in static}
 
     # Cloudflare docs-only fallback: scrape the docs page for model IDs even
     # when Cloudflare isn't registered as a provider (no CF_API_TOKEN/CF_ACCOUNT_ID).
