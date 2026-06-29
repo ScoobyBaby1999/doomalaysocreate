@@ -650,7 +650,7 @@ def _build_logical_catalog(
         env_vars = entry.get("env_var", [])
         if isinstance(env_vars, str):
             env_vars = [env_vars]
-        has_key = all(os.environ.get(v, "").strip() for v in env_vars if v)
+        has_key = any(os.environ.get(v, "").strip() for v in env_vars if v)
         provider_keys[name] = has_key
 
     groups: dict[str, dict[str, Any]] = {}

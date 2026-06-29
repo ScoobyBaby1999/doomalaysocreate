@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import urllib.request
 from provider_sync.base import BaseSync, ModelInfo
+from oplog import log_event
+
+log = logging.getLogger(__name__)
 
 _cached_cloudflare_models: list[ModelInfo] | None = None
 
@@ -91,7 +95,9 @@ class CloudflareSync(BaseSync):
             req = urllib.request.Request(self.DOCS_URL, headers={"User-Agent": "doomalaysocreate/1.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 content = resp.read().decode("utf-8")
-        except Exception:
+        except Exception as exc:
+            log_event("cloudflare_docs_fetch_failed", url=self.DOCS_URL, error=str(exc)[:300])
+            log.warning("Cloudflare docs fetch failed: %s", exc)
             return []
 
         model_ids: list[str] = list(dict.fromkeys(
