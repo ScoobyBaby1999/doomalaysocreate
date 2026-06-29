@@ -566,7 +566,7 @@ def build_provider_catalog(force_refresh: bool = False) -> dict[str, Any]:
         for entry in catalog:
             name = entry["name"]
             display = display_map.get(name, entry)
-            model_ids = provider_models.get(name, [])
+            model_ids = provider_models.get(name, {})
             is_live = name in live_set
 
             models = _build_provider_models(name, model_ids, family_registry)
