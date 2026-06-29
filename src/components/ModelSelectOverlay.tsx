@@ -628,7 +628,7 @@ function CondensedList({
   const [showHidden, setShowHidden] = useState(false);
   const [showUnavailable, setShowUnavailable] = useState(false);
 
-  const { available, hiddenByFilter, hiddenByKey } = useMemo(() => {
+  const { visible, hiddenByFilter } = useMemo(() => {
     const searched = !searchQuery.trim()
       ? models
       : models.filter((m) => {
@@ -651,28 +651,17 @@ function CondensedList({
       }
     }
 
-    const avail: CondensedModel[] = [];
-    const noKey: CondensedModel[] = [];
-    for (const m of filtMatch) {
-      if (m.hosts.some((h) => h.hasApiKey)) {
-        avail.push(m);
-      } else {
-        noKey.push(m);
-      }
-    }
-
     const sorted = activeFilters.length > 0 || contextMin > 0
-      ? avail.sort((a, b) => {
+      ? [...filtMatch].sort((a, b) => {
           const sa = bestFilterScore({ id: a.logical, displayName: a.displayName, contextLength: a.contextLength, attributes: a.attributes } as ProviderModel, activeFilters);
           const sb = bestFilterScore({ id: b.logical, displayName: b.displayName, contextLength: b.contextLength, attributes: b.attributes } as ProviderModel, activeFilters);
           return sb - sa;
         })
-      : defaultSort(avail.map((m) => ({ id: m.logical, displayName: m.displayName, contextLength: m.contextLength, attributes: m.attributes } as ProviderModel))).map((pm) => avail.find((m) => m.logical === pm.id)!).filter(Boolean);
+      : defaultSort(filtMatch.map((m) => ({ id: m.logical, displayName: m.displayName, contextLength: m.contextLength, attributes: m.attributes } as ProviderModel))).map((pm) => filtMatch.find((m) => m.logical === pm.id)!).filter(Boolean);
 
     return {
-      available: sorted,
+      visible: sorted,
       hiddenByFilter: filtMiss,
-      hiddenByKey: noKey,
     };
   }, [models, searchQuery, activeFilters, contextMin]);
 
@@ -685,15 +674,18 @@ function CondensedList({
     return null;
   }, [selectedModelId, models]);
 
+  const available = useMemo(() => visible.filter((m) => m.hosts.some((h) => h.hasApiKey)), [visible]);
+  const unavailable = useMemo(() => visible.filter((m) => !m.hosts.some((h) => h.hasApiKey)), [visible]);
+
   return (
     <div className="flex flex-col gap-px p-1">
-      {available.length === 0 && hiddenByFilter.length === 0 && hiddenByKey.length === 0 && (
+      {visible.length === 0 && hiddenByFilter.length === 0 && (
         <div className="flex items-center justify-center h-16 text-[10px] text-muted-foreground/50">
           no models match
         </div>
       )}
 
-      {available.map((m) => (
+      {(hideUnavailable ? available : visible).map((m) => (
         <CondensedModelRow
           key={m.logical}
           model={m}
@@ -701,10 +693,11 @@ function CondensedList({
           onSelect={() => onSelect(m)}
           expanded={expandedLogical === m.logical}
           onToggleExpand={() => onToggleExpand(expandedLogical === m.logical ? null : m.logical)}
+          dimmed={!m.hosts.some((h) => h.hasApiKey)}
         />
       ))}
 
-      {hideUnavailable && hiddenByKey.length > 0 && (
+      {hideUnavailable && unavailable.length > 0 && (
         <>
           <button
             onClick={() => setShowUnavailable((v) => !v)}
@@ -717,10 +710,10 @@ function CondensedList({
               {"\u25b8"}
             </span>
             <span className="text-[9px] leading-none">
-              {showUnavailable ? `Hide unavailable (${hiddenByKey.length})` : `Unavailable models (${hiddenByKey.length})`}
+              {showUnavailable ? `Hide unavailable (${unavailable.length})` : `Unavailable models (${unavailable.length})`}
             </span>
           </button>
-          {showUnavailable && hiddenByKey.map((m) => (
+          {showUnavailable && unavailable.map((m) => (
             <CondensedModelRow
               key={m.logical}
               model={m}
@@ -733,18 +726,6 @@ function CondensedList({
           ))}
         </>
       )}
-
-      {!hideUnavailable && hiddenByKey.length > 0 && hiddenByKey.map((m) => (
-        <CondensedModelRow
-          key={m.logical}
-          model={m}
-          isSelected={selectedLogical === m.logical}
-          onSelect={() => onSelect(m)}
-          expanded={expandedLogical === m.logical}
-          onToggleExpand={() => onToggleExpand(expandedLogical === m.logical ? null : m.logical)}
-          dimmed
-        />
-      ))}
 
       {hiddenByFilter.length > 0 && (
         <>
