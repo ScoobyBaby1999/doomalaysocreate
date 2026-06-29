@@ -2,25 +2,25 @@
 
 PrivateMode AI (Edgeless Systems) provides confidential-computing-protected AI
 inference via a local proxy that handles E2E encryption + remote attestation.
+
+All models discovered dynamically — first from the local proxy API, falling
+back to doc page scraping. No static model lists.
 """
 
 from __future__ import annotations
 
+import re
+import urllib.request
+
 from provider_sync.base import BaseSync, ModelInfo
 
-# Free-tier chat models offered by PrivateMode. Speech/embedding models are
-# excluded from sync since doomalaysocreate only routes chat completions.
-_FREE_CHAT_MODELS = frozenset({
-    "kimi-k2.6",
-    "kimi-latest",
-    "gemma-4-31b",
-    "gpt-oss-120b",
-})
+_COMMON_WORDS = frozenset({"dimensions"})
 
 
 class PrivateModeAISync(BaseSync):
     provider_name = "privatemodeai"
     models_url = "http://localhost:8080/v1/models"
+    DOCS_URL = "https://docs.privatemode.ai/models/overview/"
     requires_auth = False
     env_var = "PRIVATEMODEAI_API_KEY"
 
@@ -28,6 +28,12 @@ class PrivateModeAISync(BaseSync):
         super().__init__(api_key, **kwargs)
 
     def fetch_models(self) -> list[ModelInfo]:
+        models = self._fetch_from_api()
+        if models:
+            return models
+        return self._fetch_from_docs()
+
+    def _fetch_from_api(self) -> list[ModelInfo]:
         data = self._make_request(self.models_url)
         if not data:
             return []
@@ -59,8 +65,41 @@ class PrivateModeAISync(BaseSync):
             ))
         return models
 
-    def filter_free_models(self, models: list[ModelInfo]) -> list[ModelInfo]:
-        return [m for m in models if m.id in _FREE_CHAT_MODELS]
+    def _fetch_from_docs(self) -> list[ModelInfo]:
+        try:
+            req = urllib.request.Request(self.DOCS_URL, headers={"User-Agent": "doomalaysocreate/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                content = resp.read().decode("utf-8")
+        except Exception:
+            return []
+
+        model_ids: list[str] = []
+        for match in re.finditer(r'<code[^>]*>([^<]+)</code>', content):
+            mid = match.group(1).strip()
+            if not mid or mid in _COMMON_WORDS:
+                continue
+            if not re.match(r'^[a-z][a-z0-9._-]+$', mid):
+                continue
+            if mid not in model_ids:
+                model_ids.append(mid)
+
+        if not model_ids:
+            return []
+
+        models = []
+        seen = set()
+        for model_id in model_ids:
+            if model_id in seen:
+                continue
+            seen.add(model_id)
+            models.append(ModelInfo(
+                id=model_id,
+                normalized_id=self.normalize_model_id(model_id),
+                is_free=True,
+                context_length=None,
+                metadata={},
+            ))
+        return models
 
     def normalize_model_id(self, model_id: str) -> str:
         return model_id

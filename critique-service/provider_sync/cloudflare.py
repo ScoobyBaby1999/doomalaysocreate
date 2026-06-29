@@ -15,7 +15,7 @@ class CloudflareSync(BaseSync):
     requires_auth = True
     env_var = "CF_API_TOKEN"
 
-    DOCS_URL = "https://developers.cloudflare.com/ai/models/index.md"
+    DOCS_URL = "https://developers.cloudflare.com/workers-ai/models/index.md"
 
     def __init__(self, api_key: str | None = None, **kwargs) -> None:
         super().__init__(api_key, **kwargs)
@@ -95,7 +95,7 @@ class CloudflareSync(BaseSync):
             return []
 
         model_ids: list[str] = list(dict.fromkeys(
-            m.rstrip("/") for m in re.findall(r'/ai/models/(@[a-z0-9._-]+/[^\s)"]+)', content)
+            m.rstrip("/") for m in re.findall(r'/workers-ai/models/([a-z0-9][a-z0-9._-]+)/', content)
         ))
 
         if not model_ids:

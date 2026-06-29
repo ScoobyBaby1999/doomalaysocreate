@@ -102,7 +102,7 @@
       "privacy": {"trains_on_data": false, "stability_tier": 1, "optout_url": "https://www.privatemode.ai/privacy-policy"},
       "models": [],
       "sync_config": {"enabled": true, "params": {}},
-      "note": "Privacy-first via confidential computing (AMD SEV-SNP + NVIDIA CC). REQUIRES local proxy binary — auto-starts when PRIVATEMODEAI_API_KEY is set (adds ~15-30s boot for remote attestation). Hardware-enforced E2E encryption: Edgeless Systems, Scaleway, model vendors cannot see prompts. Free: 5M initial tokens, then 1M prompt + 1M completion/mo. Models (chat): kimi-k2.6 (256K ctx, vision, tool calls, multiplier 1x), gemma-4-31b (256K ctx, vision, tool calls, multiplier 1x), gpt-oss-120b (128K ctx, tool calls, multiplier 2x). Qwen3-Embedding 4B and speech models exist but are excluded from sync (chat completions only)."
+      "note": "Privacy-first via confidential computing (AMD SEV-SNP + NVIDIA CC). REQUIRES local proxy binary — auto-starts when PRIVATEMODEAI_API_KEY is set (adds ~15-30s boot for remote attestation). Hardware-enforced E2E encryption: Edgeless Systems, Scaleway, model vendors cannot see prompts. Free: 5M initial tokens, then 1M prompt + 1M completion/mo. All models discovered dynamically from the local proxy API or docs page — includes chat, embedding, and speech models."
     }
   ]
 }
