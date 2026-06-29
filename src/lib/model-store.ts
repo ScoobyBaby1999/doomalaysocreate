@@ -56,7 +56,7 @@ interface ModelSelectionState {
   getSelectedModel: () => ProviderModel | null;
   getSelectedProvider: () => ProviderGroup | null;
 
-  fetchCondensedModels: () => Promise<void>;
+  fetchCondensedModels: (force?: boolean) => Promise<void>;
   setCondensedView: (v: boolean) => void;
   setProviderPriority: (logical: string, orderedProviders: string[]) => void;
   setGlobalProviderPriority: (orderedProviders: string[] | null) => void;
@@ -228,11 +228,11 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   closeProvidersDialog: () =>
     set({ providersDialogOpen: false, providersDialogProvider: null }),
 
-  fetchCondensedModels: async () => {
+  fetchCondensedModels: async (force?: boolean) => {
     const { baseUrl, condensedFetchedAt } = get();
     if (baseUrl == null) { set({ condensedLoading: false }); return; }
     const CACHE_TTL = 10 * 60 * 1000;
-    if (condensedFetchedAt && Date.now() - condensedFetchedAt < CACHE_TTL) return;
+    if (!force && condensedFetchedAt && Date.now() - condensedFetchedAt < CACHE_TTL) return;
     set({ condensedLoading: true });
     try {
       const res = await fetch(`${baseUrl}/api/models/condensed`);

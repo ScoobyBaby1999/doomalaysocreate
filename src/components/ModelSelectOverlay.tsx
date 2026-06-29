@@ -985,7 +985,7 @@ export function ModelSelectOverlay() {
                         <span className="hidden sm:inline">Privacy</span>
                       </button>
                       <button
-                        onClick={() => fetchCondensedModels()}
+                        onClick={() => fetchCondensedModels(true)}
                         className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
                         title="Refresh condensed catalog"
                       >
