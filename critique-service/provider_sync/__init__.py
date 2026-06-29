@@ -26,7 +26,11 @@ def set_panel_sync_cache(results: dict[str, list[str]]) -> None:
 
 
 def sync_all_providers(registered_providers: dict[str, provider]) -> dict[str, list[str]]:
-    """Fetch live model lists from all registered providers that support sync.
+    """Fetch live model lists from all providers that support sync.
+
+    Syncs registered providers with their API key. Also syncs unregistered
+    providers that have a sync class with ``requires_auth=False`` (they can
+    scrape docs or use open APIs for model listing without a key).
 
     Args:
         registered_providers: Dict of provider_name -> provider instance from Panel.provider_by_name
@@ -40,10 +44,6 @@ def sync_all_providers(registered_providers: dict[str, provider]) -> dict[str, l
 
     for entry in catalog:
         name = entry["name"]
-        if name not in registered_providers:
-            continue
-
-        prov = registered_providers[name]
         sync_config = entry.get("sync_config", {})
         if not sync_config.get("enabled", True):
             continue
@@ -52,8 +52,14 @@ def sync_all_providers(registered_providers: dict[str, provider]) -> dict[str, l
         if not sync_class:
             continue
 
+        prov = registered_providers.get(name)
+        api_key = getattr(prov, "api_key", None) if prov else None
+
+        # Skip providers that need auth but have no API key
+        if not api_key and getattr(sync_class, "requires_auth", True):
+            continue
+
         try:
-            api_key = getattr(prov, "api_key", None)
             params = dict(sync_config.get("params", {}))
             for req in entry.get("requires", []):
                 val = os.environ.get(req, "").strip()

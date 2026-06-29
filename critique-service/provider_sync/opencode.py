@@ -25,6 +25,13 @@ _DOCS_UA = "doomalaysocreate/1.0"
 
 _ZEN_FREE_IDS = frozenset({"big-pickle"})
 
+# Models ending with `-free` suffix that are still PAID in Zen (only free via Go).
+# Despite the suffix convention, these require Zen credits and are not zero-cost.
+_ZEN_PAID_SUFFIX_EXCEPTIONS = frozenset({
+    "minimax-m3-free",
+    "qwen3.6-plus-free",
+})
+
 _ZEN_DOCS_API_URL = "https://opencode.ai/zen/v1/models"
 _ZEN_DOCS_DOCS_URL = "https://opencode.ai/docs/zen/#pricing"
 _GO_API_URL = "https://opencode.ai/zen/go/v1/models"
@@ -85,9 +92,9 @@ class OpenCodeSync(BaseSync):
         return models
 
     def _is_free(self, model_id: str) -> bool:
-        if model_id.endswith("-free"):
-            return True
         if model_id in _ZEN_FREE_IDS:
+            return True
+        if model_id.endswith("-free") and model_id not in _ZEN_PAID_SUFFIX_EXCEPTIONS:
             return True
         return False
 

@@ -5,6 +5,9 @@ inference via a local proxy that handles E2E encryption + remote attestation.
 
 All models discovered dynamically — first from the local proxy API, falling
 back to doc page scraping. No static model lists.
+
+Filters out `-latest` model variants when a more specific model exists
+(e.g. ``kimi-latest`` removed when ``kimi-k2.6`` is present).
 """
 
 from __future__ import annotations
@@ -30,8 +33,28 @@ class PrivateModeAISync(BaseSync):
     def fetch_models(self) -> list[ModelInfo]:
         models = self._fetch_from_api()
         if models:
-            return models
-        return self._fetch_from_docs()
+            return self._dedup_latest(models)
+        return self._dedup_latest(self._fetch_from_docs())
+
+    def _dedup_latest(self, models: list[ModelInfo]) -> list[ModelInfo]:
+        """Remove `-latest` model variants when a more specific model exists.
+        
+        E.g. if both ``kimi-latest`` and ``kimi-k2.6`` are in the list, the
+        ``kimi-latest`` entry is removed since ``kimi-k2.6`` carries more detail.
+        """
+        model_ids = {m.id for m in models}
+        keep: list[ModelInfo] = []
+        for m in models:
+            if not m.id.endswith("-latest"):
+                keep.append(m)
+                continue
+            base = m.id[:-7]
+            if base in model_ids:
+                continue
+            if any(other != m.id and other.startswith(base) for other in model_ids):
+                continue
+            keep.append(m)
+        return keep
 
     def _fetch_from_api(self) -> list[ModelInfo]:
         data = self._make_request(self.models_url)

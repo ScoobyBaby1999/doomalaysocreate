@@ -12,7 +12,7 @@ _cached_cloudflare_models: list[ModelInfo] | None = None
 
 class CloudflareSync(BaseSync):
     provider_name = "cloudflare"
-    requires_auth = True
+    requires_auth = False
     env_var = "CF_API_TOKEN"
 
     DOCS_URL = "https://developers.cloudflare.com/workers-ai/models/index.md"
