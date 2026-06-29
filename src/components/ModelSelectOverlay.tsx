@@ -589,6 +589,7 @@ function CondensedList({
   searchQuery,
   activeFilters,
   contextMin,
+  hideUnavailable,
   selectedModelId,
   onSelect,
   expandedLogical,
@@ -598,14 +599,16 @@ function CondensedList({
   searchQuery: string;
   activeFilters: string[];
   contextMin: number;
+  hideUnavailable: boolean;
   selectedModelId: string | null;
   onSelect: (model: CondensedModel) => void;
   expandedLogical: string | null;
   onToggleExpand: (logical: string | null) => void;
 }) {
   const [showHidden, setShowHidden] = useState(false);
+  const [showUnavailable, setShowUnavailable] = useState(false);
 
-  const { available, hidden } = useMemo(() => {
+  const { available, hiddenByFilter, hiddenByKey } = useMemo(() => {
     const searched = !searchQuery.trim()
       ? models
       : models.filter((m) => {
@@ -618,25 +621,38 @@ function CondensedList({
           );
         });
 
-    const avail: CondensedModel[] = [];
-    const hid: CondensedModel[] = [];
+    const filtMatch: CondensedModel[] = [];
+    const filtMiss: CondensedModel[] = [];
     for (const m of searched) {
       if (condensedModelMatchesFilters(m, activeFilters, contextMin)) {
-        avail.push(m);
+        filtMatch.push(m);
       } else {
-        hid.push(m);
+        filtMiss.push(m);
       }
     }
 
+    const avail: CondensedModel[] = [];
+    const noKey: CondensedModel[] = [];
+    for (const m of filtMatch) {
+      if (m.hosts.some((h) => h.hasApiKey)) {
+        avail.push(m);
+      } else {
+        noKey.push(m);
+      }
+    }
+
+    const sorted = activeFilters.length > 0 || contextMin > 0
+      ? avail.sort((a, b) => {
+          const sa = bestFilterScore({ id: a.logical, displayName: a.displayName, contextLength: a.contextLength, attributes: a.attributes } as ProviderModel, activeFilters);
+          const sb = bestFilterScore({ id: b.logical, displayName: b.displayName, contextLength: b.contextLength, attributes: b.attributes } as ProviderModel, activeFilters);
+          return sb - sa;
+        })
+      : defaultSort(avail.map((m) => ({ id: m.logical, displayName: m.displayName, contextLength: m.contextLength, attributes: m.attributes } as ProviderModel))).map((pm) => avail.find((m) => m.logical === pm.id)!).filter(Boolean);
+
     return {
-      available: activeFilters.length > 0 || contextMin > 0
-        ? avail.sort((a, b) => {
-            const sa = bestFilterScore({ id: a.logical, displayName: a.displayName, contextLength: a.contextLength, attributes: a.attributes } as ProviderModel, activeFilters);
-            const sb = bestFilterScore({ id: b.logical, displayName: b.displayName, contextLength: b.contextLength, attributes: b.attributes } as ProviderModel, activeFilters);
-            return sb - sa;
-          })
-        : defaultSort(avail.map((m) => ({ id: m.logical, displayName: m.displayName, contextLength: m.contextLength, attributes: m.attributes } as ProviderModel))).map((pm) => avail.find((m) => m.logical === pm.id)!).filter(Boolean),
-      hidden: hid,
+      available: sorted,
+      hiddenByFilter: filtMiss,
+      hiddenByKey: noKey,
     };
   }, [models, searchQuery, activeFilters, contextMin]);
 
@@ -651,7 +667,7 @@ function CondensedList({
 
   return (
     <div className="flex flex-col gap-px p-1">
-      {available.length === 0 && hidden.length === 0 && (
+      {available.length === 0 && hiddenByFilter.length === 0 && hiddenByKey.length === 0 && (
         <div className="flex items-center justify-center h-16 text-[10px] text-muted-foreground/50">
           no models match
         </div>
@@ -668,7 +684,49 @@ function CondensedList({
         />
       ))}
 
-      {hidden.length > 0 && (
+      {hideUnavailable && hiddenByKey.length > 0 && (
+        <>
+          <button
+            onClick={() => setShowUnavailable((v) => !v)}
+            className="flex items-center gap-1.5 px-1.5 py-1 mt-1 border-t border-border/30 text-[9px] text-muted-foreground/50 hover:text-muted-foreground/80 transition-colors cursor-pointer select-none"
+          >
+            <span
+              className="text-[10px] leading-none transition-transform duration-150"
+              style={{ transform: showUnavailable ? "rotate(90deg)" : "rotate(0deg)" }}
+            >
+              {"\u25b8"}
+            </span>
+            <span className="text-[9px] leading-none">
+              {showUnavailable ? `Hide unavailable (${hiddenByKey.length})` : `Unavailable models (${hiddenByKey.length})`}
+            </span>
+          </button>
+          {showUnavailable && hiddenByKey.map((m) => (
+            <CondensedModelRow
+              key={m.logical}
+              model={m}
+              isSelected={selectedLogical === m.logical}
+              onSelect={() => onSelect(m)}
+              expanded={expandedLogical === m.logical}
+              onToggleExpand={() => onToggleExpand(expandedLogical === m.logical ? null : m.logical)}
+              dimmed
+            />
+          ))}
+        </>
+      )}
+
+      {!hideUnavailable && hiddenByKey.length > 0 && hiddenByKey.map((m) => (
+        <CondensedModelRow
+          key={m.logical}
+          model={m}
+          isSelected={selectedLogical === m.logical}
+          onSelect={() => onSelect(m)}
+          expanded={expandedLogical === m.logical}
+          onToggleExpand={() => onToggleExpand(expandedLogical === m.logical ? null : m.logical)}
+          dimmed
+        />
+      ))}
+
+      {hiddenByFilter.length > 0 && (
         <>
           <button
             onClick={() => setShowHidden((v) => !v)}
@@ -681,10 +739,10 @@ function CondensedList({
               {"\u25b8"}
             </span>
             <span className="text-[9px] leading-none">
-              {showHidden ? `Hide ${hidden.length} hidden` : `Hidden models (${hidden.length})`}
+              {showHidden ? `Hide ${hiddenByFilter.length} hidden` : `Hidden models (${hiddenByFilter.length})`}
             </span>
           </button>
-          {showHidden && hidden.map((m) => (
+          {showHidden && hiddenByFilter.map((m) => (
             <CondensedModelRow
               key={m.logical}
               model={m}
@@ -716,6 +774,7 @@ export function ModelSelectOverlay() {
     searchQuery,
     activeFilters,
     contextMin,
+    hideUnavailable,
     condensedModels,
     condensedView,
     fetchProviders,
@@ -726,6 +785,7 @@ export function ModelSelectOverlay() {
     closeOverlay,
     setSearchQuery,
     toggleFilter,
+    setHideUnavailable,
     setContextMin,
     openProvidersDialog,
     setCondensedView,
@@ -958,9 +1018,23 @@ export function ModelSelectOverlay() {
                     </button>
                   )}
                   {condensedView && (
-                    <span className="text-[9px] text-muted-foreground/50 ml-auto shrink-0 tabular-nums">
-                      {condensedModels.length} models
-                    </span>
+                    <>
+                      <button
+                        onClick={() => setHideUnavailable(!hideUnavailable)}
+                        className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+                        style={{
+                          borderColor: hideUnavailable ? "#22c55e50" : "var(--border)",
+                          backgroundColor: hideUnavailable ? "#22c55e15" : "transparent",
+                          color: hideUnavailable ? "#22c55e" : "var(--muted-foreground)",
+                        }}
+                        aria-pressed={hideUnavailable}
+                      >
+                        {hideUnavailable ? "Available" : "All models"}
+                      </button>
+                      <span className="text-[9px] text-muted-foreground/50 shrink-0 tabular-nums ml-auto">
+                        {condensedModels.length} models
+                      </span>
+                    </>
                   )}
                   {!condensedView && !loading && (
                     <span className="text-[9px] text-muted-foreground/50 ml-auto shrink-0 tabular-nums">
@@ -1025,6 +1099,7 @@ export function ModelSelectOverlay() {
                       searchQuery={searchQuery}
                       activeFilters={activeFilters}
                       contextMin={contextMin}
+                      hideUnavailable={hideUnavailable}
                       selectedModelId={selectedModelId}
                       onSelect={handleCondensedSelect}
                       expandedLogical={expandedLogical}

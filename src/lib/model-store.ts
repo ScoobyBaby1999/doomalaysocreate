@@ -30,6 +30,7 @@ interface ModelSelectionState {
   searchQuery: string;
   activeFilters: string[];
   contextMin: number;
+  hideUnavailable: boolean;
 
   condensedModels: CondensedModel[];
   condensedFetchedAt: number;
@@ -48,6 +49,7 @@ interface ModelSelectionState {
   toggleOverlay: () => void;
   setSearchQuery: (q: string) => void;
   toggleFilter: (filter: string) => void;
+  setHideUnavailable: (v: boolean) => void;
   setContextMin: (min: number) => void;
   openProvidersDialog: (providerName?: string) => void;
   closeProvidersDialog: () => void;
@@ -106,6 +108,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   searchQuery: "",
   activeFilters: loadPersisted<string[]>(`${PREFIX}.activeFilters`, []),
   contextMin: loadPersisted<number>(`${PREFIX}.contextMin`, 0),
+  hideUnavailable: loadPersisted<boolean>(`${PREFIX}.hideUnavailable`, true),
 
   condensedModels: [],
   condensedFetchedAt: 0,
@@ -201,6 +204,11 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
 
   openOverlay: () => set({ overlayOpen: true }),
   closeOverlay: () => set({ overlayOpen: false, searchQuery: "" }),
+  setHideUnavailable: (v: boolean) => {
+    set({ hideUnavailable: v });
+    persist(`${PREFIX}.hideUnavailable`, v);
+  },
+
   toggleOverlay: () => {
     const { overlayOpen } = get();
     set({ overlayOpen: !overlayOpen, searchQuery: "" });
