@@ -1214,14 +1214,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, panel.metrics.aggregates(profile))
             return
         # --- Provider model catalog (public, no auth) ---
-        if route == "/api/models" or route == "/api/models/condensed":
+        if route == "/api/models":
             from urllib.parse import parse_qs
-            from provider_sync.catalog import build_provider_catalog, build_condensed_catalog
-            if route == "/api/models/condensed":
-                result = build_condensed_catalog()
-                log_event("condensed_catalog_served", model_count=len(result.get("models", [])))
-                self._send_json(200, result)
-                return
+            from provider_sync.catalog import build_provider_catalog
             q = parse_qs(urlsplit(self.path).query)
             refresh = q.get("refresh", ["0"])[0] in ("1", "true", "yes")
             result = build_provider_catalog(force_refresh=refresh)

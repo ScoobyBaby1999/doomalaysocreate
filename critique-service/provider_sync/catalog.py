@@ -92,6 +92,12 @@ def make_family(model_id: str) -> str:
                 m = m[:-len(s)]
                 changed = True
                 break
+    # After suffix stripping, if a prefix path remains (e.g. "meta/llama-3.3-70b"),
+    # strip everything before the last "/" so models share the same family key
+    # regardless of the provider serving them.
+    slash = m.rfind("/")
+    if slash >= 0:
+        m = m[slash + 1:]
     return m
 
 
@@ -616,8 +622,12 @@ def build_provider_catalog(force_refresh: bool = False) -> dict[str, Any]:
 
         total_models = sum(len(p["models"]) for p in providers_list)
 
+        # 4. Build de-duped logical catalog from provider models
+        logical_models = _build_logical_catalog(providers_list, family_registry, catalog)
+
         result: dict[str, Any] = {
             "providers": providers_list,
+            "logical": logical_models,
             "totalModels": total_models,
             "syncedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
             "syncStatus": sync_status,
@@ -626,6 +636,107 @@ def build_provider_catalog(force_refresh: bool = False) -> dict[str, Any]:
         _cache = result
         _cache_at = time.time()
         return result
+
+
+# ---------------------------------------------------------------------------
+# Logical (de-duped) catalog builder
+# ---------------------------------------------------------------------------
+def _build_logical_catalog(
+    provider_groups: list[dict[str, Any]],
+    family_registry: dict[str, dict[str, Any]],
+    catalog_entries: list[dict],
+) -> list[dict[str, Any]]:
+    """Group all provider models by family into de-duped logical entries.
+
+    Each logical entry carries a *hosts* list — every provider that serves
+    this model, with per-host details and the provider's API key status.
+    Attributes (capabilities, benchmarks, pricing) are merged from the
+    OpenRouter family registry.
+    """
+    # Cache API-key presence per provider
+    provider_keys: dict[str, bool] = {}
+    for entry in catalog_entries:
+        name = entry["name"]
+        env_vars = entry.get("env_var", [])
+        if isinstance(env_vars, str):
+            env_vars = [env_vars]
+        has_key = all(os.environ.get(v, "").strip() for v in env_vars if v)
+        provider_keys[name] = has_key
+
+    groups: dict[str, dict[str, Any]] = {}
+
+    for pg in provider_groups:
+        prov_name = pg["name"]
+        disp = pg.get("displayName", prov_name)
+        icon = pg.get("icon", "Box")
+        color = pg.get("color", "#888")
+        has_api_key = provider_keys.get(prov_name, False)
+        synced_live = pg.get("syncedLive", False)
+
+        for model in pg.get("models", []):
+            family = model.get("family") or model["id"]
+            if family not in groups:
+                groups[family] = {
+                    "logical": family,
+                    "displayName": model["displayName"],
+                    "family": family,
+                    "contextLength": 0,
+                    "hosts": [],
+                }
+            group = groups[family]
+
+            group["hosts"].append({
+                "provider": prov_name,
+                "providerDisplayName": disp,
+                "icon": icon,
+                "color": color,
+                "modelId": model["id"],
+                "contextLength": model.get("contextLength", 0) or 0,
+                "hasApiKey": has_api_key,
+                "syncedLive": synced_live,
+                "defaultPriority": len(group["hosts"]) + 1,
+            })
+
+            ctx = model.get("contextLength", 0) or 0
+            if ctx > group["contextLength"]:
+                group["contextLength"] = ctx
+
+    # Merge family-registry attributes per group
+    result: list[dict[str, Any]] = []
+    for family in sorted(groups.keys()):
+        group = groups[family]
+        fam_meta = family_registry.get(family, {})
+        attributes: dict[str, Any] = {}
+
+        caps = fam_meta.get("capabilities")
+        if caps:
+            attributes["capabilities"] = caps
+        bm = fam_meta.get("benchmarks")
+        if bm:
+            attributes["benchmarks"] = bm
+        pricing = fam_meta.get("pricing")
+        if pricing:
+            attributes["pricing"] = pricing
+        ranks = fam_meta.get("ranks")
+        if ranks:
+            attributes["ranks"] = ranks
+        free_note = fam_meta.get("free_note")
+        if free_note:
+            attributes["note"] = free_note
+
+        entry: dict[str, Any] = {
+            "logical": group["logical"],
+            "displayName": group["displayName"],
+            "family": group["family"],
+            "contextLength": group["contextLength"],
+            "hosts": group["hosts"],
+        }
+        if attributes:
+            entry["attributes"] = attributes
+        result.append(entry)
+
+    log_event("logical_catalog_built", count=len(result))
+    return result
 
 
 def build_condensed_catalog(force_refresh: bool = False) -> dict[str, Any]:
