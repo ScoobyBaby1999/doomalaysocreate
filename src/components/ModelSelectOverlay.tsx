@@ -114,12 +114,21 @@ function modelMatchesFilters(model: ProviderModel, activeFilters: string[], cont
   });
 }
 
+function isReasoningModel(model: { displayName: string; id?: string; logical?: string; attributes?: ModelAttributes }): boolean {
+  const caps = model.attributes?.capabilities ?? [];
+  if (caps.includes("reasoning")) return true;
+  const name = [model.displayName, model.id ?? model.logical ?? ""].join(" ").toLowerCase();
+  return /\breasoning\b/.test(name);
+}
+
 function bestFilterScore(model: ProviderModel, activeFilters: string[]): number {
   const bm = model.attributes?.benchmarks;
   let best = 0;
   for (const filter of activeFilters) {
-    if (filter === "reasoning") best = Math.max(best, bm?.intelligence ?? 0);
+    if (filter === "reasoning") best = Math.max(best, isReasoningModel(model) ? 1 : 0);
+    if (filter === "intelligence") best = Math.max(best, bm?.intelligence ?? 0);
     if (filter === "code") best = Math.max(best, bm?.coding ?? 0, bm?.aaCoding ?? 0);
+    if (filter === "agent") best = Math.max(best, bm?.agentic ?? 0);
     if (filter === "tools") best = Math.max(best, bm?.agentic ?? 0);
   }
   return best;
@@ -130,26 +139,35 @@ function sortByFilterScore(models: ProviderModel[], activeFilters: string[]): Pr
   return [...models].sort((a, b) => bestFilterScore(b, activeFilters) - bestFilterScore(a, activeFilters));
 }
 
+function bestRank(attrs: ModelAttributes | undefined): number {
+  const ranks = attrs?.ranks;
+  if (!ranks || ranks.length === 0) return Infinity;
+  return Math.min(...ranks.map((r) => r.rank));
+}
+
 function defaultSort(models: ProviderModel[]): ProviderModel[] {
   return [...models].sort((a, b) => {
-    const aCode = a.attributes?.benchmarks?.coding ?? 0;
-    const bCode = b.attributes?.benchmarks?.coding ?? 0;
     const aIntel = a.attributes?.benchmarks?.intelligence ?? 0;
     const bIntel = b.attributes?.benchmarks?.intelligence ?? 0;
+    if (aIntel !== bIntel) return bIntel - aIntel;
 
-    const aTier = aCode >= 20 ? 0 : aIntel >= 20 ? 1 : 2;
-    const bTier = bCode >= 20 ? 0 : bIntel >= 20 ? 1 : 2;
+    const aRank = bestRank(a.attributes);
+    const bRank = bestRank(b.attributes);
+    if (aRank !== bRank) return aRank === Infinity ? 1 : bRank === Infinity ? -1 : aRank - bRank;
 
-    if (aTier !== bTier) return aTier - bTier;
-    if (aTier === 0) return bCode - aCode;
-    if (aTier === 1) return bIntel - aIntel;
+    const aCode = a.attributes?.benchmarks?.coding ?? 0;
+    const bCode = b.attributes?.benchmarks?.coding ?? 0;
+    if (aCode !== bCode) return bCode - aCode;
+
     return 0;
   });
 }
 
 const FILTER_PILLS = [
   { id: "reasoning", label: "Reasoning", color: "#f97316" },
+  { id: "intelligence", label: "Intelligence", color: "#a855f7" },
   { id: "code", label: "Code", color: "#3b82f6" },
+  { id: "agent", label: "Agent", color: "#14b8a6" },
   { id: "tools", label: "Tools", color: "#8b5cf6" },
   { id: "vision", label: "Vision", color: "#22c55e" },
   { id: "speech", label: "Speech", color: "#ec4899" },
@@ -575,8 +593,10 @@ function condensedModelMatchesFilters(model: CondensedModel, activeFilters: stri
   const caps = model.attributes?.capabilities ?? [];
   const bm = model.attributes?.benchmarks;
   return activeFilters.some((filter) => {
-    if (filter === "reasoning") return caps.includes("reasoning") || (bm?.intelligence ?? 0) >= 20;
+    if (filter === "reasoning") return isReasoningModel(model);
+    if (filter === "intelligence") return (bm?.intelligence ?? 0) >= 20;
     if (filter === "code") return caps.includes("code") || (bm?.coding ?? 0) >= 20 || (bm?.aaCoding ?? 0) >= 20;
+    if (filter === "agent") return (bm?.agentic ?? 0) >= 20;
     if (filter === "tools") return caps.includes("tools") || caps.includes("tool use") || (bm?.agentic ?? 0) >= 20;
     if (filter === "vision") return caps.includes("vision");
     if (filter === "speech") return caps.includes("speech") || caps.includes("audio");
