@@ -775,6 +775,122 @@ def _bump_cost(cid: str, amount: float) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 10.15 agent_panel  — standalone panel invocation (no conscious context needed)
+# ---------------------------------------------------------------------------
+
+def _agent_panel(agent_session: Any, args: dict) -> dict:
+    """Invoke the judge panel directly, emitting progress events to the agent stream.
+
+    Unlike ``conscious_panel``, this tool requires no conscious binding. It runs the
+    panel inline (blocking the agent's turn), emitting ``panel`` events with per-judge
+    progress snapshots so the frontend can stream results in real-time.
+
+    Args:
+        prompt: the critique prompt (non-empty string).
+        panel: optional list of logical model names.
+        profile: optional profile id (default "default").
+        effort: optional effort level (default "medium").
+        timeout_s: optional per-judge timeout (default 600).
+
+    Returns:
+        {invoke_id, task_name, status, judges, merged, meta}
+    """
+    prompt = str(args.get("prompt", "")).strip()
+    if not prompt:
+        return {"error": "prompt (non-empty string) is required"}
+
+    panel_list = args.get("panel")
+    profile = str(args.get("profile", "default"))
+    effort = str(args.get("effort", "medium")).replace("medium", "med")
+    timeout_s = int(args.get("timeout_s", 600) or 600)
+
+    try:
+        from critique_service import _panel as g_panel, _jobs as g_jobs
+    except Exception as exc:
+        return {"error": f"panel system not available: {exc}"}
+
+    if g_panel is None or g_jobs is None:
+        return {"error": "panel system not initialized"}
+
+    who_list: list[str] = (
+        [str(m) for m in panel_list]
+        if isinstance(panel_list, list) and panel_list
+        else list(g_panel.default_panel)
+    )
+
+    import secrets as _sec
+    task_name = _sec.token_hex(4)
+    invoke_id = _sec.token_hex(8)
+
+    agent_session.emit({
+        "type": "panel", "status": "starting",
+        "invoke_id": invoke_id, "task_name": task_name,
+        "prompt": prompt, "panel": list(who_list),
+    })
+
+    try:
+        job = g_jobs.submit(
+            who_list=who_list,
+            system_prompt=prompt,
+            user_msg=prompt,
+            max_tokens=4096,
+            role="critiquer",
+            merge_mode="dedupe",
+            kind="critique",
+            profile=profile,
+            effort="med" if effort == "medium" else effort,
+            timeout_s=float(timeout_s),
+            nonce="",
+            reasoning=False,
+            research=False,
+            privacy="off",
+        )
+    except Exception as exc:
+        agent_session.emit({
+            "type": "panel", "status": "done",
+            "invoke_id": invoke_id, "task_name": task_name,
+            "error": str(exc),
+        })
+        return {"invoke_id": invoke_id, "task_name": task_name,
+                "status": "error", "error": str(exc)}
+
+    job_id = job.get("job_id") or ""
+    if not job_id:
+        return {"invoke_id": invoke_id, "task_name": task_name,
+                "status": "error", "error": "no job_id returned"}
+
+    deadline = time.time() + (timeout_s * len(who_list) + 30)
+    while time.time() < deadline:
+        snap = g_jobs.snapshot(job_id)
+        if snap is None:
+            break
+        agent_session.emit({
+            "type": "panel", "status": "running",
+            "invoke_id": invoke_id, "task_name": task_name,
+            "snapshot": dict(snap),
+        })
+        if snap.get("status") == "complete":
+            break
+        time.sleep(1.5)
+
+    final = g_jobs.snapshot(job_id) or job
+    agent_session.emit({
+        "type": "panel", "status": "done",
+        "invoke_id": invoke_id, "task_name": task_name,
+        "snapshot": dict(final) if isinstance(final, dict) else {},
+    })
+
+    return {
+        "invoke_id": invoke_id,
+        "task_name": task_name,
+        "status": "done",
+        "judges": list(final.get("judges", [])),
+        "merged": final.get("merged", ""),
+        "meta": dict(final.get("meta", {})),
+    }
+
+
+# ---------------------------------------------------------------------------
 # CONSCIOUS_TOOLS — registered in both adapters (claude + open) by agent_sessions.py
 # ---------------------------------------------------------------------------
 
@@ -1019,5 +1135,28 @@ CONSCIOUS_TOOLS: list[dict] = [
             "required": ["prompt"],
         },
         "handler": _conscious_panel,
+    },
+    {
+        "name": "agent_panel",
+        "description": (
+            "Invoke the judge panel directly, emitting progress to the event stream. "
+            "Runs the panel inline (blocking the agent's turn) and streams per-judge "
+            "snapshots so the frontend shows live progress. No conscious binding required. "
+            "Use this to get multi-model critiques, reviews, or evaluations."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "the critique prompt (required)"},
+                "panel": {"type": "array", "items": {"type": "string"},
+                          "description": "optional list of logical model names; defaults to configured panel"},
+                "profile": {"type": "string", "default": "default"},
+                "effort": {"type": "string", "default": "medium",
+                           "enum": ["low", "med", "high", "max"]},
+                "timeout_s": {"type": "integer", "default": 600},
+            },
+            "required": ["prompt"],
+        },
+        "handler": _agent_panel,
     },
 ]

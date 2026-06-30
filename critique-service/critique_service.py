@@ -43,6 +43,10 @@ from providers import (
 )
 from scheduler import SlotScheduler
 
+# Module-level globals for agent_panel tool access
+_panel: 'Panel | None' = None
+_jobs: 'JobRunner | None' = None
+
 # ---------------------------------------------------------------------------
 # doomalaysocreate's multi-model critique panel, exposed as a slim standalone service.
 #
@@ -3167,6 +3171,7 @@ def _ensure_privatemode_proxy() -> None:
 
 
 def main() -> int:
+    global _panel, _jobs
     _ensure_auth_secret()
     _ensure_encryption_key()
     host = os.environ.get("HOST", "0.0.0.0")
@@ -3180,16 +3185,17 @@ def main() -> int:
     except FileNotFoundError:
         log_event("privatemode_proxy_missing")
 
-    panel = Panel()
-    if not panel.providers:
+    _panel = Panel()
+    if not _panel.providers:
         log_event("startup_warning", msg="no providers have API keys - every judge will fail")
 
     # initialize SQLite database for GitHub + HF integration
     db.init_db()
 
     server = BoundedThreadingHTTPServer((host, port), Handler, max_workers=MAX_WORKERS)
-    server.panel = panel  # type: ignore[attr-defined]
-    server.jobs = JobRunner(panel, judge_timeout_s=JUDGE_TIMEOUT_S)  # type: ignore[attr-defined]
+    _jobs = JobRunner(_panel, judge_timeout_s=JUDGE_TIMEOUT_S)
+    server.panel = _panel  # type: ignore[attr-defined]
+    server.jobs = _jobs  # type: ignore[attr-defined]
 
     log_event("startup", host=host, port=port,
               providers=[p.name for p in panel.providers],
