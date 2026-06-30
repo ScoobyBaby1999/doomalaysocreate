@@ -277,6 +277,15 @@ def _run_git(sandbox: str, *args: str) -> str:
     return result.stdout.strip()
 
 
+def run_git_command(sandbox: str, *args: str) -> str:
+    """Public wrapper around ``_run_git`` for endpoints that need arbitrary git queries.
+    
+    Safely executes read-only or approved git commands in the workspace sandbox.
+    Use for: status, diff, log, show, branch, etc.
+    """
+    return _run_git(sandbox, *args)
+
+
 def _sanitize_git_error(err: str) -> str:
     """Strip URLs and auth tokens from git error messages."""
     import re

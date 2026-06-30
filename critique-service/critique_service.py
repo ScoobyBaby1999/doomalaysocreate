@@ -1352,6 +1352,15 @@ class Handler(BaseHTTPRequestHandler):
             parts = ws_rest.split("/", 1)
             ws_id = parts[0]
             sub = parts[1] if len(parts) > 1 else ""
+            if sub == "status":
+                self._handle_workspace_status(ws_id)
+                return
+            if sub == "diff":
+                self._handle_workspace_diff(ws_id)
+                return
+            if sub == "log":
+                self._handle_workspace_log(ws_id)
+                return
             if sub == "logs":
                 self._handle_workspace_logs(ws_id)
                 return
@@ -2707,6 +2716,73 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"tree": tree})
         except Exception as exc:
             self._send_json(502, {"error": str(exc)})
+
+    def _handle_workspace_status(self, ws_id: str) -> None:
+        """GET /api/workspaces/<id>/status — return git status --porcelain as structured JSON."""
+        user_id = self._require_user()
+        if not user_id:
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        try:
+            raw = github_integration.run_git_command(ws["sandbox_path"], "status", "--porcelain")
+            files = []
+            for line in raw.splitlines():
+                line = line.strip()
+                if len(line) < 3:
+                    continue
+                files.append({"status": line[:2].strip(), "path": line[3:]})
+            # Also get current branch
+            branch = github_integration.run_git_command(ws["sandbox_path"], "rev-parse", "--abbrev-ref", "HEAD")
+            self._send_json(200, {"branch": branch, "files": files, "dirty": len(files) > 0})
+        except Exception as exc:
+            self._send_json(500, {"error": str(exc)})
+
+    def _handle_workspace_diff(self, ws_id: str) -> None:
+        """GET /api/workspaces/<id>/diff — return git diff (unified, staged+unstaged)."""
+        user_id = self._require_user()
+        if not user_id:
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        try:
+            raw = github_integration.run_git_command(ws["sandbox_path"], "diff", "--no-color")
+            self._send_json(200, {"diff": raw, "has_changes": bool(raw.strip())})
+        except Exception as exc:
+            self._send_json(500, {"error": str(exc)})
+
+    def _handle_workspace_log(self, ws_id: str) -> None:
+        """GET /api/workspaces/<id>/log?limit=10 — return recent git log."""
+        user_id = self._require_user()
+        if not user_id:
+            return
+        ws = db.get_workspace(ws_id)
+        if not ws or ws["user_id"] != user_id:
+            self._send_json(403, {"error": "access denied"})
+            return
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(self.path).query)
+        try:
+            limit = min(int(qs.get("limit", ["10"])[0]), 50)
+        except (ValueError, IndexError):
+            limit = 10
+        try:
+            raw = github_integration.run_git_command(
+                ws["sandbox_path"], "log", f"-{limit}", "--format=%H|%an|%ae|%ai|%s")
+            commits = []
+            for line in raw.splitlines():
+                parts = line.split("|", 4)
+                if len(parts) == 5:
+                    commits.append({"hash": parts[0], "author": parts[1],
+                                    "email": parts[2], "date": parts[3],
+                                    "message": parts[4]})
+            self._send_json(200, {"commits": commits})
+        except Exception as exc:
+            self._send_json(500, {"error": str(exc)})
 
     def _handle_workspace_checkout(self, ws_id: str) -> None:
         user_id = self._require_user()
