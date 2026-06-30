@@ -975,6 +975,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _log_request(self, method: str, route: str, status: int, latency_ms: float, error: str | None = None) -> None:
         """Safely records request metrics and structural metadata to the RAM ring buffer."""
+        # Skip debug endpoints to avoid feedback loops (DebugScreen polls every 5s)
+        if route.startswith("/api/debug/"):
+            return
         from debug_log import log_entry
         import hashlib
         import base64
