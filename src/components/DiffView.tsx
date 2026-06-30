@@ -10,7 +10,7 @@ export function DiffView({ diff, filename }: { diff: string; filename?: string }
       const output = html(diff, {
         drawFileList: true,
         matching: "lines",
-        outputFormat: "line-by-file",
+        outputFormat: "line-by-line",
         highlight: false,
       });
       ref.current.innerHTML = typeof output === "string" ? output : "";

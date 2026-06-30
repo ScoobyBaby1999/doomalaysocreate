@@ -222,7 +222,7 @@ export function AgentChat({
     if (model) { setSelected(model); localStorage.setItem(MODEL_KEY, model); }
   }
 
-  const isDesktop = useMediaQuery("(min-width: 768px)");
+  const isDesktop = useMediaQuery("(min-width: 768px)"); void isDesktop;
 
   // Restore session on mount: if we have a stored session ID, fetch its full transcript
   useEffect(() => {
