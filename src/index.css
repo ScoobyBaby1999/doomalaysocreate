@@ -23,3 +23,24 @@ body {
 .md a { color: #5b8cff; }
 .md table { border-collapse: collapse; margin: 0 0 0.6rem; display: block; overflow-x: auto; }
 .md th,.md td { border: 1px solid #262d36; padding: 0.3rem 0.5rem; }
+
+/* diff2html minimal dark theme */
+.d2h-wrapper { font-size: 11px; line-height: 1.4; }
+.d2h-file-header { background: #14191e; border-bottom: 1px solid #262d36; padding: 4px 8px; display: flex; align-items: center; gap: 8px; }
+.d2h-file-header.d2h-sticky { position: static !important; }
+.d2h-file-name { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; color: #88929e; }
+.d2h-file-stats { display: none; }
+.d2h-lines-added { color: #34d399; font-size: 10px; margin-left: auto; }
+.d2h-lines-deleted { color: #f87171; font-size: 10px; }
+.d2h-file-list-wrapper { display: none; }
+.d2h-diff-table { width: 100%; border-collapse: collapse; }
+.d2h-code-line { padding: 0 6px; white-space: pre; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; line-height: 1.5; }
+.d2h-code-side-line { padding: 0 6px; white-space: pre; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; line-height: 1.5; }
+.d2h-ins { background: #064e3b; }
+.d2h-del { background: #7f1d1d; }
+.d2h-info { background: #1e293b; color: #64748b; }
+.d2h-cntx { color: #88929e; }
+.d2h-code-line-prefix { color: #475569; user-select: none; }
+.d2h-code-line-ctn { color: #c8d0da; }
+.d2h-emptyplaceholder { display: none; }
+.d2h-tag { display: none; }

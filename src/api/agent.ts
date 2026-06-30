@@ -157,6 +157,32 @@ export class AgentClient {
     return this.req<{ session_id: string; files: AgentFile[] }>(`/api/agent/${sessionId}/files`);
   }
 
+  // -- workspace / git operations -----------------------------------------
+
+  workspaceStatus(wsId: string) {
+    return this.req<{ branch: string; files: { status: string; path: string }[]; dirty: boolean }>(
+      `/api/workspaces/${wsId}/status`,
+    );
+  }
+
+  workspaceDiff(wsId: string) {
+    return this.req<{ diff: string; has_changes: boolean }>(`/api/workspaces/${wsId}/diff`);
+  }
+
+  workspaceCommit(wsId: string, message: string) {
+    return this.req<{ commit_sha: string }>(`/api/workspaces/${wsId}/commit`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    });
+  }
+
+  workspacePush(wsId: string, opts?: { branch?: string; force?: boolean; auto_approve?: boolean }) {
+    return this.req<{ commit_sha?: string; branch?: string; status?: string }>(
+      `/api/workspaces/${wsId}/push`,
+      { method: "POST", body: JSON.stringify(opts || {}) },
+    );
+  }
+
   /** Download an artifact. Plain <a href> can't carry the bearer, so we fetch
    *  the bytes ourselves and trigger a download from an object URL. */
   async download(sessionId: string, path: string): Promise<void> {

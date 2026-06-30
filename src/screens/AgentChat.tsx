@@ -12,6 +12,9 @@ import { JudgeCard } from "../components/JudgeCard";
 import { useModelStore } from "../lib/model-store";
 import { PanelDrawer, type PanelInvocation } from "../components/PanelDrawer";
 import { FileDrawer } from "../components/FileDrawer";
+import { DiffView } from "../components/DiffView";
+import { GitStatus } from "../components/GitStatus";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 
 const SESSION_KEY = "doomalaysocreate.agent.session";
 const MODEL_KEY = "doomalaysocreate.agent.model";
@@ -219,10 +222,37 @@ export function AgentChat({
     if (model) { setSelected(model); localStorage.setItem(MODEL_KEY, model); }
   }
 
+  const isDesktop = useMediaQuery("(min-width: 768px)");
+
+  // Restore session on mount: if we have a stored session ID, fetch its full transcript
+  useEffect(() => {
+    const sid = sessionRef.current;
+    if (!sid) return;
+    let alive = true;
+    client.current.poll(sid, 0)
+      .then((snap) => {
+        if (!alive) return;
+        setEvents(snap.events);
+        setStatus(snap.status);
+        // resume polling if session was still running
+        if (snap.status === "running" || snap.status === "starting") {
+          pollUntilSettled(sid, snap.next);
+        }
+      })
+      .catch(() => {
+        // session expired, clear it
+        sessionRef.current = null;
+        sessionStorage.removeItem(SESSION_KEY);
+      });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const running = status === "running" || status === "starting";
 
   return (
     <div className="flex flex-col h-full relative">
+      {/* header */}
       <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted shrink-0">
         <button
           onClick={() => !running && openOverlay()}
@@ -373,6 +403,13 @@ export function AgentChat({
         </div>
       </div>
 
+      {/* Git status bar — only when workspace is selected */}
+      {selectedWorkspace && (
+        <div className="shrink-0">
+          <GitStatus client={client.current} wsId={selectedWorkspace} />
+        </div>
+      )}
+
       <FileDrawer
         open={fileDrawerOpen}
         onClose={() => setFileDrawerOpen(false)}
@@ -402,6 +439,10 @@ function toolIcon(name: string): string {
   const k = name.toLowerCase();
   for (const key of Object.keys(TOOL_ICONS)) if (k.includes(key)) return TOOL_ICONS[key];
   return "⚙";
+}
+
+function isDiff(text: string): boolean {
+  return text.includes("---") && text.includes("+++") && /^diff --git/.test(text.trim());
 }
 
 function EventRow({ ev }: { ev: AgentEvent }) {
@@ -443,6 +484,17 @@ function EventRow({ ev }: { ev: AgentEvent }) {
     );
   }
   if (ev.type === "tool_result") {
+    const isDiffContent = !ev.is_error && isDiff(ev.text);
+    if (isDiffContent) {
+      return (
+        <div className="px-3 py-1 max-w-2xl mx-auto">
+          <div className="rounded-lg border border-border overflow-hidden">
+            <div className="px-2 py-1 text-[11px] text-muted border-b border-border bg-surface/50">diff</div>
+            <DiffView diff={ev.text} />
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="px-3 py-1 max-w-2xl mx-auto">
         <Collapsible label={ev.is_error ? "result (error)" : "result"} error={ev.is_error}>
