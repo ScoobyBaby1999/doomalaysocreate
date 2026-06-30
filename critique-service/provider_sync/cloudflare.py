@@ -35,6 +35,8 @@ class CloudflareSync(BaseSync):
 
     def __init__(self, api_key: str | None = None, **kwargs) -> None:
         super().__init__(api_key, **kwargs)
+        if not self.api_key:
+            self.api_key = os.environ.get("CF_API_TOKEN", "")
         self.account_id = kwargs.get("account_id") or kwargs.get("cf_account_id") or os.environ.get("CF_ACCOUNT_ID", "")
         self.models_url = None
         if self.account_id:
