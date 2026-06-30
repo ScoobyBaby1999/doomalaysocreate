@@ -711,7 +711,7 @@ def _token_ok(header_value: str | None) -> bool:
 # ---------------------------------------------------------------------------
 
 def _oauth_configured() -> bool:
-    return bool(os.environ.get("OAUTH_CLIENT_ID", "").strip())
+    return bool(os.environ.get("HF_CLIENT_ID", "").strip())
 
 
 def _make_oauth_state(nonce: str, redirect_to: str = "") -> str:
@@ -719,7 +719,7 @@ def _make_oauth_state(nonce: str, redirect_to: str = "") -> str:
     redirect_to is base64url-encoded to avoid dots/slashes/colons that would
     corrupt the dot-delimited rsplit() parsing."""
     import base64 as _b64
-    secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
+    secret = os.environ.get("HF_CLIENT_SECRET", "x").encode()
     ts = str(int(time.time()))
     redirect_enc = _b64.urlsafe_b64encode(redirect_to.encode()).decode().rstrip("=") if redirect_to else ""
     data = f"{nonce}.{ts}.{redirect_enc}" if redirect_enc else f"{nonce}.{ts}."
@@ -737,7 +737,7 @@ def _verify_oauth_state(state: str) -> tuple[bool, str]:
         nonce_ts, redirect_enc, sig = parts
         if abs(time.time() - float(nonce_ts.split(".", 1)[1])) > 600:
             return False, ""
-        secret = os.environ.get("OAUTH_CLIENT_SECRET", "x").encode()
+        secret = os.environ.get("HF_CLIENT_SECRET", "x").encode()
         data = f"{nonce_ts}.{redirect_enc}"
         expected = hmac.new(secret, data.encode(), hashlib.sha256).hexdigest()[:16]
         if not hmac.compare_digest(expected, sig):
@@ -1376,7 +1376,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_oauth_login(self) -> None:
         if not _oauth_configured():
             self._send_json(503, {"error": "OAuth not configured on this Space "
-                                           "(OAUTH_CLIENT_ID missing — set hf_oauth:true in README)"})
+                                           "(HF_CLIENT_ID missing — set hf_oauth:true in README)"})
             return
         from urllib.parse import urlencode
         nonce = secrets.token_urlsafe(16)
@@ -1384,7 +1384,7 @@ class Handler(BaseHTTPRequestHandler):
         host = self._space_host()
         redirect_uri = f"https://{host}/oauth/callback"
         params = urlencode({
-            "client_id": os.environ["OAUTH_CLIENT_ID"],
+            "client_id": os.environ["HF_CLIENT_ID"],
             "redirect_uri": redirect_uri,
             "scope": "openid profile manage-repos",
             "response_type": "code",
@@ -1408,8 +1408,8 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect(f"https://{host}/#provision-error=invalid_state")
             return
 
-        client_id = os.environ.get("OAUTH_CLIENT_ID", "").strip()
-        client_secret = os.environ.get("OAUTH_CLIENT_SECRET", "").strip()
+        client_id = os.environ.get("HF_CLIENT_ID", "").strip()
+        client_secret = os.environ.get("HF_CLIENT_SECRET", "").strip()
         redirect_uri = f"https://{host}/oauth/callback"
 
         # 1. Exchange code for user token
