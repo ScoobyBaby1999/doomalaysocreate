@@ -98,6 +98,16 @@ export function AgentChat({
     return () => { alive = false; };
   }, [settings.baseUrl, settings.githubSessionId]);
 
+  async function refreshFiles(sid?: string | null) {
+    const id = sid ?? sessionRef.current;
+    if (id) {
+      try {
+        const f = await client.current.files(id);
+        setFiles(f.files);
+      } catch { /* ignore */ }
+    }
+  }
+
   async function pollUntilSettled(sessionId: string, since: number) {
     let cursor = since;
     const ac = abortRef.current;
@@ -225,7 +235,11 @@ export function AgentChat({
         {workspaces.length > 0 && (
           <select
             value={selectedWorkspace || ""}
-            onChange={(e) => setSelectedWorkspace(e.target.value || null)}
+            onChange={(e) => {
+              setSelectedWorkspace(e.target.value || null);
+              setFiles([]);
+              refreshFiles(sessionRef.current);
+            }}
             disabled={running}
             className="bg-surface border border-border rounded-lg px-2 py-1 text-[12px] text-accent outline-none focus:border-accent disabled:opacity-50 max-w-[35%]"
           >
@@ -365,6 +379,7 @@ export function AgentChat({
         files={files}
         sessionId={sessionRef.current}
         settings={settings}
+        onRefresh={() => refreshFiles()}
       />
       <PanelDrawer
         open={panelDrawerOpen}

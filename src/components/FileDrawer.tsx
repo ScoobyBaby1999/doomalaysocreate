@@ -8,12 +8,14 @@ export function FileDrawer({
   files,
   sessionId,
   settings,
+  onRefresh,
 }: {
   open: boolean;
   onClose: () => void;
   files: AgentFile[];
   sessionId: string | null;
   settings: Settings;
+  onRefresh?: () => void;
 }) {
   const client = new AgentClient(settings);
 
@@ -32,9 +34,16 @@ export function FileDrawer({
       >
         <div className="flex items-center justify-between px-3 h-10 border-b border-border">
           <span className="text-sm font-medium">Files</span>
-          <button onClick={onClose} className="text-muted hover:text-accent text-sm px-1">
-            ✕
-          </button>
+          <div className="flex items-center gap-1">
+            {onRefresh && (
+              <button onClick={onRefresh} className="text-muted hover:text-accent text-sm px-1" title="Refresh file list">
+                ↻
+              </button>
+            )}
+            <button onClick={onClose} className="text-muted hover:text-accent text-sm px-1">
+              ✕
+            </button>
+          </div>
         </div>
         <div className="overflow-y-auto h-[calc(100%-40px)]">
           {files.length === 0 ? (
