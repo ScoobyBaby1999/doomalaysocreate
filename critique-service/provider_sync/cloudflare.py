@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -44,12 +45,18 @@ class CloudflareSync(BaseSync):
     def fetch_models(self) -> list[ModelInfo]:
         global _cached_cloudflare_models
         models = self._fetch_from_docs()
+        source = "docs"
         if not models:
             models = self._fetch_from_api()
+            source = "api"
         if models:
             _cached_cloudflare_models = models
+            log_event("cloudflare_sync_ok", source=source, count=len(models))
         elif _cached_cloudflare_models is not None:
             models = _cached_cloudflare_models
+            log_event("cloudflare_sync_cached", count=len(models))
+        else:
+            log_event("cloudflare_sync_failed", source=source)
         return models
 
     def _fetch_from_api(self) -> list[ModelInfo]:
@@ -150,6 +157,38 @@ class CloudflareSync(BaseSync):
             log_event("cloudflare_docs_fetch_failed", url=url, error=str(exc)[:300])
             log.warning("Cloudflare docs fetch failed: %s", exc)
             return None
+
+    def _make_request(self, url: str, headers: dict | None = None) -> dict | None:
+        """Override: Cloudflare API requires httpx (urllib fails on TLS/HTTP2)."""
+        request_headers = {
+            "User-Agent": "doomalaysocreate/1.0",
+            "Accept": "application/json",
+        }
+        if headers:
+            request_headers.update(headers)
+        try:
+            import httpx
+            resp = httpx.get(url, headers=request_headers, timeout=15)
+            resp.raise_for_status()
+            return resp.json()
+        except ImportError:
+            pass
+        except httpx.HTTPStatusError as e:
+            body = e.response.text[:500] if e.response else ""
+            log_event("cloudflare_api_error", provider="cloudflare",
+                      status=e.response.status_code, url=url[:120], error=body)
+        except Exception as e:
+            log_event("cloudflare_api_error", provider="cloudflare",
+                      url=url[:120], error=str(e)[:300])
+        try:
+            import urllib.request
+            req = urllib.request.Request(url, headers=request_headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode())
+        except Exception as e:
+            log_event("cloudflare_api_fallback_error", provider="cloudflare",
+                      url=url[:120], error=str(e)[:300])
+        return None
 
     def filter_free_models(self, models: list[ModelInfo]) -> list[ModelInfo]:
         return models

@@ -1083,6 +1083,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._handle_debug_diagnose()
             return
+        if route == "/api/debug/stream":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            self._handle_debug_stream()
+            return
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
             self._conscious_dispatch("GET")
@@ -2378,6 +2384,49 @@ class Handler(BaseHTTPRequestHandler):
                 for l in errors[-5:]
             ]
         })
+
+    def _handle_debug_stream(self) -> None:
+        """SSE endpoint: streams log entries in real-time.
+        
+        GET /api/debug/stream (auth-gated)
+        Sends `data: <json>\n\n` for each new log entry. Includes an initial
+        backlog of the last 20 entries on connect. Sends keepalive comments
+        every 30s to keep the connection open.
+        """
+        import queue as _queue
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self._set_csp_header()
+        self.end_headers()
+
+        q = debug_log.subscribe()
+        try:
+            backlog = debug_log.get_recent_logs(tail=20)
+            for record in backlog:
+                line = f"data: {json.dumps(record, ensure_ascii=False)}\n\n"
+                self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
+
+            while True:
+                try:
+                    record = q.get(timeout=30)
+                    line = f"data: {json.dumps(record, ensure_ascii=False)}\n\n"
+                    self.wfile.write(line.encode("utf-8"))
+                    self.wfile.flush()
+                except _queue.Empty:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+        except BrokenPipeError:
+            pass
+        except ConnectionResetError:
+            pass
+        except Exception:
+            pass
+        finally:
+            debug_log.unsubscribe(q)
 
     def _handle_workspace_get(self, ws_id: str) -> None:
         user_id = self._require_user()

@@ -2,10 +2,12 @@
 
 Every critical function logs its entry, exit, duration, and errors. Logs are
 written to:
-  1. stderr (HF Space logs capture this automatically)
-  2. In-memory ring buffer (for /api/debug/logs endpoint)
+   1. stderr (HF Space logs capture this automatically)
+   2. In-memory ring buffer (for /api/debug/logs endpoint)
+   3. SSE subscriber queues (for /api/debug/stream real-time streaming)
 
 View logs in the browser via GET /api/debug/logs?cat=glm&tail=50
+Stream logs in real-time via GET /api/debug/stream (SSE, auth-gated)
 (gated by the rotation token or CRITIQUE_TOKEN env var).
 """
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import queue
 import sys
 from collections import deque
 from typing import Any
@@ -24,6 +27,39 @@ _STDERR_ENABLED = os.environ.get("DOOMALAYSOCREATE_LOG", "1").strip() not in ("0
 # --- in-memory ring buffer ----------------------------------------------------
 _memory_logs: deque[dict] = deque(maxlen=_MAX_MEMORY_LOGS)
 _categories: set[str] = set()
+
+# --- SSE subscriber queues ----------------------------------------------------
+_sse_queues: list[queue.Queue] = []
+
+
+def subscribe() -> queue.Queue:
+    """Register an SSE subscriber queue. Returns a Queue that receives new log records."""
+    q: queue.Queue = queue.Queue()
+    _sse_queues.append(q)
+    return q
+
+
+def unsubscribe(q: queue.Queue) -> None:
+    """Remove a subscriber queue."""
+    try:
+        _sse_queues.remove(q)
+    except ValueError:
+        pass
+
+
+def _notify_subscribers(record: dict) -> None:
+    """Push a log record to all SSE subscriber queues (best-effort)."""
+    dead: list[queue.Queue] = []
+    for q in _sse_queues:
+        try:
+            q.put_nowait(record)
+        except Exception:
+            dead.append(q)
+    for q in dead:
+        try:
+            _sse_queues.remove(q)
+        except ValueError:
+            pass
 
 # --- sensitive field patterns for auto-redaction ----------------------------
 _SENSITIVE_PATTERNS = [
@@ -57,6 +93,7 @@ def log_event(category: str, **fields: Any) -> None:
         _categories.add(category)
         if _STDERR_ENABLED:
             print(json.dumps(record, ensure_ascii=False), file=sys.stderr, flush=True)
+        _notify_subscribers(record)
     except Exception:
         pass  # never break the calling code
 
@@ -90,6 +127,7 @@ def log_entry(level: str = "INFO", cat: str = "", fn: str = "",
         _categories.add(cat)
         if _STDERR_ENABLED:
             print(json.dumps(record, ensure_ascii=False), file=sys.stderr, flush=True)
+        _notify_subscribers(record)
     except Exception:
         pass
 
