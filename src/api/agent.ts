@@ -4,7 +4,7 @@
 // Reuses the same windowed-bearer derivation + 401-retry as PanelClient.
 
 import { deriveToken } from "./token";
-import type { Settings } from "./panel";
+import type { Settings, PanelSnapshot } from "./panel";
 import { ApiError } from "./panel";
 
 export type AgentEvent =
@@ -20,6 +20,18 @@ export type AgentEvent =
       state: "starting" | "idle" | "running" | "error";
       detail?: string;
       cost_usd?: number | null;
+    }
+  | {
+      i: number;
+      ts: number;
+      type: "panel";
+      status: "starting" | "running" | "done";
+      invoke_id?: string;
+      task_name?: string;
+      prompt?: string;
+      panel?: string[];
+      snapshot?: PanelSnapshot;
+      error?: string;
     };
 
 export type AgentStatus = "starting" | "idle" | "running" | "error";

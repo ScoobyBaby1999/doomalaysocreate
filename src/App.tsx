@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { useSettings, saveSettings, loadSettings } from "./state/settings";
-import { Chat } from "./screens/Chat";
+import { AgentChat } from "./screens/AgentChat";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
-import { AgentScreen } from "./screens/AgentScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
 import { ConsciousScreen } from "./screens/ConsciousScreen";
 import { DebugScreen } from "./screens/DebugScreen";
@@ -15,13 +14,13 @@ import { getJWTSub } from "./lib/jwt";
 import { deriveToken } from "./api/token";
 import type { Settings } from "./api/panel";
 
-type Tab = "chat" | "agent" | "conscious" | "workspaces" | "settings" | "debug";
+type Tab = "agentchat" | "conscious" | "workspaces" | "settings" | "debug";
 
 export default function App() {
   const [settings, setSettings] = useSettings();
   const hasCredentials = !!(settings.token || settings.rotationSecret || settings.githubSessionId);
   const [manualSetup, setManualSetup] = useState(false);
-  const [tab, setTab] = useState<Tab>(hasCredentials ? "chat" : "settings");
+  const [tab, setTab] = useState<Tab>(hasCredentials ? "agentchat" : "settings");
 
   const setBaseUrl = useModelStore((s) => s.setBaseUrl);
   const fetchProviders = useModelStore((s) => s.fetchProviders);
@@ -197,7 +196,7 @@ export default function App() {
             onComplete={(partial: Partial<Settings>) => {
               if (partial.rotationSecret || partial.token) {
                 setSettings({ ...settings, ...partial });
-                setTab("chat");
+                setTab("agentchat");
               } else {
                 setManualSetup(true);
                 setTab("settings");
@@ -225,10 +224,8 @@ export default function App() {
        </header>
 
       <main className="flex-1 min-h-0">
-        {tab === "chat" ? (
-          <Chat settings={settings} />
-        ) : tab === "agent" ? (
-          <AgentScreen settings={settings} />
+        {tab === "agentchat" ? (
+          <AgentChat settings={settings} />
         ) : tab === "conscious" ? (
           <ConsciousScreen settings={settings} />
         ) : tab === "workspaces" ? (
@@ -241,7 +238,7 @@ export default function App() {
       </main>
 
       <nav className="flex border-t border-border overflow-x-auto">
-        {(["chat", "agent", "conscious", "workspaces", "settings", "debug"] as Tab[]).map((t) => (
+        {(["agentchat", "conscious", "workspaces", "settings", "debug"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -249,7 +246,14 @@ export default function App() {
               tab === t ? "text-accent" : "text-muted"
             }`}
           >
-            {t === "conscious" ? (
+            {t === "agentchat" ? (
+              <>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                </svg>
+                <span className="text-[10px]">Chat</span>
+              </>
+            ) : t === "conscious" ? (
               <>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>

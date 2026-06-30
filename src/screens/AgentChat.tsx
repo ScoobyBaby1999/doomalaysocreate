@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import type { Settings } from "../api/panel";
+import type { Settings, PanelSnapshot, Effort } from "../api/panel";
 import type { Workspace } from "../api/github";
 import {
   AgentClient,
@@ -8,16 +8,16 @@ import {
   type AgentFile,
   type AgentStatus,
 } from "../api/agent";
+import { JudgeCard } from "../components/JudgeCard";
 import { useModelStore } from "../lib/model-store";
+import { PanelDrawer, type PanelInvocation } from "../components/PanelDrawer";
+import { FileDrawer } from "../components/FileDrawer";
 
 const SESSION_KEY = "doomalaysocreate.agent.session";
 const MODEL_KEY = "doomalaysocreate.agent.model";
+const EFFORTS: Effort[] = ["low", "med", "high", "max"];
 
-/** The agent tab: a chat with the orchestrator running inside the user's Space.
- *  A model picker chooses which frontier model drives it (Claude via its SDK,
- *  others via the open agent once that SDK lands).
- *  When workspaceId is provided, the agent operates in that workspace's sandbox. */
-export function AgentScreen({
+export function AgentChat({
   settings,
   workspaceId,
 }: {
@@ -32,6 +32,13 @@ export function AgentScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [cost, setCost] = useState<number | null>(null);
+  const [effort, setEffort] = useState<Effort>("med");
+  const [webSearch, setWebSearch] = useState(false);
+  const [deepResearch, setDeepResearch] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
+  const [panelDrawerOpen, setPanelDrawerOpen] = useState(false);
+  const [panelInvocations, setPanelInvocations] = useState<PanelInvocation[]>([]);
 
   const openOverlay = useModelStore((s) => s.openOverlay);
   const selectedModelId = useModelStore((s) => s.selectedModelId);
@@ -50,8 +57,7 @@ export function AgentScreen({
     const p = providers.find((g) => g.name === selectedProviderName);
     return p?.color || "#5b8cff";
   })();
-  // workspaces selector state: fetched from /api/workspaces; user picks which
-  // sandbox the agent should operate in (or No workspace for ephemeral sandbox)
+
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(workspaceId || null);
   const sessionRef = useRef<string | null>(sessionStorage.getItem(SESSION_KEY));
@@ -61,7 +67,6 @@ export function AgentScreen({
   client.current = new AgentClient(settings);
   const abortRef = useRef<AbortController | null>(null);
 
-  // discover runnable models
   useEffect(() => {
     let alive = true;
     client.current
@@ -78,29 +83,19 @@ export function AgentScreen({
         }
       })
       .catch(() => {});
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.baseUrl]);
+    return () => { alive = false; };
+  }, [settings.baseUrl, selected]);
 
-  // load user workspaces for the selector
   useEffect(() => {
     if (!settings.githubSessionId) return;
     let alive = true;
     fetch(`${settings.baseUrl}/api/workspaces`, {
-      headers: {
-        Authorization: `Bearer ${settings.githubSessionId}`,
-      },
+      headers: { Authorization: `Bearer ${settings.githubSessionId}` },
     })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error("fetch workspaces failed"))))
-      .then((data) => {
-        if (alive) setWorkspaces(data.workspaces || []);
-      })
+      .then((data) => { if (alive) setWorkspaces(data.workspaces || []); })
       .catch(() => {});
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [settings.baseUrl, settings.githubSessionId]);
 
   async function pollUntilSettled(sessionId: string, since: number) {
@@ -114,15 +109,32 @@ export function AgentScreen({
         cursor = snap.next;
         for (const e of snap.events) {
           if (e.type === "status" && typeof e.cost_usd === "number") setCost(e.cost_usd);
+          if (e.type === "panel") {
+            setPanelInvocations((prev) => {
+              const inv = e.invoke_id;
+              const existing = prev.findIndex((p) => p.invoke_id === inv);
+              const entry: PanelInvocation = {
+                task_name: e.task_name || "panel",
+                invoke_id: inv || "",
+                prompt: e.prompt || "",
+                snapshot: e.snapshot,
+                error: e.error,
+              };
+              if (existing >= 0) {
+                const next = [...prev];
+                next[existing] = { ...next[existing], ...entry };
+                return next;
+              }
+              if (e.status === "starting") return [...prev, entry];
+              return prev;
+            });
+          }
         }
       }
       setStatus(snap.status);
       if (snap.status !== "running" && snap.status !== "starting") {
         if (snap.status !== "error") {
-          client.current
-            .files(sessionId)
-            .then((f) => setFiles(f.files))
-            .catch(() => {});
+          client.current.files(sessionId).then((f) => setFiles(f.files)).catch(() => {});
         }
         return cursor;
       }
@@ -137,11 +149,9 @@ export function AgentScreen({
     lastMsgRef.current = message;
     setBusy(true);
     setError("");
-    // Cancel any previous polling loop
     abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
-    // Optimistically add user message to transcript
     setEvents((prev) => [
       ...prev,
       { i: -1, ts: Date.now() / 1000, type: "user", text: message } as AgentEvent,
@@ -157,7 +167,6 @@ export function AgentScreen({
       sessionRef.current = start.session_id;
       sessionStorage.setItem(SESSION_KEY, start.session_id);
       const fresh = await client.current.poll(start.session_id, 0);
-      // Merge: keep optimistic user message if backend hasn't echoed it yet
       setEvents((prev) => {
         const userMsg = prev[prev.length - 1];
         const hasUserMsg =
@@ -170,7 +179,6 @@ export function AgentScreen({
       }
     } catch (e) {
       if (ac.signal.aborted) return;
-      // Clear stale session on error so retry doesn't get stuck
       sessionRef.current = null;
       sessionStorage.removeItem(SESSION_KEY);
       setError(e instanceof Error ? e.message : String(e));
@@ -182,13 +190,9 @@ export function AgentScreen({
 
   async function stop() {
     if (!sessionRef.current) return;
-    setStatus("idle"); // optimistic
-    try {
-      await client.current.interrupt(sessionRef.current);
-    } catch {
-      setError("Interrupt failed — the agent may still be running");
-      setStatus("running");
-    }
+    setStatus("idle");
+    try { await client.current.interrupt(sessionRef.current); }
+    catch { setError("Interrupt failed"); setStatus("running"); }
   }
 
   function newSession(model?: string) {
@@ -201,21 +205,19 @@ export function AgentScreen({
     setError("");
     setCost(null);
     setBusy(false);
-    if (model) {
-      setSelected(model);
-      localStorage.setItem(MODEL_KEY, model);
-    }
+    setPanelInvocations([]);
+    if (model) { setSelected(model); localStorage.setItem(MODEL_KEY, model); }
   }
 
   const running = status === "running" || status === "starting";
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted">
+    <div className="flex flex-col h-full relative">
+      <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted shrink-0">
         <button
           onClick={() => !running && openOverlay()}
           disabled={running}
-          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[12px] disabled:opacity-50 max-w-[55%]"
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[12px] disabled:opacity-50 max-w-[45%]"
         >
           <span className="w-2 h-2 rounded-full shrink-0" style={{ background: selectedProviderColor || "#5b8cff" }} />
           <span className="text-accent truncate">{selectedModelLabel || "Select model"}</span>
@@ -225,90 +227,121 @@ export function AgentScreen({
             value={selectedWorkspace || ""}
             onChange={(e) => setSelectedWorkspace(e.target.value || null)}
             disabled={running}
-            className="bg-surface border border-border rounded-lg px-2 py-1 text-[12px] text-accent outline-none focus:border-accent disabled:opacity-50 max-w-[40%]"
+            className="bg-surface border border-border rounded-lg px-2 py-1 text-[12px] text-accent outline-none focus:border-accent disabled:opacity-50 max-w-[35%]"
           >
             <option value="">(sandbox)</option>
             {workspaces.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.title || w.id}
-              </option>
+              <option key={w.id} value={w.id}>{w.title || w.id}</option>
             ))}
           </select>
         )}
-        {cost != null && <span className="text-[10px]">${cost.toFixed(4)}</span>}
-        <span className="ml-auto capitalize">{status}</span>
+        {cost != null && <span className="text-[10px] shrink-0">${cost.toFixed(4)}</span>}
+        <span className="ml-auto text-[10px] capitalize shrink-0">{status}</span>
+        <button
+          onClick={() => setFileDrawerOpen((o) => !o)}
+          className="text-muted hover:text-accent text-sm px-1"
+          title="Files"
+        >
+          📎
+        </button>
+        <button
+          onClick={() => setPanelDrawerOpen((o) => !o)}
+          className={`text-sm px-1 ${panelDrawerOpen ? "text-accent" : "text-muted hover:text-accent"}`}
+          title="Panel invocations"
+        >
+          💬
+        </button>
         {running ? (
-          <button onClick={stop} className="text-rose-300 underline">
-            stop
-          </button>
+          <button onClick={stop} className="text-rose-300 underline shrink-0">stop</button>
         ) : (
-          <button onClick={() => newSession()} className="text-accent underline">
-            new
-          </button>
+          <button onClick={() => newSession()} className="text-accent underline shrink-0">new</button>
         )}
       </div>
 
-      <Virtuoso
-        ref={listRef}
-        className="flex-1"
-        data={events}
-        followOutput="smooth"
-        itemContent={(_, ev) => <EventRow ev={ev} />}
-        components={{
-          Footer: () =>
-            events.length === 0 ? (
-              <div className="text-center text-muted text-sm mt-20 px-6">
-                Ask the agent to build, edit, run, or pack something. It works in a
-                private workspace inside your Space — files it creates appear below to
-                download. The workspace is temporary, so save what you need.
-              </div>
-            ) : (
-              <div className="h-2" />
-            ),
-        }}
-      />
-
-      {files.length > 0 && (
-        <div className="border-t border-border px-3 py-2 max-h-32 overflow-y-auto">
-          <div className="text-[11px] text-muted mb-1">artifacts (temporary — download to keep)</div>
-          <div className="flex flex-wrap gap-1.5">
-            {files.map((f) => (
-              <button
-                key={f.path}
-                onClick={() => client.current.download(sessionRef.current!, f.path).catch(() => {})}
-                className="text-[11px] px-2 py-1 rounded-lg border border-border hover:border-accent"
-              >
-                ↓ {f.path} <span className="text-muted">({fmtSize(f.size)})</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      <div className="flex-1 min-h-0 relative">
+        <Virtuoso
+          ref={listRef}
+          className="h-full"
+          data={events}
+          followOutput="smooth"
+          itemContent={(_, ev) => <EventRow ev={ev} />}
+          components={{
+            Footer: () =>
+              events.length === 0 ? (
+                <div className="text-center text-muted text-sm mt-20 px-6">
+                  Ask the agent to build, edit, run, or pack something. It works in a
+                  private workspace — files appear in the 📎 drawer.
+                </div>
+              ) : (
+                <div className="h-2" />
+              ),
+          }}
+        />
+      </div>
 
       {error && (
-        <div className="border-t border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-300 flex items-center gap-2">
+        <div className="border-t border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-300 flex items-center gap-2 shrink-0">
           <span className="flex-1">{error}</span>
           {lastMsgRef.current && (
-            <button
-              onClick={() => send(lastMsgRef.current)}
-              className="px-2 py-1 rounded-lg border border-rose-400/40 text-xs"
-            >
+            <button onClick={() => send(lastMsgRef.current)} className="px-2 py-1 rounded-lg border border-rose-400/40 text-xs">
               Retry
             </button>
           )}
         </div>
       )}
 
-      <div className="border-t border-border bg-bg px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-        <div className="flex items-end gap-2">
+      <div className="border-t border-border bg-bg pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] shrink-0">
+        {settingsOpen && (
+          <div className="flex items-center gap-2 px-3 pb-2 overflow-x-auto">
+            {EFFORTS.map((e) => (
+              <button
+                key={e}
+                onClick={() => setEffort(e)}
+                className={`text-[11px] px-2 py-0.5 rounded-full border shrink-0 ${
+                  effort === e ? "border-accent text-accent" : "border-border text-muted"
+                }`}
+              >
+                {e}
+              </button>
+            ))}
+            <button
+              onClick={() => setWebSearch((p) => !p)}
+              className={`text-[11px] px-2 py-0.5 rounded-full border shrink-0 flex items-center gap-1 ${
+                webSearch ? "border-accent text-accent" : "border-border text-muted"
+              }`}
+            >
+              🌐 Web
+            </button>
+            <button
+              onClick={() => setDeepResearch((p) => !p)}
+              className={`text-[11px] px-2 py-0.5 rounded-full border shrink-0 flex items-center gap-1 ${
+                deepResearch ? "border-accent text-accent" : "border-border text-muted"
+              }`}
+            >
+              🔬 Deep
+            </button>
+          </div>
+        )}
+        <div className="flex items-end gap-2 px-2">
+          <button
+            onClick={() => {}}
+            className="text-muted hover:text-accent text-lg pb-2 shrink-0"
+            title="Attach files (coming soon)"
+          >
+            <span className="opacity-50">+</span>
+          </button>
+          <button
+            onClick={() => setSettingsOpen((p) => !p)}
+            className={`text-sm pb-2 shrink-0 ${settingsOpen ? "text-accent" : "text-muted hover:text-accent"}`}
+            title="Settings"
+          >
+            ⚙
+          </button>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                send();
-              }
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
             }}
             rows={1}
             placeholder="Tell the agent what to do…"
@@ -317,7 +350,7 @@ export function AgentScreen({
           <button
             onClick={() => (running ? stop() : send())}
             disabled={!running && (busy || !input.trim())}
-            className={`h-10 px-4 rounded-2xl font-medium disabled:opacity-40 ${
+            className={`h-10 px-4 rounded-2xl font-medium disabled:opacity-40 shrink-0 ${
               running ? "bg-rose-500/80 text-white" : "bg-accent text-white"
             }`}
           >
@@ -325,30 +358,29 @@ export function AgentScreen({
           </button>
         </div>
       </div>
+
+      <FileDrawer
+        open={fileDrawerOpen}
+        onClose={() => setFileDrawerOpen(false)}
+        files={files}
+        sessionId={sessionRef.current}
+        settings={settings}
+      />
+      <PanelDrawer
+        open={panelDrawerOpen}
+        onClose={() => setPanelDrawerOpen(false)}
+        invocations={panelInvocations}
+      />
     </div>
   );
 }
 
-function fmtSize(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
 const TOOL_ICONS: Record<string, string> = {
-  bash: "⌘",
-  shell: "⌘",
-  write: "✎",
-  edit: "✎",
-  fileeditor: "✎",
-  str_replace: "✎",
-  read: "👁",
-  view: "👁",
-  glob: "🔍",
-  grep: "🔍",
-  search: "🔍",
-  web: "🌐",
-  fetch: "🌐",
+  bash: "⌘", shell: "⌘",
+  write: "✎", edit: "✎", str_replace: "✎", fileeditor: "✎",
+  read: "👁", view: "👁",
+  glob: "🔍", grep: "🔍", search: "🔍",
+  web: "🌐", fetch: "🌐", http_request: "🌐",
 };
 
 function toolIcon(name: string): string {
@@ -420,17 +452,44 @@ function EventRow({ ev }: { ev: AgentEvent }) {
       </div>
     );
   }
+  if (ev.type === "panel") {
+    return <PanelEventRow ev={ev} />;
+  }
   return null;
 }
 
+function PanelEventRow({ ev }: { ev: Extract<AgentEvent, { type: "panel" }> }) {
+  const snap = ev.snapshot;
+  const status = ev.status;
+  return (
+    <div className="px-3 py-1.5 max-w-2xl mx-auto">
+      <div className="rounded-xl border border-border bg-surface overflow-hidden">
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
+          <span className={`h-2 w-2 rounded-full ${status === "starting" ? "bg-muted" : status === "running" ? "bg-accent animate-pulse" : "bg-emerald-400"}`} />
+          <span className="text-sm font-medium">Panel: {ev.task_name || "judges"}</span>
+          <span className="ml-auto text-[11px] text-muted">{status}</span>
+        </div>
+        {snap ? (
+          <div className="px-3 py-2 space-y-1.5">
+            <div className="text-[11px] text-muted">
+              {snap.meta.judges_settled}/{snap.meta.judges_total} settled · {snap.meta.age_s}s
+            </div>
+            {snap.judges.map((j) => (
+              <JudgeCard key={j.model} judge={j} />
+            ))}
+          </div>
+        ) : status === "starting" ? (
+          <div className="px-3 py-2 text-sm text-muted">Starting panel…</div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function Collapsible({
-  label,
-  children,
-  error,
+  label, children, error,
 }: {
-  label: string;
-  children: React.ReactNode;
-  error?: boolean;
+  label: string; children: React.ReactNode; error?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   return (
