@@ -301,6 +301,26 @@ CREATE TABLE IF NOT EXISTS conscious_task (
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_task_conscious ON conscious_task(conscious_id, status);
+
+-- Chat sessions (persistent agent chat history)
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT 'New Chat',
+    model TEXT,
+    workspace_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS chat_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chat_events_session_seq ON chat_events(session_id, seq);
 """
 
 
@@ -578,3 +598,91 @@ def list_public_workspaces(*, page: int = 1, per_page: int = 20,
 
 def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# ---------------------------------------------------------------------------
+# Chat sessions
+# ---------------------------------------------------------------------------
+
+def create_chat_session(*, title: str = "New Chat", model: str | None = None,
+                        workspace_id: str | None = None) -> dict:
+    db = _db()
+    sid = _gen_id()
+    now = _iso_now()
+    with _write_lock:
+        db.execute(
+            "INSERT INTO chat_sessions (id, title, model, workspace_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (sid, title, model, workspace_id, now, now))
+        db.commit()
+    return get_chat_session(sid)
+
+
+def get_chat_session(session_id: str) -> dict | None:
+    row = _db().execute("SELECT * FROM chat_sessions WHERE id = ?", (session_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_chat_sessions(limit: int = 50) -> list[dict]:
+    rows = _db().execute(
+        "SELECT * FROM chat_sessions ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_chat_session(session_id: str, **fields) -> dict | None:
+    allowed = {"title", "model", "workspace_id"}
+    updates = []
+    params = []
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        updates.append(f"{k} = ?")
+        params.append(v)
+    if not updates:
+        return get_chat_session(session_id)
+    updates.append("updated_at = ?")
+    params.append(_iso_now())
+    params.append(session_id)
+    with _write_lock:
+        _db().execute(f"UPDATE chat_sessions SET {', '.join(updates)} WHERE id = ?", params)
+        _db().commit()
+    return get_chat_session(session_id)
+
+
+def delete_chat_session(session_id: str) -> bool:
+    with _write_lock:
+        db = _db()
+        cur = db.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+        db.commit()
+        return cur.rowcount > 0
+
+
+def append_chat_events(session_id: str, events: list[dict]) -> None:
+    """Append events to a chat session, skipping events already stored by seq."""
+    if not events:
+        return
+    db = _db()
+    with _write_lock:
+        row = db.execute(
+            "SELECT COALESCE(MAX(seq), -1) FROM chat_events WHERE session_id = ?",
+            (session_id,)).fetchone()
+        persisted_max = row[0] if row else -1
+        insert_count = 0
+        for ev in events:
+            i = ev.get("i", -1)
+            if i <= persisted_max:
+                continue
+            db.execute(
+                "INSERT INTO chat_events (session_id, seq, event_type, content, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, i, ev.get("type", "unknown"), json.dumps(ev), _iso_now()))
+            insert_count += 1
+        if insert_count:
+            db.commit()
+
+
+def get_chat_events(session_id: str) -> list[dict]:
+    rows = _db().execute(
+        "SELECT content FROM chat_events WHERE session_id = ? ORDER BY seq ASC",
+        (session_id,)).fetchall()
+    return [json.loads(r["content"]) for r in rows]

@@ -1034,8 +1034,11 @@ def tier_for_model(model: str | None) -> str | None:
 class AgentSession:
     def __init__(self, tier: str, model: str | None = None,
                  workspace_path: Path | None = None, workspace_id: str | None = None,
-                 conscious_id: str | None = None, agent_id: str | None = None):
+                 conscious_id: str | None = None, agent_id: str | None = None,
+                 chat_session_id: str | None = None):
         self.id = uuid.uuid4().hex[:16]
+        self.chat_session_id = chat_session_id
+        self.persisted_seq = 0
         self.tier = tier
         self.model = model
         self.workspace_id = workspace_id  # links to user's workspace, if any
@@ -1234,12 +1237,15 @@ def get_or_create(session_id: str | None = None,
                   model: str | None = None,
                   workspace_id: str | None = None,
                   conscious_id: str | None = None,
-                  agent_id: str | None = None) -> AgentSession:
+                  agent_id: str | None = None,
+                  chat_session_id: str | None = None) -> AgentSession:
     """Reuse a live session by id, or start a new one (CapacityError if full).
     `model` (optional) selects which model/tier drives a NEW session.
     `workspace_id` (optional) links the session to a user workspace sandbox.
     `conscious_id` + `agent_id` (optional, Tier 3) bind the session to a
     Conscious agent row so the conscious_* tools resolve context.
+    `chat_session_id` (optional) links this agent session to a persistent
+    chat session for event persistence.
     """
     tier = tier_for_model(model)
     if tier is None:
@@ -1248,18 +1254,27 @@ def get_or_create(session_id: str | None = None,
         _sweep_locked()
         if session_id and session_id in _sessions:
             return _sessions[session_id]
+        # Reuse existing agent session linked to this chat_session_id
+        if chat_session_id:
+            for s in _sessions.values():
+                if s.chat_session_id == chat_session_id:
+                    return s
         if len(_sessions) >= MAX_SESSIONS:
             raise CapacityError(f"max {MAX_SESSIONS} concurrent agent sessions")
         # resolve workspace_id to a filesystem path
         workspace_path = None
         if workspace_id:
             import db
+            import github_integration
+            # repair sandbox if missing (Space restart wiped /data/)
+            github_integration.ensure_workspace_sandbox(workspace_id)
             ws = db.get_workspace(workspace_id)
             if ws and ws.get("sandbox_path"):
                 workspace_path = Path(ws["sandbox_path"])
         s = AgentSession(tier, model, workspace_path=workspace_path,
                          workspace_id=workspace_id,
-                         conscious_id=conscious_id, agent_id=agent_id)
+                         conscious_id=conscious_id, agent_id=agent_id,
+                         chat_session_id=chat_session_id)
         _sessions[s.id] = s
         return s
 

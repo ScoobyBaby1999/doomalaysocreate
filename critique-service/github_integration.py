@@ -245,6 +245,36 @@ def list_workspaces(user_id: str) -> list[dict]:
     return db.list_user_workspaces(user_id)
 
 
+def ensure_workspace_sandbox(workspace_id: str) -> bool:
+    """Verify the workspace sandbox directory exists and is a valid git repo.
+    If the sandbox is missing (e.g. after Space restart), re-clone from source.
+    Returns True if the sandbox is usable after this call."""
+    ws = db.get_workspace(workspace_id)
+    if not ws:
+        return False
+    sandbox = Path(ws["sandbox_path"])
+    is_valid = sandbox.is_dir() and (sandbox / ".git").is_dir()
+    if is_valid:
+        return True
+    # Sandbox missing or corrupted — re-clone if we have a source repo
+    source_repo = ws.get("source_repo")
+    if not source_repo:
+        # No source repo, just recreate the directory
+        sandbox.mkdir(parents=True, exist_ok=True)
+        return True
+    import shutil
+    if sandbox.is_dir():
+        shutil.rmtree(sandbox, ignore_errors=True)
+    sandbox.mkdir(parents=True, exist_ok=True)
+    try:
+        user_id = ws["user_id"]
+        branch = ws.get("source_branch") or None
+        _clone_repo(user_id, source_repo, branch, dest=str(sandbox))
+        return True
+    except Exception:
+        return False
+
+
 def get_workspace(workspace_id: str) -> dict | None:
     return db.get_workspace(workspace_id)
 

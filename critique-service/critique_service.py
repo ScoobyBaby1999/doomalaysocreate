@@ -1380,6 +1380,23 @@ class Handler(BaseHTTPRequestHandler):
             req_id = route[len("/api/auth/push-requests/"):]
             self._handle_push_request_status(req_id)
             return
+        # --- Chat session routes (bearer-gated) ---
+        if route == "/api/chat/sessions":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            self._handle_chat_sessions_list()
+            return
+        if route.startswith("/api/chat/sessions/"):
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            rest = route[len("/api/chat/sessions/"):]
+            if rest.endswith("/events"):
+                self._handle_chat_session_events(rest[:-len("/events")])
+                return
+            self._handle_chat_session_get(rest)
+            return
         # -----------------------------------------------------------------------
         if not route.startswith("/api") and self._serve_static(urlsplit(self.path).path):
             return
@@ -1557,7 +1574,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- agent orchestrator routes ------------------------------------------
 
     def _handle_agent_post(self, payload: dict) -> None:
-        #   POST /api/agent {message, session_id?, workspace_id?} -> 202 {session_id, tier, status}
+        #   POST /api/agent {message, session_id?, chat_session_id?, workspace_id?} -> 202
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
             self._send_json(400, {"error": "'message' (non-empty string) is required"})
@@ -1574,10 +1591,6 @@ class Handler(BaseHTTPRequestHandler):
         model = payload.get("model")
         model = model.strip() if isinstance(model, str) and model.strip() else None
         if model:
-            # Fuzzy-match: the frontend sends a normalized model ID
-            # (e.g. "deepseek-v4-flash-free") but the agent SDK needs the litellm
-            # format (e.g. "openai/deepseek-v4-flash-free"). Also check alias so
-            # models resolve regardless of provider prefix.
             resolved = None
             for m in agent_sessions.agent_models():
                 if m["model"] == model or m["model"].split("/")[-1] == model or m["model"].endswith("/" + model):
@@ -1587,7 +1600,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": f"model not available: {model}"})
                 return
             model = resolved
-        # optional workspace_id: link agent to a user workspace sandbox
         workspace_id = payload.get("workspace_id")
         workspace_id = workspace_id.strip() if isinstance(workspace_id, str) and workspace_id.strip() else None
         if workspace_id:
@@ -1595,11 +1607,6 @@ class Handler(BaseHTTPRequestHandler):
             if not ws:
                 self._send_json(404, {"error": "workspace not found"})
                 return
-            # ownership check: agent must operate in caller's workspace.
-            # The service bearer token in Authorization was already verified by
-            # _auth_and_body; here we additionally require GitHub identity,
-            # carried in the X-JWT header (NOT Authorization, which is reserved
-            # for the service/rotation token).
             user_id = self._require_user_from_jwt()
             if not user_id:
                 self._send_json(401, {"error": "GitHub identity required — connect GitHub in settings"})
@@ -1607,9 +1614,17 @@ class Handler(BaseHTTPRequestHandler):
             if ws["user_id"] != user_id:
                 self._send_json(403, {"error": "access denied"})
                 return
+        # Chat session linking: if no existing agent session but we have a chat_session_id,
+        # use it. If we have neither, create a new chat session in DB.
+        chat_session_id = payload.get("chat_session_id")
+        chat_session_id = chat_session_id.strip() if isinstance(chat_session_id, str) else None
+        if not session_id and not chat_session_id:
+            cs = db.create_chat_session(model=model, workspace_id=workspace_id)
+            chat_session_id = cs["id"]
         try:
             session = agent_sessions.get_or_create(session_id, model,
-                                                   workspace_id=workspace_id)
+                                                   workspace_id=workspace_id,
+                                                   chat_session_id=chat_session_id)
         except agent_sessions.CapacityError as e:
             self._send_json(429, {"error": str(e)}, headers={"Retry-After": "30"})
             return
@@ -1619,7 +1634,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         session.submit(message.strip())
         resp = {"session_id": session.id, "tier": session.tier,
-                "model": session.model, "status": session.status}
+                "model": session.model, "status": session.status,
+                "chat_session_id": chat_session_id or session.chat_session_id}
         if session.workspace_id:
             resp["workspace_id"] = session.workspace_id
         self._send_json(202, resp)
@@ -1639,7 +1655,17 @@ class Handler(BaseHTTPRequestHandler):
                 since = int(query.get("since", ["0"])[0])
             except ValueError:
                 since = 0
-            self._send_json(200, session.snapshot(since=since))
+            snap = session.snapshot(since=since)
+            # Persist new events to chat_events if this agent session is linked to a chat session
+            if session.chat_session_id and snap["events"]:
+                new_events = [ev for ev in snap["events"] if ev.get("i", -1) >= session.persisted_seq]
+                if new_events:
+                    try:
+                        db.append_chat_events(session.chat_session_id, new_events)
+                        session.persisted_seq = snap["next"]
+                    except Exception:
+                        pass  # non-fatal
+            self._send_json(200, snap)
             return
 
         if len(parts) == 2 and parts[1] == "files":   # list artifacts
@@ -1685,6 +1711,54 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json(404, {"error": "not found"})
+
+    # -- chat session handlers ------------------------------------------------
+
+    def _handle_chat_sessions_list(self) -> None:
+        sessions = db.list_chat_sessions()
+        self._send_json(200, {"sessions": sessions})
+
+    def _handle_chat_session_get(self, session_id: str) -> None:
+        cs = db.get_chat_session(session_id)
+        if not cs:
+            self._send_json(404, {"error": "chat session not found"})
+            return
+        self._send_json(200, cs)
+
+    def _handle_chat_session_events(self, session_id: str) -> None:
+        cs = db.get_chat_session(session_id)
+        if not cs:
+            self._send_json(404, {"error": "chat session not found"})
+            return
+        events = db.get_chat_events(session_id)
+        self._send_json(200, {"session_id": session_id, "events": events})
+
+    def _handle_chat_session_create(self, payload: dict) -> None:
+        title = str(payload.get("title", "New Chat")).strip() or "New Chat"
+        model = str(payload.get("model", "")).strip() or None
+        cs = db.create_chat_session(title=title, model=model)
+        self._send_json(201, cs)
+
+    def _handle_chat_session_update(self, session_id: str, payload: dict) -> None:
+        fields = {}
+        if "title" in payload:
+            title = str(payload["title"]).strip()
+            if title:
+                fields["title"] = title
+        if "model" in payload:
+            fields["model"] = str(payload["model"]).strip() or None
+        updated = db.update_chat_session(session_id, **fields)
+        if not updated:
+            self._send_json(404, {"error": "chat session not found"})
+            return
+        self._send_json(200, updated)
+
+    def _handle_chat_session_delete(self, session_id: str) -> None:
+        ok = db.delete_chat_session(session_id)
+        if not ok:
+            self._send_json(404, {"error": "chat session not found"})
+            return
+        self._send_json(200, {"deleted": session_id})
 
     def _read_json_body(self) -> dict | None:
         """Parse the request body as JSON (no auth check — caller already
@@ -2451,7 +2525,9 @@ class Handler(BaseHTTPRequestHandler):
         if ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
-        self._send_json(200, ws)
+        # Repair sandbox if missing (e.g. after Space restart)
+        github_integration.ensure_workspace_sandbox(ws_id)
+        self._send_json(200, github_integration.get_workspace(ws_id))
 
     def _handle_workspace_create(self) -> None:
         user_id = self._require_user()
@@ -2924,6 +3000,23 @@ class Handler(BaseHTTPRequestHandler):
             ws_id = route[len("/api/workspaces/"):-len("/checkout")]
             self._handle_workspace_checkout(ws_id)
             return
+        # --- Chat session POST routes (bearer-gated) ---
+        if route == "/api/chat/sessions":
+            payload = self._auth_and_body()
+            if payload is None:
+                return
+            self._handle_chat_session_create(payload)
+            return
+        if route.startswith("/api/chat/sessions/") and route.endswith("/update"):
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            sid = route[len("/api/chat/sessions/"):-len("/update")]
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            self._handle_chat_session_update(sid, payload)
+            return
         # -----------------------------------------------------------------------
         # POST /api/agent shares the same _auth_and_body gate as the panel routes
         # (service bearer token in Authorization).  GitHub identity for workspace
@@ -3030,6 +3123,12 @@ class Handler(BaseHTTPRequestHandler):
             ws_id = route[len("/api/workspaces/"):]
             if ws_id:
                 self._handle_workspace_delete(ws_id)
+                return
+        # chat session deletion
+        if route.startswith("/api/chat/sessions/"):
+            sid = route[len("/api/chat/sessions/"):]
+            if sid:
+                self._handle_chat_session_delete(sid)
                 return
         # template deletion
         if not route.startswith("/api/templates/"):
