@@ -59,12 +59,22 @@ export interface AgentStart {
   model: string | null;
   status: AgentStatus;
   workspace_id?: string;
+  chat_session_id?: string;
 }
 
 export interface AgentFile {
   path: string;
   size: number;
   mtime: number;
+}
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  model: string | null;
+  workspace_id: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export class AgentClient {
@@ -117,15 +127,14 @@ export class AgentClient {
 
   /** Start a new session, or continue an existing one if sessionId is given.
    *  `model` selects which model/tier drives a NEW session.
-   *  `workspaceId` links the agent to a user workspace sandbox. */
-  send(message: string, sessionId?: string, model?: string, workspaceId?: string) {
+   *  `workspaceId` links the agent to a user workspace sandbox.
+   *  `chatSessionId` links to a persistent chat session for history. */
+  send(message: string, sessionId?: string, model?: string, workspaceId?: string, chatSessionId?: string) {
     const body: Record<string, unknown> = { message };
     if (sessionId) body.session_id = sessionId;
     if (model) body.model = model;
     if (workspaceId) body.workspace_id = workspaceId;
-    // When linking to a workspace, the backend additionally needs the caller's
-    // GitHub identity (JWT) for the ownership check. Send it in X-JWT so the
-    // Authorization header stays reserved for the service/rotation token.
+    if (chatSessionId) body.chat_session_id = chatSessionId;
     const headers: Record<string, string> = {};
     if (workspaceId && this.settings.githubSessionId) {
       headers["X-JWT"] = this.settings.githubSessionId;
@@ -180,6 +189,38 @@ export class AgentClient {
     return this.req<{ commit_sha?: string; branch?: string; status?: string }>(
       `/api/workspaces/${wsId}/push`,
       { method: "POST", body: JSON.stringify(opts || {}) },
+    );
+  }
+
+  // -- chat session persistence -----------------------------------------------
+
+  listChatSessions() {
+    return this.req<{ sessions: ChatSession[] }>("/api/chat/sessions");
+  }
+
+  createChatSession(title?: string) {
+    return this.req<ChatSession>("/api/chat/sessions", {
+      method: "POST",
+      body: JSON.stringify({ title: title || "New Chat" }),
+    });
+  }
+
+  deleteChatSession(id: string) {
+    return this.req<{ deleted: string }>(`/api/chat/sessions/${id}`, {
+      method: "DELETE",
+    });
+  }
+
+  updateChatSession(id: string, fields: { title?: string; model?: string }) {
+    return this.req<ChatSession>(`/api/chat/sessions/${id}/update`, {
+      method: "POST",
+      body: JSON.stringify(fields),
+    });
+  }
+
+  getChatEvents(id: string) {
+    return this.req<{ session_id: string; events: AgentEvent[] }>(
+      `/api/chat/sessions/${id}/events`,
     );
   }
 

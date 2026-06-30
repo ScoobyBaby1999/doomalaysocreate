@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { Settings, Effort } from "../api/panel";
 import type { Workspace } from "../api/github";
@@ -7,6 +7,7 @@ import {
   type AgentEvent,
   type AgentFile,
   type AgentStatus,
+  type ChatSession,
 } from "../api/agent";
 import { JudgeCard } from "../components/JudgeCard";
 import { useModelStore } from "../lib/model-store";
@@ -14,9 +15,11 @@ import { PanelDrawer, type PanelInvocation } from "../components/PanelDrawer";
 import { FileDrawer } from "../components/FileDrawer";
 import { DiffView } from "../components/DiffView";
 import { GitStatus } from "../components/GitStatus";
+import { SessionSidebar } from "../components/SessionSidebar";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 
 const SESSION_KEY = "doomalaysocreate.agent.session";
+const CHAT_SESSION_KEY = "doomalaysocreate.agent.chat_session";
 const MODEL_KEY = "doomalaysocreate.agent.model";
 const EFFORTS: Effort[] = ["low", "med", "high", "max"];
 
@@ -42,6 +45,8 @@ export function AgentChat({
   const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
   const [panelDrawerOpen, setPanelDrawerOpen] = useState(false);
   const [panelInvocations, setPanelInvocations] = useState<PanelInvocation[]>([]);
+  const [sessionSidebarOpen, setSessionSidebarOpen] = useState(false);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
 
   const openOverlay = useModelStore((s) => s.openOverlay);
   const selectedModelId = useModelStore((s) => s.selectedModelId);
@@ -64,12 +69,14 @@ export function AgentChat({
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(workspaceId || null);
   const sessionRef = useRef<string | null>(sessionStorage.getItem(SESSION_KEY));
+  const chatSessionIdRef = useRef<string | null>(sessionStorage.getItem(CHAT_SESSION_KEY));
   const lastMsgRef = useRef<string>("");
   const listRef = useRef<VirtuosoHandle>(null);
   const client = useRef(new AgentClient(settings));
   client.current = new AgentClient(settings);
   const abortRef = useRef<AbortController | null>(null);
 
+  // load model list on mount
   useEffect(() => {
     let alive = true;
     client.current
@@ -89,6 +96,7 @@ export function AgentChat({
     return () => { alive = false; };
   }, [settings.baseUrl, selected]);
 
+  // load workspaces on mount (if github connected)
   useEffect(() => {
     if (!settings.githubSessionId) return;
     let alive = true;
@@ -100,6 +108,47 @@ export function AgentChat({
       .catch(() => {});
     return () => { alive = false; };
   }, [settings.baseUrl, settings.githubSessionId]);
+
+  // load chat sessions + restore active session on mount
+  useEffect(() => {
+    let alive = true;
+    client.current.listChatSessions()
+      .then((r) => {
+        if (!alive) return;
+        setChatSessions(r.sessions);
+        const active = chatSessionIdRef.current;
+        if (active && r.sessions.find((s) => s.id === active)) {
+          return client.current.getChatEvents(active);
+        }
+        return null;
+      })
+      .then((evData) => {
+        if (!alive || !evData) return;
+        setEvents(evData.events);
+        // Try to resume agent session polling if we have an agent session ID
+        const sid = sessionRef.current;
+        if (sid) {
+          client.current.poll(sid, 0)
+            .then((snap) => {
+              if (!alive) return;
+              if (snap.events.length) {
+                setEvents(snap.events);
+              }
+              setStatus(snap.status);
+              if (snap.status === "running" || snap.status === "starting") {
+                pollUntilSettled(sid, snap.next);
+              }
+            })
+            .catch(() => {
+              sessionRef.current = null;
+              sessionStorage.removeItem(SESSION_KEY);
+            });
+        }
+      })
+      .catch(() => {});
+    return () => { alive = false };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function refreshFiles(sid?: string | null) {
     const id = sid ?? sessionRef.current;
@@ -155,6 +204,25 @@ export function AgentChat({
     }
   }
 
+  const switchSession = useCallback(async (chatSessionId: string) => {
+    abortRef.current?.abort();
+    chatSessionIdRef.current = chatSessionId;
+    sessionStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
+    sessionRef.current = null;
+    sessionStorage.removeItem(SESSION_KEY);
+    setEvents([]);
+    setFiles([]);
+    setStatus("idle");
+    setError("");
+    setCost(null);
+    setBusy(false);
+    setPanelInvocations([]);
+    try {
+      const evData = await client.current.getChatEvents(chatSessionId);
+      setEvents(evData.events);
+    } catch { /* ignore */ }
+  }, []);
+
   async function send(text?: string) {
     const message = (text ?? input).trim();
     if (!message || busy) return;
@@ -176,9 +244,19 @@ export function AgentChat({
         sessionRef.current ?? undefined,
         sessionRef.current ? undefined : selectedModelId || selected || undefined,
         selectedWorkspace ?? undefined,
+        chatSessionIdRef.current ?? undefined,
       );
       sessionRef.current = start.session_id;
       sessionStorage.setItem(SESSION_KEY, start.session_id);
+      if (start.chat_session_id) {
+        chatSessionIdRef.current = start.chat_session_id;
+        sessionStorage.setItem(CHAT_SESSION_KEY, start.chat_session_id);
+        // Add new session to list if not already there
+        setChatSessions((prev) => {
+          if (prev.find((s) => s.id === start.chat_session_id)) return prev;
+          return [{ id: start.chat_session_id, title: "New Chat", model: start.model, workspace_id: null, created_at: "", updated_at: "" }, ...prev];
+        });
+      }
       const fresh = await client.current.poll(start.session_id, 0);
       setEvents((prev) => {
         const userMsg = prev[prev.length - 1];
@@ -190,6 +268,10 @@ export function AgentChat({
       if (!ac.signal.aborted) {
         await pollUntilSettled(start.session_id, fresh.next);
       }
+      // Refresh session list after completion to get updated title
+      client.current.listChatSessions().then((r) => {
+        if (!ac.signal.aborted) setChatSessions(r.sessions);
+      }).catch(() => {});
     } catch (e) {
       if (ac.signal.aborted) return;
       sessionRef.current = null;
@@ -208,7 +290,7 @@ export function AgentChat({
     catch { setError("Interrupt failed"); setStatus("running"); }
   }
 
-  function newSession(model?: string) {
+  async function newSession(model?: string) {
     abortRef.current?.abort();
     sessionRef.current = null;
     sessionStorage.removeItem(SESSION_KEY);
@@ -219,34 +301,30 @@ export function AgentChat({
     setCost(null);
     setBusy(false);
     setPanelInvocations([]);
+    setSessionSidebarOpen(false);
     if (model) { setSelected(model); localStorage.setItem(MODEL_KEY, model); }
+    // Create persistent session in DB
+    try {
+      const cs = await client.current.createChatSession();
+      chatSessionIdRef.current = cs.id;
+      sessionStorage.setItem(CHAT_SESSION_KEY, cs.id);
+      setChatSessions((prev) => [cs, ...prev]);
+    } catch { /* ignore */ }
+  }
+
+  async function deleteSession(sessionId: string) {
+    try {
+      await client.current.deleteChatSession(sessionId);
+      setChatSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      if (chatSessionIdRef.current === sessionId) {
+        chatSessionIdRef.current = null;
+        sessionStorage.removeItem(CHAT_SESSION_KEY);
+        setEvents([]);
+      }
+    } catch { /* ignore */ }
   }
 
   const isDesktop = useMediaQuery("(min-width: 768px)"); void isDesktop;
-
-  // Restore session on mount: if we have a stored session ID, fetch its full transcript
-  useEffect(() => {
-    const sid = sessionRef.current;
-    if (!sid) return;
-    let alive = true;
-    client.current.poll(sid, 0)
-      .then((snap) => {
-        if (!alive) return;
-        setEvents(snap.events);
-        setStatus(snap.status);
-        // resume polling if session was still running
-        if (snap.status === "running" || snap.status === "starting") {
-          pollUntilSettled(sid, snap.next);
-        }
-      })
-      .catch(() => {
-        // session expired, clear it
-        sessionRef.current = null;
-        sessionStorage.removeItem(SESSION_KEY);
-      });
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const running = status === "running" || status === "starting";
 
@@ -254,6 +332,13 @@ export function AgentChat({
     <div className="flex flex-col h-full relative">
       {/* header */}
       <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted shrink-0">
+        <button
+          onClick={() => setSessionSidebarOpen((o) => !o)}
+          className={`text-sm px-1 shrink-0 ${sessionSidebarOpen ? "text-accent" : "text-muted hover:text-accent"}`}
+          title="Sessions"
+        >
+          ☰
+        </button>
         <button
           onClick={() => !running && openOverlay()}
           disabled={running}
@@ -410,6 +495,15 @@ export function AgentChat({
         </div>
       )}
 
+      <SessionSidebar
+        open={sessionSidebarOpen}
+        sessions={chatSessions}
+        activeId={chatSessionIdRef.current}
+        onSelect={switchSession}
+        onDelete={deleteSession}
+        onNew={newSession}
+        onClose={() => setSessionSidebarOpen(false)}
+      />
       <FileDrawer
         open={fileDrawerOpen}
         onClose={() => setFileDrawerOpen(false)}
