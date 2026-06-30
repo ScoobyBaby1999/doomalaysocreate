@@ -5,11 +5,22 @@ from __future__ import annotations
 import logging
 import os
 import re
-import urllib.request
 from provider_sync.base import BaseSync, ModelInfo
 from oplog import log_event
 
 log = logging.getLogger(__name__)
+
+
+def _ssl_insecure_context():
+    try:
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    except Exception:
+        return None
+
 
 _cached_cloudflare_models: list[ModelInfo] | None = None
 
@@ -49,6 +60,7 @@ class CloudflareSync(BaseSync):
         seen: set[str] = set()
         page = 1
         total_pages = 1
+        _FETCH_TIMEOUT = 15
 
         while page <= total_pages:
             params = []
@@ -91,22 +103,14 @@ class CloudflareSync(BaseSync):
         return models
 
     def _fetch_from_docs(self) -> list[ModelInfo]:
-        try:
-            req = urllib.request.Request(self.DOCS_URL, headers={"User-Agent": "doomalaysocreate/1.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                content = resp.read().decode("utf-8")
-        except Exception as exc:
-            log_event("cloudflare_docs_fetch_failed", url=self.DOCS_URL, error=str(exc)[:300])
-            log.warning("Cloudflare docs fetch failed: %s", exc)
+        content = self._fetch_docs_content(self.DOCS_URL)
+        if not content:
             return []
-
         model_ids: list[str] = list(dict.fromkeys(
             m.rstrip("/") for m in re.findall(r'/workers-ai/models/([a-z0-9][a-z0-9._-]+)/', content)
         ))
-
         if not model_ids:
             return []
-
         models: list[ModelInfo] = []
         seen: set[str] = set()
         for model_id in model_ids:
@@ -122,6 +126,30 @@ class CloudflareSync(BaseSync):
                 metadata={},
             ))
         return models
+
+    def _fetch_docs_content(self, url: str) -> str | None:
+        try:
+            import httpx
+            try:
+                resp = httpx.get(url, headers={"User-Agent": "doomalaysocreate/1.0"}, timeout=30, verify=True)
+                resp.raise_for_status()
+                return resp.text
+            except Exception:
+                resp = httpx.get(url, headers={"User-Agent": "doomalaysocreate/1.0"}, timeout=30, verify=False)
+                resp.raise_for_status()
+                return resp.text
+        except ImportError:
+            pass
+        try:
+            import urllib.request
+            ctx = _ssl_insecure_context()
+            req = urllib.request.Request(url, headers={"User-Agent": "doomalaysocreate/1.0"})
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                return resp.read().decode("utf-8")
+        except Exception as exc:
+            log_event("cloudflare_docs_fetch_failed", url=url, error=str(exc)[:300])
+            log.warning("Cloudflare docs fetch failed: %s", exc)
+            return None
 
     def filter_free_models(self, models: list[ModelInfo]) -> list[ModelInfo]:
         return models
