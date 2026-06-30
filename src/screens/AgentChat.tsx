@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import type { Settings, PanelSnapshot, Effort } from "../api/panel";
+import type { Settings, Effort } from "../api/panel";
 import type { Workspace } from "../api/github";
 import {
   AgentClient,
