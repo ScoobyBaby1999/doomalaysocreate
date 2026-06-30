@@ -139,21 +139,21 @@ function sortByFilterScore(models: ProviderModel[], activeFilters: string[]): Pr
   return [...models].sort((a, b) => bestFilterScore(b, activeFilters) - bestFilterScore(a, activeFilters));
 }
 
-function bestRank(attrs: ModelAttributes | undefined): number {
+function avgRank(attrs: ModelAttributes | undefined): number {
   const ranks = attrs?.ranks;
   if (!ranks || ranks.length === 0) return Infinity;
-  return Math.min(...ranks.map((r) => r.rank));
+  return ranks.reduce((s, r) => s + r.rank, 0) / ranks.length;
 }
 
 function defaultSort(models: ProviderModel[]): ProviderModel[] {
   return [...models].sort((a, b) => {
+    const aAvg = avgRank(a.attributes);
+    const bAvg = avgRank(b.attributes);
+    if (aAvg !== bAvg) return aAvg === Infinity ? 1 : bAvg === Infinity ? -1 : aAvg - bAvg;
+
     const aIntel = a.attributes?.benchmarks?.intelligence ?? 0;
     const bIntel = b.attributes?.benchmarks?.intelligence ?? 0;
     if (aIntel !== bIntel) return bIntel - aIntel;
-
-    const aRank = bestRank(a.attributes);
-    const bRank = bestRank(b.attributes);
-    if (aRank !== bRank) return aRank === Infinity ? 1 : bRank === Infinity ? -1 : aRank - bRank;
 
     const aCode = a.attributes?.benchmarks?.coding ?? 0;
     const bCode = b.attributes?.benchmarks?.coding ?? 0;
