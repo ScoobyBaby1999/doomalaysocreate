@@ -143,6 +143,40 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
             label = f"{model_id} ({prov.get('displayName', name)})"
             entries.append((env_var, label, litellm_model, base_url or None))
 
+    # Also include dynamically synced models from providers with sync_config.
+    # The panel syncs models from live /v1/models endpoints at boot; those are
+    # cached in provider_sync._panel_sync_cache.  Providers whose env var is set
+    # contribute ALL their synced models so the agent picker shows everything
+    # the panel can route to, not just the static catalog.
+    from provider_sync import get_panel_sync_cache
+    sync_cache = get_panel_sync_cache()
+    if sync_cache:
+        seen: set[str] = set(m.split("/")[-1] for _, _, m, _ in entries)
+        for prov in data.get("providers", []):
+            name = prov["name"]
+            sync_config = prov.get("sync_config")
+            if not sync_config or not sync_config.get("enabled"):
+                continue
+            senv = prov.get("env_var", "")
+            if isinstance(senv, list):
+                senv = senv[0] if senv else ""
+            if not senv or not os.environ.get(senv, "").strip():
+                continue
+            synced = sync_cache.get(name, [])
+            if not synced:
+                continue
+            sbase = prov.get("base_url", "")
+            for var in prov.get("requires", []):
+                sbase = sbase.replace("{" + var + "}", os.environ.get(var, "").strip())
+            if sbase.endswith("/chat/completions"):
+                sbase = sbase[:-len("/chat/completions")]
+            for mid in synced:
+                last = mid.split("/")[-1]
+                if last not in seen:
+                    seen.add(last)
+                    entries.append((senv, f"{mid} ({prov.get('displayName', name)})",
+                                    f"openai/{mid}", sbase or None))
+
     _open_models_cache = entries
     return entries
 
