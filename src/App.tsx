@@ -12,6 +12,7 @@ import { ProvidersDialog } from "./components/ProvidersDialog";
 import { useModelStore } from "./lib/model-store";
 
 import { getJWTSub } from "./lib/jwt";
+import { deriveToken } from "./api/token";
 import type { Settings } from "./api/panel";
 
 type Tab = "chat" | "agent" | "conscious" | "workspaces" | "settings" | "debug";
@@ -129,6 +130,60 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const reportFrontendError = async (message: string, stack: any, severity: string = "ERROR") => {
+      if (!settings.baseUrl) return;
+      try {
+        const token = settings.rotationSecret 
+          ? await deriveToken(settings.rotationSecret) 
+          : settings.token;
+        if (!token) return;
+
+        await fetch(`${settings.baseUrl}/api/debug/log`, {
+          method: "POST",
+          headers: { 
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            level: severity,
+            cat: "frontend",
+            fn: "global_error_listener",
+            msg: message,
+            data: stack,
+          }),
+        });
+      } catch (err) {
+        console.error("Telemetry failed to push log:", err);
+      }
+    };
+
+    const onErrorHandler = (e: ErrorEvent) => {
+      reportFrontendError(`Browser Unhandled Exception: ${e.message}`, {
+        filename: e.filename,
+        line: e.lineno,
+        column: e.colno,
+        message: e.message,
+        stack: e.error?.stack || ""
+      });
+    };
+
+    const onUnhandledRejectionHandler = (e: PromiseRejectionEvent) => {
+      reportFrontendError(`Browser Unhandled Rejection: ${e.reason}`, {
+        reason: e.reason instanceof Error ? e.reason.message : String(e.reason),
+        stack: e.reason instanceof Error ? e.reason.stack : ""
+      });
+    };
+
+    window.addEventListener("error", onErrorHandler);
+    window.addEventListener("unhandledrejection", onUnhandledRejectionHandler);
+    
+    return () => {
+      window.removeEventListener("error", onErrorHandler);
+      window.removeEventListener("unhandledrejection", onUnhandledRejectionHandler);
+    };
+  }, [settings]);
 
   if (!hasCredentials && !manualSetup) {
     return (
