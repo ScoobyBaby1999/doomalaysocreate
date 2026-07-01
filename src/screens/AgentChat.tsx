@@ -19,7 +19,7 @@ import { SessionSidebar } from "../components/SessionSidebar";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 
 const SESSION_KEY = "doomalaysocreate.agent.session";
-const CHAT_SESSION_KEY = "doomalaysocreate.agent.chat_session";
+const CHAT_SESSION_KEY = "doomalaysocreate.agent.chat_session_v2";
 const MODEL_KEY = "doomalaysocreate.agent.model";
 const EFFORTS: Effort[] = ["low", "med", "high", "max"];
 
@@ -69,7 +69,7 @@ export function AgentChat({
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(workspaceId || null);
   const sessionRef = useRef<string | null>(sessionStorage.getItem(SESSION_KEY));
-  const chatSessionIdRef = useRef<string | null>(sessionStorage.getItem(CHAT_SESSION_KEY));
+  const chatSessionIdRef = useRef<string | null>(localStorage.getItem(CHAT_SESSION_KEY));
   const lastMsgRef = useRef<string>("");
   const listRef = useRef<VirtuosoHandle>(null);
   const client = useRef(new AgentClient(settings));
@@ -131,10 +131,10 @@ export function AgentChat({
           client.current.poll(sid, 0)
             .then((snap) => {
               if (!alive) return;
-              if (snap.events.length) {
+              setStatus(snap.status);
+              if (snap.events.length && snap.events.length > evData.events.length) {
                 setEvents(snap.events);
               }
-              setStatus(snap.status);
               if (snap.status === "running" || snap.status === "starting") {
                 pollUntilSettled(sid, snap.next);
               }
@@ -207,7 +207,7 @@ export function AgentChat({
   const switchSession = useCallback(async (chatSessionId: string) => {
     abortRef.current?.abort();
     chatSessionIdRef.current = chatSessionId;
-    sessionStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
+    localStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
     sessionRef.current = null;
     sessionStorage.removeItem(SESSION_KEY);
     setEvents([]);
@@ -250,7 +250,7 @@ export function AgentChat({
       sessionStorage.setItem(SESSION_KEY, start.session_id);
       if (start.chat_session_id) {
         chatSessionIdRef.current = start.chat_session_id;
-        sessionStorage.setItem(CHAT_SESSION_KEY, start.chat_session_id);
+        localStorage.setItem(CHAT_SESSION_KEY, start.chat_session_id);
         // Add new session to list if not already there
         setChatSessions((prev) => {
           if (!start.chat_session_id) return prev;
@@ -259,15 +259,17 @@ export function AgentChat({
         });
       }
       const fresh = await client.current.poll(start.session_id, 0);
-      setEvents((prev) => {
-        const userMsg = prev[prev.length - 1];
-        const hasUserMsg =
-          userMsg?.type === "user" &&
-          fresh.events.some((e) => e.type === "user" && e.text === userMsg.text);
-        return hasUserMsg ? fresh.events : [...prev.slice(0, -1), ...fresh.events];
-      });
+      setEvents((prev) => [...prev.slice(0, -1), ...fresh.events]);
       if (!ac.signal.aborted) {
         await pollUntilSettled(start.session_id, fresh.next);
+      }
+      // Reload full conversation from DB to restore any history that was lost
+      // when the agent session's in-memory events replaced the DB-backed events.
+      if (chatSessionIdRef.current) {
+        try {
+          const dbEvents = await client.current.getChatEvents(chatSessionIdRef.current);
+          if (!ac.signal.aborted) setEvents(dbEvents.events);
+        } catch { /* non-fatal */ }
       }
       // Refresh session list after completion to get updated title
       client.current.listChatSessions().then((r) => {
@@ -308,7 +310,7 @@ export function AgentChat({
     try {
       const cs = await client.current.createChatSession();
       chatSessionIdRef.current = cs.id;
-      sessionStorage.setItem(CHAT_SESSION_KEY, cs.id);
+      localStorage.setItem(CHAT_SESSION_KEY, cs.id);
       setChatSessions((prev) => [cs, ...prev]);
     } catch { /* ignore */ }
   }
@@ -319,7 +321,7 @@ export function AgentChat({
       setChatSessions((prev) => prev.filter((s) => s.id !== sessionId));
       if (chatSessionIdRef.current === sessionId) {
         chatSessionIdRef.current = null;
-        sessionStorage.removeItem(CHAT_SESSION_KEY);
+        localStorage.removeItem(CHAT_SESSION_KEY);
         setEvents([]);
       }
     } catch { /* ignore */ }
