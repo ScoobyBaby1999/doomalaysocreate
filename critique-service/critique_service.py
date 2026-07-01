@@ -2656,6 +2656,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
+        github_integration.ensure_workspace_sandbox(ws_id)
         try:
             sha = github_integration.commit_changes(ws["sandbox_path"], message)
             self._send_json(200, {"commit_sha": sha})
@@ -2674,6 +2675,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
+        github_integration.ensure_workspace_sandbox(ws_id)
         branch = payload.get("branch", ws.get("current_branch", "main"))
         force = bool(payload.get("force", False))
         auto = bool(payload.get("auto_approve", False))
@@ -2713,6 +2715,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
+        github_integration.ensure_workspace_sandbox(ws_id)
         auto = bool(payload.get("auto_approve", False))
         if auto:
             try:
@@ -2746,6 +2749,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
+        github_integration.ensure_workspace_sandbox(ws_id)
         try:
             entry = github_integration.publish_workspace(user_id, ws_id)
             self._send_json(200, entry)
@@ -2912,6 +2916,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
+        github_integration.ensure_workspace_sandbox(ws_id)
         try:
             raw = github_integration.run_git_command(ws["sandbox_path"], "status", "--porcelain")
             files = []
@@ -2936,6 +2941,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
+        github_integration.ensure_workspace_sandbox(ws_id)
         try:
             raw = github_integration.run_git_command(ws["sandbox_path"], "diff", "--no-color")
             self._send_json(200, {"diff": raw, "has_changes": bool(raw.strip())})
@@ -2952,6 +2958,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
+        github_integration.ensure_workspace_sandbox(ws_id)
         from urllib.parse import parse_qs, urlsplit
         qs = parse_qs(urlsplit(self.path).query)
         try:
@@ -2988,6 +2995,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
+        github_integration.ensure_workspace_sandbox(ws_id)
         try:
             github_integration.checkout_branch(ws["sandbox_path"], branch)
             db.update_workspace(ws_id, current_branch=branch)
