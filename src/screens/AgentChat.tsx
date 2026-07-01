@@ -253,6 +253,7 @@ export function AgentChat({
         sessionStorage.setItem(CHAT_SESSION_KEY, start.chat_session_id);
         // Add new session to list if not already there
         setChatSessions((prev) => {
+          if (!start.chat_session_id) return prev;
           if (prev.find((s) => s.id === start.chat_session_id)) return prev;
           return [{ id: start.chat_session_id, title: "New Chat", model: start.model, workspace_id: null, created_at: "", updated_at: "" }, ...prev];
         });
