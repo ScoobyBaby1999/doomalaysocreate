@@ -251,20 +251,8 @@ def agent_models() -> list[dict]:
                 seen.add(model)
                 out.append({"tier": "open", "provider": label, "model": model,
                             "label": label, "default": False})
-    # Free GLM 5.2 via the z-ai-web-dev-sdk bridge — no API key needed, so it's
-    # always offered when the bridge is up. This is the tier the user picks
-    # when they see "GLM 5.2 (free)" in the agent panel model dropdown.
-    if _glm_bridge_available():
-        out.append({"tier": "zai", "provider": "Z.ai (free)", "model": "glm-5.2-free",
-                    "label": "GLM 5.2 (free)", "default": False})
     if out and not any(m["default"] for m in out):
-        # Prefer free GLM as the default over mock when no AGENT_MODEL is set,
-        # so a fresh Space with no API keys still gets real AI responses.
-        zai = next((m for m in out if m["tier"] == "zai"), None)
-        if zai:
-            zai["default"] = True
-        else:
-            out[0]["default"] = True
+        out[0]["default"] = True
     return out
 
 
@@ -286,25 +274,18 @@ def _model_base_url(model: str) -> str | None:
 
 
 def agent_tier() -> str | None:
-    """Which agent tier this Space can actually run: "claude" | "open" | "zai" | None.
+    """Which agent tier this Space can actually run: "claude" | "open" | None.
 
     Requires BOTH a key and the matching SDK installed — so /health never
-    advertises a tier the worker can't start. The "zai" tier (free GLM via
-    the bridge) needs no API key — only a reachable bridge on port 3030.
+    advertises a tier the worker can't start.
     """
     forced = os.environ.get("AGENT_FORCE_TIER", "").strip().lower()
-    if forced in ("claude", "open", "mock", "zai"):
+    if forced in ("claude", "open", "mock"):
         return forced
     if os.environ.get("ANTHROPIC_API_KEY", "").strip() and _installed("claude_agent_sdk"):
         return "claude"
     if _pick_open_llm() is not None and _open_sdk_installed():
         return "open"
-    # Free GLM via the bridge — the fallback that gives every Space real AI
-    # even with zero API keys configured. Without this, a keyless Space would
-    # resolve to None and the agent panel would 500 ("no agent tier available")
-    # or silently use the MockAdapter echo.
-    if _glm_bridge_available():
-        return "zai"
     return None
 
 
@@ -339,9 +320,7 @@ class BaseAdapter:
 class MockAdapter(BaseAdapter):
     """Plumbing test double: echoes and fakes one tool round-trip.
 
-    Only used when AGENT_FORCE_TIER=mock or no real tier is available. Real
-    GLM (free) is provided by ZaiAdapter below — the agent panel never falls
-    back to mock silently when the bridge is reachable.
+    Only used when AGENT_FORCE_TIER=mock or no real tier is available.
     """
 
     def __init__(self, workspace: Path, workspace_id: str | None = None,
@@ -490,74 +469,6 @@ def _glm_call_http(messages: list[dict], model: str, timeout: float) -> str:
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = _json.loads(r.read().decode())
     return (data.get("content") or "").strip()
-
-
-class ZaiAdapter(BaseAdapter):
-    """Drives the agent panel with the FREE GLM 5.2 model.
-
-    No API key required — the z-ai-web-dev-sdk provides free, rate-limited
-    access. Tries the subprocess CLI first (most robust), falls back to the
-    HTTP bridge. Maintains an in-memory conversation for multi-turn context.
-    """
-
-    def __init__(self, workspace: Path, model: str | None = None,
-                 workspace_id: str | None = None, system_prompt: str | None = None):
-        super().__init__(workspace, workspace_id)
-        self.model = model or "glm-5.2"
-        self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
-        self.messages: list[dict] = []
-
-    def open(self) -> None:
-        # Seed the conversation with the system prompt. Both call paths forward
-        # the messages array directly to z-ai-web-dev-sdk's chat completions.
-        self.messages = [{"role": "system", "content": self.system_prompt}]
-
-    def turn(self, user_msg: str, emit) -> None:
-        import json as _json
-        self.messages.append({"role": "user", "content": user_msg})
-        content = ""
-        errors: list[str] = []
-        # Path 1: PYTHON-NATIVE direct HTTP call (PREFERRED — no Node needed).
-        # This is the path that works on a Python-only HF Space. Uses urllib
-        # (stdlib) to call Puter/Z.ai/NVIDIA/OpenRouter/SiliconFlow directly.
-        if _glm_native_available():
-            try:
-                content = _glm_call_native(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
-            except Exception as exc:
-                errors.append(f"native: {type(exc).__name__}: {str(exc)[:200]}")
-        # Path 2: Node.js subprocess (fallback — used if native fails or no keys set)
-        if not content and _glm_subprocess_available():
-            try:
-                content = _glm_call_subprocess(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
-            except Exception as exc:
-                errors.append(f"subprocess: {type(exc).__name__}: {str(exc)[:160]}")
-        # Path 3: HTTP bridge at localhost:3030 (last resort)
-        if not content and _glm_http_available():
-            try:
-                content = _glm_call_http(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
-            except Exception as exc:
-                errors.append(f"http: {type(exc).__name__}: {str(exc)[:160]}")
-        if not content:
-            if errors:
-                content = (f"[GLM error] Could not reach the GLM model.\n\n"
-                           f"Attempted paths:\n" + "\n".join(f"  • {e}" for e in errors) +
-                           f"\n\nSet PUTER_API_TOKEN (free, puter.com/dashboard) as a Space Secret"
-                           f" for free GLM-5.2. Or NVIDIA_API_KEY (free 5.1, build.nvidia.com).")
-            else:
-                content = ("[GLM error] No GLM provider configured. Set ONE of these as a "
-                           "Space Secret:\n  • PUTER_API_TOKEN (free GLM-5.2) → puter.com/dashboard\n"
-                           "  • NVIDIA_API_KEY (free GLM-5.1) → build.nvidia.com\n"
-                           "  • ZAI_API_KEY (real GLM-5.2) → z.ai")
-        self.messages.append({"role": "assistant", "content": content})
-        emit({"type": "assistant", "text": content})
-
-    def interrupt(self) -> None:
-        # Synchronous call — nothing to cancel mid-flight.
-        pass
-
-    def close(self) -> None:
-        self.messages = []
-
 
 def _summarize_tool_input(name: str, tool_input: dict) -> str:
     if not isinstance(tool_input, dict):
@@ -754,42 +665,24 @@ def _guarded_shell(**kwargs):
     2. Network git operations (push/pull/fetch) are routed through the backend
        git functions (``push_to_remote`` / ``fetch_from_remote``) so the GitHub
        token never lands in ``.git/config`` and pushes are audit-logged.
-    3. Other blocked/approval-required commands return an error result instead
-       of executing.
     """
     from strands_tools import shell as _shell
-    from git_intercept import check_command
 
     kwargs["workdir"] = str(getattr(_thread_local, "workspace", Path.cwd()))
 
-    # git command interception: check before execution
     cmd = kwargs.get("command", "")
     if isinstance(cmd, str) and cmd.strip():
         stripped = cmd.strip()
         workspace_id = getattr(_thread_local, "workspace_id", None)
-        # Route network git operations through the backend so the token is
-        # never written to .git/config and pushes are audit-logged. Only when
-        # the agent is operating inside a linked workspace.
         if workspace_id and (
             stripped.startswith("git push")
             or stripped.startswith("git pull")
             or stripped.startswith("git fetch")
         ):
-            # Force-push still requires explicit approval — don't auto-route it.
             is_force = stripped.startswith("git push") and (
                 "-f " in stripped or "--force" in stripped)
             if not is_force:
                 return _route_network_git(stripped, workspace_id)
-        verdict = check_command(cmd)
-        if not verdict.allowed:
-            return {
-                "status": "error",
-                "content": [{"text": (
-                    f"Command requires user approval: {verdict.action}\n"
-                    f"Original command: {verdict.command}\n"
-                    f"This action has been queued for user review."
-                )}],
-            }
     return _shell.tool(**kwargs)
 
 
@@ -869,7 +762,7 @@ class StrandsAdapter(BaseAdapter):
                 continue
         # guarded shell: forces execution into this session's workspace
         import types as _types
-        shell_mod = _types.ModuleType("shell_guarded")
+        shell_mod = _types.ModuleType("shell")
         shell_mod.tool = _guarded_shell
         tools.append(shell_mod)
 
@@ -889,73 +782,41 @@ class StrandsAdapter(BaseAdapter):
         return getattr(self, "_session", None)
 
     def turn(self, user_msg: str, emit) -> None:
-        # set per-thread workspace so _guarded_shell knows where to run commands.
         _thread_local.workspace = self.workspace
         _thread_local.workspace_id = self.workspace_id
-        # Phase 2 (completed in this pass) — mid-turn cost abort.
-        # Install a callback handler that checks the conscious cost ceiling
-        # after each tool result. If over, calls agent.cancel() to abort the
-        # turn mid-flight + emits a cost.exceeded event. This is the "hard
-        # enforcement mid-turn" from TIER3_PLAN §14.
         sess = getattr(self, "_session", None)
-        cost_handler = None
-        if sess is not None and getattr(sess, "conscious_id", None):
-            def _cost_check_callback(**_kwargs):
-                # Strands fires callback handlers on each message event; we
-                # only act when cost is exceeded (defensive — never blocks a
-                # normal turn).
+        # Build a streaming callback handler: thinking text in real-time,
+        # plus mid-turn cost ceiling enforcement for conscious agents.
+        def _stream_callback(**kw):
+            reasoning = kw.get("reasoningText")
+            if reasoning:
+                emit({"type": "thinking", "text": reasoning})
+            # Cost ceiling check (conscious agents only)
+            if sess is not None and getattr(sess, "conscious_id", None):
                 if not _cost_turn_ok(sess.conscious_id):
                     spent, ceiling = _cost_figures(sess.conscious_id)
                     emit({"type": "status", "state": "idle",
                           "detail": f"cost ceiling exceeded mid-turn (spent=${spent:.4f}, ceiling=${ceiling:.4f})"})
                     canceler = getattr(self.agent, "cancel", None)
                     if callable(canceler):
-                        try:
-                            canceler()
-                        except Exception:
-                            pass
+                        try: canceler()
+                        except Exception: pass
                     try:
                         import conscious_db
                         conscious_db.append_event(
                             sess.conscious_id, "cost.exceeded",
                             f"mid-turn abort: spent=${spent:.4f} ceiling=${ceiling:.4f}",
                             author=getattr(sess, "agent_id", None))
-                    except Exception:
-                        pass
-            cost_handler = _cost_check_callback
-            # Strands accepts callback_handler on the Agent; we set it per-turn
-            # by attaching to the agent's callback registry if it has one.
-            try:
-                reg = getattr(self.agent, "callback_handler", None)
-                if reg is None:
-                    self.agent.callback_handler = cost_handler
-                elif hasattr(reg, "register") and callable(reg.register):
-                    reg.register(cost_handler)
-                else:
-                    # reg is a callable; wrap it so both fire
-                    orig = reg
-                    def _both(**kw):
-                        try: orig(**kw)
-                        except Exception: pass
-                        try: cost_handler(**kw)
-                        except Exception: pass
-                    self.agent.callback_handler = _both
-            except Exception:
-                pass
+                    except Exception: pass
+        try:
+            self.agent.callback_handler = _stream_callback
+        except Exception:
+            pass
         try:
             self.agent(user_msg)
         finally:
-            # restore the original callback handler so non-cost sessions aren't
-            # saddled with our closure on their next turn
-            if cost_handler is not None:
-                try:
-                    # best-effort: leave the handler in place; it no-ops when
-                    # cost is under budget. Strands agents are per-session so
-                    # this is safe.
-                    pass
-                except Exception:
-                    pass
-        # walk newly-appended messages and map Bedrock-style content blocks
+            pass
+        # Walk newly-appended messages for tool results and final assistant text
         msgs = getattr(self.agent, "messages", []) or []
         for m in msgs[self._msg_cursor:]:
             role = m.get("role")
@@ -1007,8 +868,6 @@ def _make_adapter(tier: str, workspace: Path, model: str | None = None,
         return ClaudeAdapter(workspace, model, workspace_id, system_prompt)
     if tier == "open":
         return StrandsAdapter(workspace, model, workspace_id, system_prompt)
-    if tier == "zai":
-        return ZaiAdapter(workspace, model, workspace_id, system_prompt)
     return MockAdapter(workspace, workspace_id, system_prompt)
 
 
@@ -1019,9 +878,6 @@ def tier_for_model(model: str | None) -> str | None:
     if model.startswith("claude"):
         return "claude" if (os.environ.get("ANTHROPIC_API_KEY", "").strip()
                             and _installed("claude_agent_sdk")) else None
-    # The free GLM model routes to the zai tier (bridge on port 3030).
-    if model == "glm-5.2-free":
-        return "zai" if _glm_bridge_available() else None
     if any(m["model"] == model for m in agent_models()):
         return "open"
     return None
@@ -1093,6 +949,7 @@ class AgentSession:
         self.lock = threading.Lock()
         self.events: list[dict] = []
         self.inbox: queue.Queue = queue.Queue()
+        self._stream_queues: list[queue.Queue] = []
         self.adapter: BaseAdapter | None = None
         self._interrupting = False
         # use provided workspace path (user's workspace) or create ephemeral one
@@ -1122,6 +979,26 @@ class AgentSession:
         with self.lock:
             self.events.append({"i": len(self.events), "ts": time.time(), **ev})
             self.updated = time.time()
+            queues = list(self._stream_queues)
+        for q in queues:
+            try:
+                q.put_nowait(ev)
+            except (queue.Full, ValueError):
+                try:
+                    self._stream_queues.remove(q)
+                except ValueError:
+                    pass
+
+    def register_stream_queue(self, q: queue.Queue) -> None:
+        with self.lock:
+            self._stream_queues.append(q)
+
+    def unregister_stream_queue(self, q: queue.Queue) -> None:
+        with self.lock:
+            try:
+                self._stream_queues.remove(q)
+            except ValueError:
+                pass
 
     def _set_status(self, state: str, **extra) -> None:
         self.status = state

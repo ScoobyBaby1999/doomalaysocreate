@@ -244,11 +244,6 @@ def _run_sub_agent(cid: str, to_agent_id: str, task: str,
     # try the real path
     try:
         import agent_sessions
-        # Phase 6: if the agent's tier is "zai", use the FREE GLM bridge
-        # (a Node.js mini-service that wraps z-ai-web-dev-sdk). This avoids
-        # the paid LiteLLM path entirely — GLM 5.2 is free + rate-limited.
-        if sub.get("tier") == "zai":
-            return _run_glm_bridge(sub, task, inputs, cid)
         tier = agent_sessions.tier_for_model(sub["model"])
         if tier is not None:
             from pathlib import Path

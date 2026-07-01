@@ -225,13 +225,11 @@ def _create_conscious(body: dict, user_id: str | None) -> tuple[int, dict]:
                 models = agent_sessions.agent_models()
                 orch_model = models[0]["model"] if models else "groq/llama-3.3-70b-versatile"
             else:
-                orch_model = "glm-5.2-free"  # zai tier default
+                orch_model = models[0]["model"] if models else "groq/llama-3.3-70b-versatile"
         except Exception:
-            orch_model = "glm-5.2-free"
+            orch_model = "groq/llama-3.3-70b-versatile"
     if orch_model.startswith("claude"):
         tier = "claude"
-    elif orch_model.startswith("glm"):
-        tier = "zai"
     else:
         tier = "open"
     agent = conscious_db.spawn_agent(
