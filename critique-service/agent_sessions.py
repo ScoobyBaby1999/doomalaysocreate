@@ -71,7 +71,7 @@ AGENT_SYSTEM_PROMPT = (
 )
 
 #   open-tier model routing: dynamically built from providers_catalog.json +
-#   a small static fallback for providers that are not in the catalog.
+#   synced models from each provider's /v1/models endpoint.
 #   Each entry is (env key, provider label, litellm model string, base_url or None).
 #   Order = priority for auto-pick (first present env var wins). The model
 #   picker surfaces EVERY entry whose key is set, not just the first.
@@ -87,18 +87,6 @@ _PROVIDER_AGENT_MAP: dict[str, tuple[str, str]] = {
     "github-models": ("GITHUB_TOKEN", "https://models.github.ai/inference"),
 }
 
-# Static fallback for providers not in the catalog.
-_OPEN_LLMS_STATIC: list[tuple[str, str, str, str | None]] = [
-    ("MOONSHOT_API_KEY",   "Kimi (Moonshot)",   "moonshot/kimi-k2-0905-preview", None),
-    ("GROQ_API_KEY",       "Groq Llama 3.3",    "groq/llama-3.3-70b-versatile",  None),
-    ("OPENROUTER_API_KEY", "OpenRouter Qwen3",  "openrouter/qwen/qwen3-coder",   None),
-    ("CEREBRAS_API_KEY",   "Cerebras Qwen3",    "cerebras/qwen-3-coder-480b",    None),
-    ("ZAI_API_KEY",        "GLM 5.2 (Z.ai)",     "openai/glm-5.2",
-     "https://api.z.ai/api/paas/v4"),
-    ("GEMINI_API_KEY",     "Gemini 2.5 Flash",  "gemini/gemini-2.5-flash",       None),
-    ("GOOGLE_API_KEY",     "Gemini 2.5 Flash",  "gemini/gemini-2.5-flash",       None),
-]
-
 _open_models_cache: list[tuple[str, str, str, str | None]] | None = None
 
 
@@ -113,7 +101,7 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
     if _open_models_cache is not None:
         return _open_models_cache
 
-    entries = list(_OPEN_LLMS_STATIC)
+    entries: list[tuple[str, str, str, str | None]] = []
     catalog_path = HERE / "providers_catalog.json"
     try:
         with open(catalog_path, encoding="utf-8") as f:
@@ -233,10 +221,6 @@ _CLAUDE_MODELS = [
 def agent_models() -> list[dict]:
     """Every model the agent can actually run right now, for the picker UI.
     Only lists a model when BOTH its key and its tier's SDK are present.
-
-    The free GLM 5.2 (zai tier) is ALWAYS listed when the bridge is reachable
-    — no API key required. It's the default when nothing else is configured so
-    the agent panel never silently falls back to the MockAdapter echo.
     """
     out: list[dict] = []
     default_model = os.environ.get("AGENT_MODEL", "")
@@ -728,7 +712,9 @@ class StrandsAdapter(BaseAdapter):
         client_args: dict = {"api_key": _os.environ[key_env]}
         if base_url:
             client_args["api_base"] = base_url
-        llm = LiteLLMModel(client_args=client_args, model_id=model)
+        max_tokens = int(_os.environ.get("AGENT_MAX_TOKENS", "4096"))
+        llm = LiteLLMModel(client_args=client_args, model_id=model,
+                           params={"max_tokens": max_tokens})
 
 
         # the agent works in its session workspace; tools are imported defensively
