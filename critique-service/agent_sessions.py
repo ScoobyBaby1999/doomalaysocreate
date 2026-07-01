@@ -961,7 +961,12 @@ class AgentSession:
     # -- transcript ---------------------------------------------------------
     def emit(self, ev: dict) -> None:
         with self.lock:
-            self.events.append({"i": len(self.events), "ts": time.time(), **ev})
+            if (ev.get("type") == "thinking"
+                    and self.events and self.events[-1].get("type") == "thinking"):
+                self.events[-1]["text"] = ev["text"]
+                self.events[-1]["ts"] = time.time()
+            else:
+                self.events.append({"i": len(self.events), "ts": time.time(), **ev})
             self.updated = time.time()
             queues = list(self._stream_queues)
         for q in queues:
