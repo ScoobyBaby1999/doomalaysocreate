@@ -712,9 +712,7 @@ class StrandsAdapter(BaseAdapter):
         client_args: dict = {"api_key": _os.environ[key_env]}
         if base_url:
             client_args["api_base"] = base_url
-        max_tokens = int(_os.environ.get("AGENT_MAX_TOKENS", "4096"))
-        llm = LiteLLMModel(client_args=client_args, model_id=model,
-                           params={"max_tokens": max_tokens})
+        llm = LiteLLMModel(client_args=client_args, model_id=model)
 
 
         # the agent works in its session workspace; tools are imported defensively

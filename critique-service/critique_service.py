@@ -1602,6 +1602,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": f"model not available: {model}"})
                 return
             model = resolved
+        if not model:
+            log_event("agent_no_model",
+                      payload_keys=list(payload.keys()),
+                      message_preview=message[:100])
         workspace_id = payload.get("workspace_id")
         workspace_id = workspace_id.strip() if isinstance(workspace_id, str) and workspace_id.strip() else None
         if workspace_id:
