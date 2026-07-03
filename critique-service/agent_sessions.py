@@ -852,10 +852,37 @@ class StrandsAdapter(BaseAdapter):
             except Exception:
                 pass
 
+        # Phase 4 — session persistence.
+        # FileSessionManager in dev; RedisSessionManager in prod (REDIS_URL set).
+        session_manager = None
+        sess_ref = self._session_ref()
+        session_id = getattr(sess_ref, "id", None)
+        if session_id:
+            redis_url = _os.environ.get("REDIS_URL", "").strip()
+            if redis_url:
+                try:
+                    from redis_session_manager import RedisSessionManager
+                    session_manager = RedisSessionManager(
+                        session_id=session_id,
+                        redis_url=redis_url,
+                    )
+                except Exception:
+                    pass
+            if session_manager is None:
+                try:
+                    from strands.session.file_session_manager import FileSessionManager
+                    session_manager = FileSessionManager(
+                        session_id=session_id,
+                        storage_dir=str(AGENT_ROOT / "sessions"),
+                    )
+                except Exception:
+                    pass
+
         self.agent = Agent(model=llm, tools=tools, system_prompt=self.system_prompt,
                            plugins=plugins or None,
                            context_manager="auto",
-                           callback_handler=None)
+                           callback_handler=None,
+                           session_manager=session_manager)
         self._msg_cursor = 0
 
         # Phase 3 — hook registration (runs once, not per-turn).

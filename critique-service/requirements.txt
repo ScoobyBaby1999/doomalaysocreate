@@ -19,3 +19,8 @@ claude-agent-sdk>=0.2
 # and needs 3.12. The [litellm] extra provides the provider-agnostic model.
 strands-agents[litellm]>=1.43
 strands-agents-tools>=0.8
+
+# --- session persistence ---
+# FileSessionManager is built into strands-agents (no extra dep).
+# RedisSessionManager: uncomment for production Redis-backed session storage.
+# redis>=5.0
