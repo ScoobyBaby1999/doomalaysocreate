@@ -170,8 +170,16 @@ def _conscious_invoke(agent_session: Any, args: dict) -> dict:
     conscious_db.create_drawer_entry(
         conscious_id=cid, invoke_id=invoke_id, from_agent_id=aid,
         to_agent_id=to_agent_id, kind="invoke", task=task, inputs=inputs)
-    # Phase 2: run the sub-agent against its worktree.
-    result, files, status, error = _run_sub_agent(cid, to_agent_id, task, inputs, timeout_s)
+    # Phase 5: run the sub-agent via Strands Graph (falls back to ad-hoc path).
+    try:
+        from multi_agent import run_invoke_graph
+        result_data = run_invoke_graph(cid, aid, to_agent_id, task, inputs, timeout_s)
+        result = result_data.get("result", "")
+        files = result_data.get("files", [])
+        status = result_data.get("status", "failed")
+        error = result_data.get("error")
+    except Exception:
+        result, files, status, error = _run_sub_agent(cid, to_agent_id, task, inputs, timeout_s)
     completed = conscious_db.complete_drawer_entry(
         invoke_id, result=result, status=status, error=error)
     _bump_cost(cid, _STUB_INVOKE_COST_USD)
@@ -202,15 +210,21 @@ def _conscious_delegate(agent_session: Any, args: dict) -> dict:
 
     def _finish() -> None:
         try:
-            result, files, status, error = _run_sub_agent(
-                cid, to_agent_id, task, inputs, 600)
+            from multi_agent import run_invoke_graph
+            result_data = run_invoke_graph(cid, aid, to_agent_id, task, inputs, 600)
+            result = result_data.get("result", "")
+            status = result_data.get("status", "failed")
+            error = result_data.get("error")
             conscious_db.complete_drawer_entry(
                 invoke_id, result=result, status=status, error=error)
             _bump_cost(cid, _STUB_INVOKE_COST_USD)
-        except Exception as exc:
+        except Exception:
             try:
+                result, files, status, error = _run_sub_agent(
+                    cid, to_agent_id, task, inputs, 600)
                 conscious_db.complete_drawer_entry(
-                    invoke_id, result="", status="failed", error=str(exc))
+                    invoke_id, result=result, status=status, error=error)
+                _bump_cost(cid, _STUB_INVOKE_COST_USD)
             except Exception:
                 pass
 
@@ -594,6 +608,81 @@ def _conscious_panel(agent_session: Any, args: dict) -> dict:
         "inputs": inputs,
         "timeout_s": int(args.get("timeout_s", 600) or 600),
     })
+
+
+# ---------------------------------------------------------------------------
+# 10.15 conscious_swarm  — Phase 5: free-form multi-agent collaboration
+# ---------------------------------------------------------------------------
+
+def _conscious_swarm(agent_session: Any, args: dict) -> dict:
+    """Run a Strands Swarm of sub-agents for free-form collaboration.
+
+    Agents autonomously hand off to each other via the auto-injected
+    ``handoff_to_agent`` tool. The orchestrator receives the combined
+    results from all agents that participated.
+
+    Args:
+        task: The task/query for the swarm (required).
+        agent_ids: Optional list of agent IDs to include (default: all).
+        entry_point_id: Which agent starts (default: first).
+        timeout_s: Max total execution time (default 900).
+        max_handoffs: Max handoffs (default 20).
+
+    Returns:
+        {status, results, node_history, execution_count, execution_time_ms}
+    """
+    cid, aid = _ctx(agent_session)
+    if not cid or not aid:
+        return _not_in_conscious()
+
+    task = str(args.get("task", "")).strip()
+    if not task:
+        return {"error": "task is required"}
+
+    agent_ids = args.get("agent_ids") or []
+    entry_point_id = args.get("entry_point_id")
+    timeout_s = int(args.get("timeout_s", 900) or 900)
+    max_handoffs = int(args.get("max_handoffs", 20) or 20)
+
+    agents = conscious_db.list_agents(cid)
+    if agent_ids:
+        agents = [a for a in agents if a["id"] in agent_ids]
+    else:
+        agents = [a for a in agents if not a.get("is_orchestrator")]
+
+    if not agents:
+        return {"error": "no agents available for swarm"}
+
+    # Build system prompts
+    try:
+        conscious_rec = conscious_db.get_conscious(cid) or {}
+        goal = conscious_rec.get("goal", "")
+    except Exception:
+        goal = ""
+
+    configs = []
+    for ag in agents:
+        role = ag.get("role", "assistant")
+        model = ag.get("model")
+        prompt_parts = [
+            f"You are agent {ag['id']}, role: {role}.",
+            f"Conscious goal: {goal[:200]}",
+            "",
+            "Collaborate with other agents via the handoff_to_agent tool.",
+            "Use conscious_context to read the blackboard and conscious_propose",
+            "for brain mutations. Report your findings clearly.",
+        ]
+        configs.append({
+            "agent_id": ag["id"],
+            "system_prompt": "\n".join(prompt_parts),
+            "model": model,
+        })
+
+    from multi_agent import run_swarm
+    return run_swarm(
+        configs, task, entry_point_id,
+        timeout_s, max_handoffs, conscious_id=cid,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1153,6 +1242,31 @@ CONSCIOUS_TOOLS: list[dict] = [
             "required": ["prompt"],
         },
         "handler": _agent_panel,
+    },
+    {
+        "name": "conscious_swarm",
+        "description": (
+            "Phase 5 — Run a Swarm of sub-agents for free-form multi-agent collaboration. "
+            "Agents autonomously hand off to each other via handoff_to_agent. "
+            "Returns combined results from all agents that participated. "
+            "Use this for complex tasks that benefit from multiple perspectives."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "the task/query for the swarm (required)"},
+                "agent_ids": {"type": "array", "items": {"type": "string"},
+                              "description": "optional list of agent IDs to include; defaults to all sub-agents"},
+                "entry_point_id": {"type": "string",
+                                   "description": "which agent starts (default: first in list)"},
+                "timeout_s": {"type": "integer", "default": 900,
+                              "description": "max total execution time in seconds"},
+                "max_handoffs": {"type": "integer", "default": 20,
+                                 "description": "max handoffs before forced termination"},
+            },
+            "required": ["task"],
+        },
+        "handler": _conscious_swarm,
     },
 
     # ------------------------------------------------------------------
