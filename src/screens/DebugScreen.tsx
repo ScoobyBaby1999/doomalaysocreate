@@ -4,9 +4,8 @@ import type { Settings } from "../api/panel";
 
 /** Debug log viewer — fetches /api/debug/logs and displays them.
  *  Accessible from the nav bar on Android (no terminal needed).
- *  Shows: startup env detection, GLM call traces (provider, model, latency,
- *  served_model, downgrade detection), agent events, conscious errors.
- *  Categories: startup, glm, auth, agent, conscious, errors, http.
+ *  Shows: startup env detection, agent events, conscious errors.
+ *  Categories: startup, agent, conscious, errors, http.
  *  Auto-refreshes every 5s when open. */
 
 interface LogEntry {
@@ -22,7 +21,6 @@ interface LogEntry {
 const CATEGORIES = [
   { id: "", label: "All" },
   { id: "startup", label: "Startup" },
-  { id: "glm", label: "GLM" },
   { id: "agent", label: "Agent" },
   { id: "conscious", label: "Conscious" },
   { id: "errors", label: "Errors" },

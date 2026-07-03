@@ -31,6 +31,7 @@ interface ModelSelectionState {
   activeFilters: string[];
   contextMin: number;
   hideUnavailable: boolean;
+  pricingFilter: "free" | "paid";
 
   condensedModels: CondensedModel[];
   condensedFetchedAt: number;
@@ -50,6 +51,7 @@ interface ModelSelectionState {
   setSearchQuery: (q: string) => void;
   toggleFilter: (filter: string) => void;
   setHideUnavailable: (v: boolean) => void;
+  setPricingFilter: (v: "free" | "paid") => void;
   setContextMin: (min: number) => void;
   openProvidersDialog: (providerName?: string) => void;
   closeProvidersDialog: () => void;
@@ -109,6 +111,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   activeFilters: loadPersisted<string[]>(`${PREFIX}.activeFilters`, []),
   contextMin: loadPersisted<number>(`${PREFIX}.contextMin`, 0),
   hideUnavailable: loadPersisted<boolean>(`${PREFIX}.hideUnavailable`, true),
+  pricingFilter: loadPersisted<"free" | "paid">(`${PREFIX}.pricingFilter`, "free"),
 
   condensedModels: [],
   condensedFetchedAt: 0,
@@ -207,6 +210,11 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   setHideUnavailable: (v: boolean) => {
     set({ hideUnavailable: v });
     persist(`${PREFIX}.hideUnavailable`, v);
+  },
+
+  setPricingFilter: (v: "free" | "paid") => {
+    set({ pricingFilter: v });
+    persist(`${PREFIX}.pricingFilter`, v);
   },
 
   toggleOverlay: () => {

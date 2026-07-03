@@ -776,6 +776,7 @@ export function ModelSelectOverlay() {
     activeFilters,
     contextMin,
     hideUnavailable,
+    pricingFilter,
     condensedModels,
     condensedView,
     fetchProviders,
@@ -787,6 +788,7 @@ export function ModelSelectOverlay() {
     setSearchQuery,
     toggleFilter,
     setHideUnavailable,
+    setPricingFilter,
     setContextMin,
     openProvidersDialog,
     setCondensedView,
@@ -834,10 +836,12 @@ export function ModelSelectOverlay() {
   );
 
   const filteredCount = useMemo(() => {
-    if (!searchQuery.trim() && activeFilters.length === 0 && contextMin === 0) return totalModels;
+    const target = pricingFilter === "free" ? visibleProviders : providers;
+    if (!searchQuery.trim() && activeFilters.length === 0 && contextMin === 0)
+      return target.reduce((s, p) => s + p.models.length, 0);
     let count = 0;
     const q = searchQuery.toLowerCase().trim();
-    for (const p of providers) {
+    for (const p of target) {
       for (const m of p.models) {
         const matchesSearch =
           !q ||
@@ -849,7 +853,7 @@ export function ModelSelectOverlay() {
       }
     }
     return count;
-  }, [providers, searchQuery, totalModels, activeFilters, contextMin]);
+  }, [providers, visibleProviders, searchQuery, totalModels, activeFilters, contextMin, pricingFilter]);
 
   const selectedDisplayName = useMemo(() => {
     if (!selectedModelId) return null;
@@ -863,6 +867,12 @@ export function ModelSelectOverlay() {
     }
     return null;
   }, [selectedModelId, providers, condensedModels]);
+
+  const visibleProviders = useMemo(() => {
+    if (pricingFilter === "free")
+      return providers.filter((p) => p.name !== "opencode-go");
+    return providers;
+  }, [providers, pricingFilter]);
 
   const anyFilterActive = activeFilters.length > 0 || contextMin > 0;
 
@@ -948,6 +958,35 @@ export function ModelSelectOverlay() {
                       >
                         <IcoRefresh />
                         <span className="hidden md:inline">refresh</span>
+                      </button>
+                    </>
+                  )}
+                  {!loading && providers.length > 0 && (
+                    <>
+                      <span className="w-px h-3 bg-border/40 mx-0.5 shrink-0" />
+                      <button
+                        onClick={() => setPricingFilter("free")}
+                        className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+                        style={{
+                          borderColor: pricingFilter === "free" ? "#22c55e50" : "var(--border)",
+                          backgroundColor: pricingFilter === "free" ? "#22c55e15" : "transparent",
+                          color: pricingFilter === "free" ? "#22c55e" : "var(--muted-foreground)",
+                        }}
+                        aria-pressed={pricingFilter === "free"}
+                      >
+                        Free
+                      </button>
+                      <button
+                        onClick={() => setPricingFilter("paid")}
+                        className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+                        style={{
+                          borderColor: pricingFilter === "paid" ? "#f59e0b50" : "var(--border)",
+                          backgroundColor: pricingFilter === "paid" ? "#f59e0b15" : "transparent",
+                          color: pricingFilter === "paid" ? "#f59e0b" : "var(--muted-foreground)",
+                        }}
+                        aria-pressed={pricingFilter === "paid"}
+                      >
+                        Paid
                       </button>
                     </>
                   )}
@@ -1075,7 +1114,7 @@ export function ModelSelectOverlay() {
                 {!condensedView && !loading && !error && (
                   <div className="p-3 overflow-y-auto max-h-full">
                     <div className="sm:columns-2 columns-1" style={{ columnGap: '0.75rem' }}>
-                      {providers.map((p) => (
+                      {visibleProviders.map((p) => (
                         <div key={p.name} className="break-inside-avoid mb-3 min-w-0">
                           <ProviderBox
                             provider={p}

@@ -5,7 +5,7 @@
  * center-top; sub-agents radiate below. Lines connect each agent to the
  * orchestrator and pulse when agents communicate. Tapping a circle opens a
  * bottom sheet with the agent's chat / invoke interface. A floating "+" adds
- * a GLM 5.2 agent. A drawer icon opens the output list.
+ * an agent. A drawer icon opens the output list.
  *
  * Design goals:
  * - Mobile-first: touch targets ≥56px, bottom sheet (native pattern), no drag
@@ -195,7 +195,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
     try {
       const r = await client.createConscious({
         workspace_id: wsId, title: "Conscious Workspace",
-        goal: "Multi-agent collaboration with GLM 5.2",
+        goal: "Multi-agent collaboration",
       });
       setConscious(r.conscious); setAgents(r.agents);
     } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
@@ -215,8 +215,8 @@ export function ConsciousScreen({ settings, workspaceId }: {
   const addAgent = async () => {
     if (!conscious) return;
     try {
-      const model = selectedModelId || "glm-5.2 (free)";
-      const tier = selectedModelId?.toLowerCase().includes("claude") ? "claude" : "zai";
+      const model = selectedModelId || "open";
+      const tier: "claude" | "open" = selectedModelId?.toLowerCase().includes("claude") ? "claude" : "open";
       const r = await client.spawnAgent(conscious.id, {
         role: "ai-engineer", model, tier,
       });
@@ -273,7 +273,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
                 </svg>
               </button>
             </div>
-            <div className="text-[10px] text-muted truncate">{agents.length} agent{agents.length !== 1 ? "s" : ""} · {selectedModelId || "GLM 5.2"}</div>
+            <div className="text-[10px] text-muted truncate">{agents.length} agent{agents.length !== 1 ? "s" : ""}</div>
             {workspaceOpen && (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setWorkspaceOpen(false)} />
@@ -356,7 +356,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
 
             {agents.length <= 1 && (
               <div className="absolute bottom-24 left-1/2 -translate-x-1/2 text-center text-muted text-xs px-8">
-                Tap <span className="text-accent font-medium">+</span> to add a {selectedModelId || "GLM 5.2"} agent.
+                Tap <span className="text-accent font-medium">+</span> to add an agent.
                 Each agent works in its own git worktree.
               </div>
             )}
@@ -365,7 +365,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
 
         <button onClick={addAgent} disabled={!conscious || loading}
           className="absolute bottom-6 right-6 w-14 h-14 rounded-full bg-accent text-white flex items-center justify-center shadow-lg shadow-accent/30 hover:scale-105 active:scale-95 transition-transform disabled:opacity-50"
-          style={{ zIndex: 10 }} title={`Add ${selectedModelId || "GLM 5.2"} agent`}>
+          style={{ zIndex: 10 }} title="Add agent">
           <Icon.Plus size={24} color="white" />
         </button>
       </div>

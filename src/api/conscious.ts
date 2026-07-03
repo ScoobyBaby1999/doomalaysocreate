@@ -5,9 +5,6 @@
  *
  * Auth: windowed bearer from rotationSecret via deriveToken(), one 401 retry.
  * Base URL: settings.baseUrl (dev → "/backend", prod → "").
- *
- * GLM model: GLM 5.2 (free, rate-limited via z-ai-web-dev-sdk on the backend).
- * The user explicitly requires 5.2 or 5.1 — NOT 4.6 or below.
  */
 import { deriveToken } from "./token";
 import type { Settings } from "./panel";
@@ -45,7 +42,7 @@ export interface Agent {
   consciousId: string;
   role: string;
   model: string;
-  tier: string; // "claude" | "open" | "zai"
+  tier: string; // "claude" | "open"
   status: string; // "idle" | "running" | "waiting" | "done" | "failed"
   worktreePath: string | null;
   branch: string | null;
@@ -180,7 +177,7 @@ export class ConsciousClient {
   // --- agents ---
 
   spawnAgent(cid: string, body: {
-    role: string; model: string; tier: "claude" | "open" | "zai"; parent_agent_id?: string;
+    role: string; model: string; tier: "claude" | "open"; parent_agent_id?: string;
   }): Promise<{ agent: Agent }> {
     return this.req(`/api/conscious/${cid}/agents`, { method: "POST", body: JSON.stringify(body) });
   }

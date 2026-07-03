@@ -9,6 +9,7 @@ import {
   type AgentStatus,
   type ChatSession,
 } from "../api/agent";
+import { Markdown } from "../components/Markdown";
 import { JudgeCard } from "../components/JudgeCard";
 import { useModelStore } from "../lib/model-store";
 import { PanelDrawer, type PanelInvocation } from "../components/PanelDrawer";
@@ -200,7 +201,7 @@ export function AgentChat({
         }
         return cursor;
       }
-      await new Promise((res) => setTimeout(res, 1500));
+      await new Promise((res) => setTimeout(res, 200));
     }
   }
 
@@ -398,15 +399,31 @@ export function AgentChat({
           followOutput="smooth"
           itemContent={(_, ev) => <EventRow ev={ev} />}
           components={{
-            Footer: () =>
-              events.length === 0 ? (
-                <div className="text-center text-muted text-sm mt-20 px-6">
-                  Ask the agent to build, edit, run, or pack something. It works in a
-                  private workspace — files appear in the 📎 drawer.
-                </div>
-              ) : (
-                <div className="h-2" />
-              ),
+            Footer: () => (
+              <>
+{running && events.some((e) => e.type === "user") &&
+  !events.some((e) => e.type === "assistant" || e.type === "thinking" || e.type === "tool_use") && (
+                  <div className="px-3 py-3 max-w-2xl mx-auto">
+                    <div className="flex items-center gap-2 text-muted">
+                      <span className="flex gap-0.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "0ms" }} />
+                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "150ms" }} />
+                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "300ms" }} />
+                      </span>
+                      <span className="text-[12px]">thinking</span>
+                    </div>
+                  </div>
+                )}
+                {events.length === 0 ? (
+                  <div className="text-center text-muted text-sm mt-20 px-6">
+                    Ask the agent to build, edit, run, or pack something. It works in a
+                    private workspace — files appear in the 📎 drawer.
+                  </div>
+                ) : (
+                  <div className="h-2" />
+                )}
+              </>
+            ),
           }}
         />
       </div>
@@ -555,14 +572,14 @@ function EventRow({ ev }: { ev: AgentEvent }) {
   if (ev.type === "assistant") {
     return (
       <div className="px-3 py-1.5 max-w-2xl mx-auto">
-        <div className="text-[15px] whitespace-pre-wrap">{ev.text}</div>
+        <Markdown text={ev.text} />
       </div>
     );
   }
   if (ev.type === "thinking") {
     return (
       <div className="px-3 py-1 max-w-2xl mx-auto">
-        <Collapsible label="thinking">{ev.text}</Collapsible>
+        <Collapsible label="thinking"><Markdown text={ev.text} /></Collapsible>
       </div>
     );
   }
@@ -595,7 +612,7 @@ function EventRow({ ev }: { ev: AgentEvent }) {
     return (
       <div className="px-3 py-1 max-w-2xl mx-auto">
         <Collapsible label={ev.is_error ? "result (error)" : "result"} error={ev.is_error}>
-          {ev.text}
+          <Markdown text={ev.text} />
         </Collapsible>
       </div>
     );
@@ -665,9 +682,9 @@ function Collapsible({
         {open ? "▾" : "▸"} {label}
       </button>
       {open && (
-        <pre className="px-2 pb-2 text-[11px] font-mono whitespace-pre-wrap break-words overflow-x-auto">
+        <div className="px-2 pb-2 text-[13px] overflow-x-auto">
           {children}
-        </pre>
+        </div>
       )}
     </div>
   );

@@ -162,6 +162,30 @@ export class AgentClient {
     return this.req<AgentSnapshot>(`/api/agent/${sessionId}?since=${since}`);
   }
 
+  /**
+   * SSE stream for live agent events. Returns an EventSource that emits
+   * message events containing JSON-encoded AgentEvent payloads, plus a
+   * final "done" event with `{type:"done",status:<final>}`.
+   *
+   * Usage:
+   *   const es = client.stream(sid);
+   *   es.onmessage = (msg) => { const ev = JSON.parse(msg.data); … };
+   *   es.addEventListener("done", (msg) => { const {status} = JSON.parse(msg.data); … });
+   *
+   * NOTE: EventSource does not support custom headers (e.g. Authorization),
+   * so this method appends the bearer token as a query parameter. The
+   * backend MUST validate and strip it before forwarding.  At rest the
+   * URL (and token) are visible in server access logs — acceptable for a
+   * dev-oriented prototype; a production version should route through
+   * the service worker or use fetch + ReadableStream.
+   */
+  stream(sessionId: string): Promise<EventSource> {
+    return this.bearer().then((token) => {
+      const url = `${this.settings.baseUrl}/api/agent/${sessionId}/stream?bearer=${encodeURIComponent(token)}`;
+      return new EventSource(url);
+    });
+  }
+
   files(sessionId: string) {
     return this.req<{ session_id: string; files: AgentFile[] }>(`/api/agent/${sessionId}/files`);
   }
