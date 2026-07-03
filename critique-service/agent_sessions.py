@@ -777,7 +777,7 @@ class StrandsAdapter(BaseAdapter):
 
     def open(self) -> None:
         import os as _os
-        from strands import Agent
+        from strands import Agent, AgentSkills
         from strands.models.litellm import LiteLLMModel
 
         # headless: skip interactive consent prompts (no TTY in the Space container).
@@ -839,17 +839,28 @@ class StrandsAdapter(BaseAdapter):
         shell_mod.tool = _guarded_shell
         tools.append(shell_mod)
 
+        # Phase 2 — conscious tools as Strands @tool functions.
+        # Each tool receives agent_session via invocation_state per-turn.
+        try:
+            import conscious_stubs
+            tools += list(conscious_stubs.get_conscious_tools())
+        except Exception:
+            pass
+
+        # Phase 2 — skills plugin (loads .claude/skills/ as Strands skills).
+        plugins = []
+        skills_dir = self.workspace / ".claude" / "skills"
+        if skills_dir.is_dir():
+            try:
+                plugins.append(AgentSkills(skills=str(skills_dir)))
+            except Exception:
+                pass
+
         self.agent = Agent(model=llm, tools=tools, system_prompt=self.system_prompt,
+                           plugins=plugins or None,
                            context_manager="auto",
                            callback_handler=None)
         self._msg_cursor = 0
-        # Tier 3 — register conscious tools on the owning session (Phase 1:
-        # stored for inspection; Phase 2 wraps them as strands_tools modules).
-        try:
-            import conscious_stubs
-            conscious_stubs.register_conscious_tools(self._session_ref(), self)
-        except Exception:
-            pass
 
     def _session_ref(self):
         """Back-reference to the owning AgentSession (set by AgentSession._run)."""
@@ -859,6 +870,9 @@ class StrandsAdapter(BaseAdapter):
         # set per-thread workspace so _guarded_shell knows where to run commands.
         _thread_local.workspace = self.workspace
         _thread_local.workspace_id = self.workspace_id
+        # set per-thread agent_session so conscious_stubs._get_session() works
+        import conscious_stubs as _cs
+        _cs._SELF.agent_session = getattr(self, "_session", None)
         # Phase 2 (completed in this pass) — mid-turn cost abort.
         # Install a callback handler that checks the conscious cost ceiling
         # after each tool result. If over, calls agent.cancel() to abort the
@@ -910,7 +924,10 @@ class StrandsAdapter(BaseAdapter):
             except Exception:
                 pass
         try:
-            self.agent(user_msg)
+            # Phase 2 — pass agent_session via invocation_state so conscious
+            # tools can resolve the session context from @tool wrappers.
+            session_ref = self._session_ref()
+            self.agent(user_msg, agent_session=session_ref)
         finally:
             # restore the original callback handler so non-cost sessions aren't
             # saddled with our closure on their next turn
