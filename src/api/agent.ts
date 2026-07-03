@@ -163,27 +163,70 @@ export class AgentClient {
   }
 
   /**
-   * SSE stream for live agent events. Returns an EventSource that emits
-   * message events containing JSON-encoded AgentEvent payloads, plus a
-   * final "done" event with `{type:"done",status:<final>}`.
+   * SSE stream for live agent events. Returns an AbortController that the
+   * caller can use to disconnect.  onEvent is called for each SSE data frame
+   * parsed as AgentEvent.
    *
-   * Usage:
-   *   const es = client.stream(sid);
-   *   es.onmessage = (msg) => { const ev = JSON.parse(msg.data); … };
-   *   es.addEventListener("done", (msg) => { const {status} = JSON.parse(msg.data); … });
+   * Uses fetch() + ReadableStream so the Authorization header is set normally
+   * (no token leakage into URL query params or server access logs).
    *
-   * NOTE: EventSource does not support custom headers (e.g. Authorization),
-   * so this method appends the bearer token as a query parameter. The
-   * backend MUST validate and strip it before forwarding.  At rest the
-   * URL (and token) are visible in server access logs — acceptable for a
-   * dev-oriented prototype; a production version should route through
-   * the service worker or use fetch + ReadableStream.
+   * NOTE: The older EventSource-based overload (no args) is NOT compatible.
+   * Callers MUST migrate to the new signature:
+   *   const ac = client.stream(sid, since, onEvent, onError?);
+   *   // later: ac.abort();
    */
-  stream(sessionId: string): Promise<EventSource> {
-    return this.bearer().then((token) => {
-      const url = `${this.settings.baseUrl}/api/agent/${sessionId}/stream?bearer=${encodeURIComponent(token)}`;
-      return new EventSource(url);
+  stream(
+    sessionId: string,
+    since: number,
+    onEvent: (ev: AgentEvent) => void,
+    onError?: (err: Error) => void,
+  ): AbortController {
+    const ac = new AbortController();
+    const baseUrl = this.settings.baseUrl;
+    this.bearer(0).then((token) => {
+      const url = `${baseUrl}/api/agent/${sessionId}/stream?since=${since}`;
+      fetch(url, {
+        signal: ac.signal,
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then(async (r) => {
+          if (!r.ok) {
+            onError?.(new Error(`SSE stream returned HTTP ${r.status}`));
+            return;
+          }
+          const reader = r.body?.getReader();
+          if (!reader) { onError?.(new Error("SSE: no response body")); return; }
+          const decoder = new TextDecoder();
+          let buf = "";
+          try {
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+              const lines = buf.split("\n");
+              buf = lines.pop() || "";
+              for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                  try {
+                    const ev = JSON.parse(line.slice(6)) as AgentEvent;
+                    onEvent(ev);
+                  } catch { /* skip malformed JSON */ }
+                }
+              }
+            }
+          } catch (e) {
+            if ((e as Error)?.name !== "AbortError") {
+              onError?.(e instanceof Error ? e : new Error(String(e)));
+            }
+          }
+        })
+        .catch((e) => {
+          if ((e as Error)?.name !== "AbortError") {
+            onError?.(e instanceof Error ? e : new Error(String(e)));
+          }
+        });
     });
+    return ac;
   }
 
   files(sessionId: string) {

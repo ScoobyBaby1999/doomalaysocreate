@@ -161,6 +161,53 @@ export function AgentChat({
     }
   }
 
+  function handleSSEEvent(ev: AgentEvent) {
+    setEvents((prev) => {
+      if (ev.type === "assistant_delta" || ev.type === "thinking_delta") {
+        const idx = prev.length - 1;
+        if (idx >= 0 && prev[idx].type === ev.type) {
+          const updated = [...prev];
+          updated[idx] = { ...updated[idx], text: updated[idx].text + ev.text };
+          return updated;
+        }
+        return [...prev, ev];
+      }
+      const last = prev[prev.length - 1];
+      if (last?.type === "assistant_delta" || last?.type === "thinking_delta") {
+        return [...prev.slice(0, -1), ev];
+      }
+      return [...prev, ev];
+    });
+    if (ev.type === "status") {
+      const s = ev as any;
+      if (typeof s.cost_usd === "number") setCost(s.cost_usd);
+      if (s.state === "panel") {
+        setPanelInvocations((prev) => {
+          const inv = s.invoke_id;
+          const existing = prev.findIndex((p) => p.invoke_id === inv);
+          const entry: PanelInvocation = {
+            invoke_id: inv,
+            task_name: s.task_name,
+            prompt: s.prompt,
+            panel: s.panel,
+            status: s.status || "starting",
+            snapshot: s.snapshot,
+            error: s.error,
+          };
+          if (existing >= 0) {
+            const upd = [...prev];
+            upd[existing] = entry;
+            return upd;
+          }
+          return [...prev, entry];
+        });
+        if (s.status === "done" && chatSessionIdRef.current) {
+          refreshFiles(sessionRef.current);
+        }
+      }
+    }
+  }
+
   async function pollUntilSettled(sessionId: string, since: number) {
     let cursor = since;
     const ac = abortRef.current;
@@ -259,10 +306,56 @@ export function AgentChat({
           return [{ id: start.chat_session_id, title: "New Chat", model: start.model, workspace_id: null, created_at: "", updated_at: "" }, ...prev];
         });
       }
-      const fresh = await client.current.poll(start.session_id, 0);
-      setEvents((prev) => [...prev.slice(0, -1), ...fresh.events]);
+      // Try SSE streaming first; fall back to polling
+      let streamSince = 0;
+      let sseSucceeded = false;
       if (!ac.signal.aborted) {
-        await pollUntilSettled(start.session_id, fresh.next);
+        const sseAc = client.current.stream(
+          start.session_id,
+          0,
+          (ev) => handleSSEEvent(ev),
+          () => {},
+        );
+        await new Promise<void>((resolve) => {
+          const timeout = setTimeout(() => resolve(), 800);
+          const check = setInterval(() => {
+            if (ac.signal.aborted) { clearInterval(check); clearTimeout(timeout); resolve(); return; }
+            setEvents((prev) => {
+              if (prev.some((e) => e.i >= 0 && e.type !== "assistant_delta" && e.type !== "thinking_delta")) {
+                sseSucceeded = true;
+                const last = prev[prev.length - 1];
+                streamSince = last ? last.i + 1 : prev.length;
+              }
+              return prev;
+            });
+            if (sseSucceeded) { clearInterval(check); clearTimeout(timeout); sseAc.abort(); resolve(); }
+          }, 100);
+        });
+        if (!ac.signal.aborted && !sseSucceeded) {
+          sseAc.abort();
+          const fresh = await client.current.poll(start.session_id, 0);
+          setEvents((prev) => [...prev.slice(0, -1), ...fresh.events]);
+          if (!ac.signal.aborted) {
+            await pollUntilSettled(start.session_id, fresh.next);
+          }
+        } else if (!ac.signal.aborted && sseSucceeded) {
+          client.current.stream(
+            start.session_id,
+            streamSince,
+            (ev) => {
+              if (ac.signal.aborted) return;
+              handleSSEEvent(ev);
+              if (ev.type === "status") {
+                const st = ev as any;
+                setStatus(st.state || "idle");
+                if (st.state === "idle" || st.state === "error") {
+                  refreshFiles(start.session_id);
+                }
+              }
+            },
+            () => {},
+          );
+        }
       }
       // Reload full conversation from DB to restore any history that was lost
       // when the agent session's in-memory events replaced the DB-backed events.
@@ -569,14 +662,14 @@ function EventRow({ ev }: { ev: AgentEvent }) {
       </div>
     );
   }
-  if (ev.type === "assistant") {
+  if (ev.type === "assistant" || ev.type === "assistant_delta") {
     return (
       <div className="px-3 py-1.5 max-w-2xl mx-auto">
         <Markdown text={ev.text} />
       </div>
     );
   }
-  if (ev.type === "thinking") {
+  if (ev.type === "thinking" || ev.type === "thinking_delta") {
     return (
       <div className="px-3 py-1 max-w-2xl mx-auto">
         <Collapsible label="thinking"><Markdown text={ev.text} /></Collapsible>

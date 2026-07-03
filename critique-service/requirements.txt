@@ -1,0 +1,21 @@
+httpx>=0.27
+# optional: only used when METRICS_HF_REPO is set (durable per-profile metrics).
+# the import is guarded so the service still runs in-memory without it.
+huggingface_hub>=0.23
+# token encryption at rest for GitHub/HF OAuth tokens (Fernet = AES-128-CBC + HMAC).
+cryptography>=42.0
+
+# --- agent orchestrator: Claude tier ---
+# The official Agent SDK bundles the Claude Code CLI inside the wheel (a
+# ~250MB self-contained binary) — no Node.js required at runtime. Works on
+# Python 3.10+. The "agent" tab uses it when ANTHROPIC_API_KEY is set.
+claude-agent-sdk>=0.2
+
+# --- agent orchestrator: open tier (Strands Agents, AWS — Apache-2.0) ---
+# Powers every non-Claude model (Kimi, GLM, MiniMax, DeepSeek, Groq, …) via
+# LiteLLM. Native swarm/graph multi-agent + built-in shell/file/python/http
+# tools. Clean install on Python 3.11 (no base-image bump). Chosen over
+# OpenHands, whose 1.28.x line has an unresolvable lmnr/opentelemetry conflict
+# and needs 3.12. The [litellm] extra provides the provider-agnostic model.
+strands-agents[litellm]>=1.43
+strands-agents-tools>=0.8

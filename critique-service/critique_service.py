@@ -1621,46 +1621,76 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(202, resp)
 
     def _handle_agent_stream(self, route: str) -> None:
-        """SSE endpoint for streaming agent events as they happen.
+        """SSE endpoint: GET /api/agent/<sid>/stream
 
-        Keeps the connection open, pushing ``data: <json>\n\n`` lines as events
-        are emitted by the agent. Closes when the agent finishes or errors.
-        The client should reconnect with ``Last-Event-Id`` on disconnect.
+        Subscribes to the session's event queue and pushes real-time events
+        as SSE ``data:`` frames. Falls back to polling if the session doesn't
+        support queue-based subscription (legacy sessions).
         """
-        import json as _json
-        import time as _time
-        rest = route[len("/api/agent/"):]
-        parts = rest.split("/")
-        session = agent_sessions.get_session(parts[0])
+        from urllib.parse import parse_qs, urlsplit
+        sid = route[len("/api/agent/"):-len("/stream")]
+        session = agent_sessions.get_session(sid)
         if session is None:
             self._send_json(404, {"error": "no such agent session"})
             return
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            since = int(query.get("since", ["0"])[0])
+        except ValueError:
+            since = 0
 
         self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        cursor = 0
-        try:
-            while True:
-                snap = session.snapshot(since=cursor)
-                for ev in snap.get("events", []):
-                    self.wfile.write(f"id: {cursor}\ndata: {_json.dumps(ev)}\n\n".encode("utf-8"))
-                    self.wfile.flush()
-                    cursor += 1
-                status = snap.get("status", "running")
-                if status not in ("running", "starting"):
-                    self.wfile.write(
-                        f"event: done\ndata: {_json.dumps({'type': 'done', 'status': status})}\n\n".encode("utf-8")
-                    )
-                    self.wfile.flush()
-                    break
-                _time.sleep(0.2)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+        # Use queue-based subscription if available, else fall back to polling
+        sub = getattr(session, "subscribe", None)
+        if sub is not None:
+            q = sub(since)
+            try:
+                while True:
+                    try:
+                        ev = q.get(timeout=30)
+                    except queue.Empty:
+                        try:
+                            self.wfile.write(b": heartbeat\n\n")
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError, OSError):
+                            break
+                        continue
+                    if ev is None:
+                        break
+                    line = f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                    try:
+                        self.wfile.write(line.encode("utf-8"))
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        break
+            finally:
+                unsub = getattr(session, "unsubscribe", None)
+                if unsub is not None:
+                    unsub(q)
+        else:
+            # Legacy polling fallback
+            import time as _time
+            cursor = since
+            try:
+                while True:
+                    snap = session.snapshot(since=cursor)
+                    for ev in snap.get("events", []):
+                        self.wfile.write(f"id: {cursor}\ndata: {json.dumps(ev)}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                        cursor += 1
+                    status = snap.get("status", "running")
+                    if status not in ("running", "starting"):
+                        break
+                    _time.sleep(0.2)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
 
     def _handle_agent_get(self, route: str) -> None:
         from urllib.parse import parse_qs, urlsplit
