@@ -714,34 +714,30 @@ def _route_network_git(cmd: str, workspace_id: str) -> dict:
 
 
 def _guarded_shell(**kwargs):
-    """Wrap the Strands shell tool: force workspace dir + intercept git commands.
+    """Wrap the Strands shell tool.
 
-    1. Overrides ``workdir`` with the session workspace from thread-local storage.
-    2. Network git operations (push/pull/fetch) are routed through the backend
-       git functions (``push_to_remote`` / ``fetch_from_remote``) so the GitHub
-       token never lands in ``.git/config`` and pushes are audit-logged.
-    3. Other blocked/approval-required commands return an error result instead
-       of executing.
+    Phase 3: workdir override and git interception are now handled by
+    ``GitInterceptHook`` (registered in StrandsAdapter.open()).  This function
+    remains as a non-hook fallback for the Claude tier and for testing —
+    hooks only fire when the Strands tier is active.
     """
     from strands_tools import shell as _shell
     from git_intercept import check_command
 
-    kwargs["workdir"] = str(getattr(_thread_local, "workspace", Path.cwd()))
+    # workdir: hooks normally set this via BeforeToolCallEvent; for non-hook
+    # invocations (Claude tier / testing) fall back to thread-local storage.
+    kwargs.setdefault("workdir", str(getattr(_thread_local, "workspace", Path.cwd())))
 
-    # git command interception: check before execution
     cmd = kwargs.get("command", "")
     if isinstance(cmd, str) and cmd.strip():
         stripped = cmd.strip()
         workspace_id = getattr(_thread_local, "workspace_id", None)
-        # Route network git operations through the backend so the token is
-        # never written to .git/config and pushes are audit-logged. Only when
-        # the agent is operating inside a linked workspace.
+        # Git routing fallback for Claude tier / non-hook callers
         if workspace_id and (
             stripped.startswith("git push")
             or stripped.startswith("git pull")
             or stripped.startswith("git fetch")
         ):
-            # Force-push still requires explicit approval — don't auto-route it.
             is_force = stripped.startswith("git push") and (
                 "-f " in stripped or "--force" in stripped)
             if not is_force:
@@ -862,6 +858,36 @@ class StrandsAdapter(BaseAdapter):
                            callback_handler=None)
         self._msg_cursor = 0
 
+        # Phase 3 — hook registration (runs once, not per-turn).
+        # CostCeiling, GitIntercept, and Telemetry hooks replace the ad-hoc
+        # callback_handler closure and inline checks in _guarded_shell().
+        try:
+            from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent
+            from agent_hooks import (make_cost_hook, make_git_intercept_hook,
+                                     make_telemetry_hook)
+            sess_ref = self._session_ref()
+            if sess_ref is not None and getattr(sess_ref, "conscious_id", None):
+                try:
+                    self.agent.add_hook(
+                        make_cost_hook(sess_ref.conscious_id, self),
+                        AfterToolCallEvent)
+                except Exception:
+                    pass
+            try:
+                self.agent.add_hook(
+                    make_git_intercept_hook(self),
+                    BeforeToolCallEvent)
+            except Exception:
+                pass
+            try:
+                self.agent.add_hook(
+                    make_telemetry_hook(),
+                    AfterToolCallEvent)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _session_ref(self):
         """Back-reference to the owning AgentSession (set by AgentSession._run)."""
         return getattr(self, "_session", None)
@@ -873,72 +899,10 @@ class StrandsAdapter(BaseAdapter):
         # set per-thread agent_session so conscious_stubs._get_session() works
         import conscious_stubs as _cs
         _cs._SELF.agent_session = getattr(self, "_session", None)
-        # Phase 2 (completed in this pass) — mid-turn cost abort.
-        # Install a callback handler that checks the conscious cost ceiling
-        # after each tool result. If over, calls agent.cancel() to abort the
-        # turn mid-flight + emits a cost.exceeded event. This is the "hard
-        # enforcement mid-turn" from TIER3_PLAN §14.
-        sess = getattr(self, "_session", None)
-        cost_handler = None
-        if sess is not None and getattr(sess, "conscious_id", None):
-            def _cost_check_callback(**_kwargs):
-                # Strands fires callback handlers on each message event; we
-                # only act when cost is exceeded (defensive — never blocks a
-                # normal turn).
-                if not _cost_turn_ok(sess.conscious_id):
-                    spent, ceiling = _cost_figures(sess.conscious_id)
-                    emit({"type": "status", "state": "idle",
-                          "detail": f"cost ceiling exceeded mid-turn (spent=${spent:.4f}, ceiling=${ceiling:.4f})"})
-                    canceler = getattr(self.agent, "cancel", None)
-                    if callable(canceler):
-                        try:
-                            canceler()
-                        except Exception:
-                            pass
-                    try:
-                        import conscious_db
-                        conscious_db.append_event(
-                            sess.conscious_id, "cost.exceeded",
-                            f"mid-turn abort: spent=${spent:.4f} ceiling=${ceiling:.4f}",
-                            author=getattr(sess, "agent_id", None))
-                    except Exception:
-                        pass
-            cost_handler = _cost_check_callback
-            # Strands accepts callback_handler on the Agent; we set it per-turn
-            # by attaching to the agent's callback registry if it has one.
-            try:
-                reg = getattr(self.agent, "callback_handler", None)
-                if reg is None:
-                    self.agent.callback_handler = cost_handler
-                elif hasattr(reg, "register") and callable(reg.register):
-                    reg.register(cost_handler)
-                else:
-                    # reg is a callable; wrap it so both fire
-                    orig = reg
-                    def _both(**kw):
-                        try: orig(**kw)
-                        except Exception: pass
-                        try: cost_handler(**kw)
-                        except Exception: pass
-                    self.agent.callback_handler = _both
-            except Exception:
-                pass
-        try:
-            # Phase 2 — pass agent_session via invocation_state so conscious
-            # tools can resolve the session context from @tool wrappers.
-            session_ref = self._session_ref()
-            self.agent(user_msg, agent_session=session_ref)
-        finally:
-            # restore the original callback handler so non-cost sessions aren't
-            # saddled with our closure on their next turn
-            if cost_handler is not None:
-                try:
-                    # best-effort: leave the handler in place; it no-ops when
-                    # cost is under budget. Strands agents are per-session so
-                    # this is safe.
-                    pass
-                except Exception:
-                    pass
+        # Phase 2 — pass agent_session via invocation_state so conscious
+        # tools can resolve the session context from @tool wrappers.
+        session_ref = self._session_ref()
+        self.agent(user_msg, agent_session=session_ref)
         # walk newly-appended messages and map Bedrock-style content blocks
         msgs = getattr(self.agent, "messages", []) or []
         for m in msgs[self._msg_cursor:]:
