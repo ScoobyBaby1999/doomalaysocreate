@@ -30,6 +30,7 @@ from typing import Any
 
 import agent_sessions
 import conscious_db
+from conscious_tools import _list_worktree_files  # canonical version (Fix #2)
 
 _log = logging.getLogger("multi_agent")
 
@@ -82,7 +83,7 @@ def make_sub_agent(
     from strands import Agent
     from strands.models.litellm import LiteLLMModel
 
-    cached = _AGENT_CACHE.get(agent_id)
+    cached = _AGENT_CACHE.get((agent_id, hash(system_prompt)))
     if cached is not None:
         return cached
 
@@ -118,7 +119,9 @@ def make_sub_agent(
         context_manager="auto",
         callback_handler=None,
     )
-    _AGENT_CACHE[agent_id] = agent
+    # cache key includes system_prompt hash so changing the task prompt
+    # between invocations does not reuse a stale instance (Fix #6)
+    _AGENT_CACHE[(agent_id, hash(system_prompt))] = agent
     return agent
 
 
@@ -278,13 +281,15 @@ def run_invoke_graph(
         status_name = getattr(result, "status", None)
         status_str = status_name.name if status_name is not None else "COMPLETED"
         is_ok = status_str == "COMPLETED"
-        status = "done" if is_ok else "failed"
-        error = None
-        if not is_ok:
-            node_res = (result.results or {}).get(to_agent_id, {})
-            error = str(getattr(node_res, "result", getattr(node_res, "error", "graph execution failed")))
         node_res = (result.results or {}).get(to_agent_id, {})
-        result_text = str(getattr(node_res, "result", str(node_res)))
+        if is_ok:
+            status = "done"
+            error = None
+            result_text = str(getattr(node_res, "result", str(node_res)))
+        else:
+            status = "failed"
+            error = str(getattr(node_res, "result", getattr(node_res, "error", "graph execution failed")))
+            result_text = ""
     except Exception as exc:
         elapsed_ms = (time.time() - start) * 1000
         result_text = ""
@@ -429,6 +434,9 @@ def run_swarm(
             entry_point=entry_agent,
             max_handoffs=max_handoffs,
             execution_timeout=timeout_s,
+            # stability: break infinite handoff loops (agent A → B → A → B ...)
+            repetitive_handoff_detection_window=5,
+            repetitive_handoff_min_unique_agents=2,
             id=f"swarm-{uuid.uuid4().hex[:8]}",
         )
         start = time.time()
@@ -463,25 +471,6 @@ def run_swarm(
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-
-def _list_worktree_files(ws_path: str | None) -> list[str]:
-    """List files a sub-agent wrote (excluding .git/.brain)."""
-    from pathlib import Path
-    if not ws_path:
-        return []
-    wt = Path(ws_path)
-    if not wt.is_dir():
-        return []
-    out: list[str] = []
-    for p in wt.rglob("*"):
-        if not p.is_file():
-            continue
-        rel = p.relative_to(wt)
-        if str(rel).startswith((".git/", ".brain/")):
-            continue
-        out.append(str(rel))
-    return out
-
 
 def _fallback_result(sub: dict, task: str, inputs: dict) -> dict[str, Any]:
     """Fallback when Strands multiagent module is not importable.

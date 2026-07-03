@@ -20,7 +20,8 @@ from typing import Any
 
 import conscious_db
 
-# Phase 1 invoke/delegate stub cost (mocked; per TIER3_PLAN.md §14).
+# Sub-agent invocation cost approximation (used when real-cost tracking via
+# Phase 3 hooks is absent for sub-agents in Graph/Swarm).
 _STUB_INVOKE_COST_USD = 0.001
 
 
@@ -304,13 +305,23 @@ def _stub_result(to_agent_id: str, task: str, inputs: dict) -> str:
             f"(Phase 2: no agent SDK available; install claude-agent-sdk or strands-agents)")
 
 
-def _list_worktree_files(wt_path: Path) -> list[str]:
-    """List files the sub-agent wrote in its worktree (excluding .git/.brain)."""
+def _list_worktree_files(wt_path: "str | Path | None") -> list[str]:
+    """List files the sub-agent wrote in its worktree (excluding .git/.brain).
+
+    Canonical version — also imported by ``multi_agent``. Accepts str, Path,
+    or None (returns [] for None/non-existent paths).
+    """
+    from pathlib import Path as _P
+    if not wt_path:
+        return []
+    wt = _P(wt_path)
+    if not wt.is_dir():
+        return []
     out: list[str] = []
-    for p in wt_path.rglob("*"):
+    for p in wt.rglob("*"):
         if not p.is_file():
             continue
-        rel = p.relative_to(wt_path)
+        rel = p.relative_to(wt)
         if str(rel).startswith((".git/", ".brain/")):
             continue
         out.append(str(rel))

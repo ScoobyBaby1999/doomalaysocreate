@@ -123,6 +123,8 @@ class RedisSessionManager(RepositorySessionManager, SessionRepository):
     def update_message(
         self, session_id: str, agent_id: str, session_message: SessionMessage, **kwargs: Any
     ) -> None:
+        # Assumes message_id is a sequential Redis List index (0-based position).
+        # Strands SessionMessage.message_id is an auto-incrementing int — safe.
         key = self._mk(session_id, agent_id)
         self.redis.lset(key, session_message.message_id, json.dumps(session_message.to_dict()))
 
@@ -135,6 +137,6 @@ class RedisSessionManager(RepositorySessionManager, SessionRepository):
         **kwargs: Any,
     ) -> list[SessionMessage]:
         key = self._mk(session_id, agent_id)
-        end = -1 if limit is None else offset + limit - 1
+        end = -1 if (limit is None or limit <= 0) else offset + limit - 1
         raw_list = self.redis.lrange(key, offset, end)
         return [SessionMessage.from_dict(json.loads(r)) for r in raw_list]

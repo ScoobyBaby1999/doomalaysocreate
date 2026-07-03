@@ -18,17 +18,15 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from conscious_tools import _DANGEROUS_PATTERNS  # shared list (Fix #3)
+
 _log = logging.getLogger("agent.hooks")
 
 # ---------------------------------------------------------------------------
 # Cost hook
 # ---------------------------------------------------------------------------
 
-_DANGEROUS_PATTERNS = [
-    "rm -rf /", "rm -rf /*", "mkfs.", "dd if=", "> /dev/sda", "format",
-    ":(){", "shutdown", "reboot", "init 0", "poweroff", "halt",
-    "chmod 777 /", "wget -O-", "curl.*| sh", "curl.*| bash",
-]
+# _DANGEROUS_PATTERNS now imported from conscious_tools (single source of truth)
 
 
 def make_cost_hook(conscious_id: str, adapter: Any) -> Callable[[Any], None]:
@@ -68,6 +66,14 @@ def make_cost_hook(conscious_id: str, adapter: Any) -> Callable[[Any], None]:
 # Git intercept + safety hook
 # ---------------------------------------------------------------------------
 
+def _sess_or_none(adapter: Any) -> Any:
+    """Safely return the session ref, or None."""
+    try:
+        return adapter._session_ref()
+    except Exception:
+        return None
+
+
 def make_git_intercept_hook(adapter: Any) -> Callable[[Any], None]:
     """Return a hook callback for BeforeToolCallEvent.
 
@@ -98,7 +104,7 @@ def make_git_intercept_hook(adapter: Any) -> Callable[[Any], None]:
                 return
 
         # 3. Route network git operations
-        sess = adapter._session_ref()
+        sess = _sess_or_none(adapter)
         workspace_id = getattr(sess, "workspace_id", None) if sess else None
         if workspace_id and (
             cmd.startswith("git push")

@@ -892,7 +892,7 @@ class StrandsAdapter(BaseAdapter):
             from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent
             from agent_hooks import (make_cost_hook, make_git_intercept_hook,
                                      make_telemetry_hook)
-            sess_ref = self._session_ref()
+            sess_ref = self._session_ref()  # also used by Phase 4 above
             if sess_ref is not None and getattr(sess_ref, "conscious_id", None):
                 try:
                     self.agent.add_hook(
