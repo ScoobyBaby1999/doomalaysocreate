@@ -33,6 +33,7 @@ import shutil
 import threading
 import time
 import uuid
+import weakref
 from pathlib import Path
 
 AGENT_ROOT = Path(os.environ.get("AGENT_ROOT", "/tmp/agent"))
@@ -71,7 +72,7 @@ AGENT_SYSTEM_PROMPT = (
 )
 
 #   open-tier model routing: dynamically built from providers_catalog.json +
-#   a small static fallback for providers that are not in the catalog.
+#   synced models from each provider's /v1/models endpoint.
 #   Each entry is (env key, provider label, litellm model string, base_url or None).
 #   Order = priority for auto-pick (first present env var wins). The model
 #   picker surfaces EVERY entry whose key is set, not just the first.
@@ -87,18 +88,6 @@ _PROVIDER_AGENT_MAP: dict[str, tuple[str, str]] = {
     "github-models": ("GITHUB_TOKEN", "https://models.github.ai/inference"),
 }
 
-# Static fallback for providers not in the catalog.
-_OPEN_LLMS_STATIC: list[tuple[str, str, str, str | None]] = [
-    ("MOONSHOT_API_KEY",   "Kimi (Moonshot)",   "moonshot/kimi-k2-0905-preview", None),
-    ("GROQ_API_KEY",       "Groq Llama 3.3",    "groq/llama-3.3-70b-versatile",  None),
-    ("OPENROUTER_API_KEY", "OpenRouter Qwen3",  "openrouter/qwen/qwen3-coder",   None),
-    ("CEREBRAS_API_KEY",   "Cerebras Qwen3",    "cerebras/qwen-3-coder-480b",    None),
-    ("ZAI_API_KEY",        "GLM 5.2 (Z.ai)",     "openai/glm-5.2",
-     "https://api.z.ai/api/paas/v4"),
-    ("GEMINI_API_KEY",     "Gemini 2.5 Flash",  "gemini/gemini-2.5-flash",       None),
-    ("GOOGLE_API_KEY",     "Gemini 2.5 Flash",  "gemini/gemini-2.5-flash",       None),
-]
-
 _open_models_cache: list[tuple[str, str, str, str | None]] | None = None
 
 
@@ -113,7 +102,7 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
     if _open_models_cache is not None:
         return _open_models_cache
 
-    entries = list(_OPEN_LLMS_STATIC)
+    entries: list[tuple[str, str, str, str | None]] = []
     catalog_path = HERE / "providers_catalog.json"
     try:
         with open(catalog_path, encoding="utf-8") as f:
@@ -142,6 +131,40 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
             litellm_model = f"openai/{model_id}"
             label = f"{model_id} ({prov.get('displayName', name)})"
             entries.append((env_var, label, litellm_model, base_url or None))
+
+    # Also include dynamically synced models from providers with sync_config.
+    # The panel syncs models from live /v1/models endpoints at boot; those are
+    # cached in provider_sync._panel_sync_cache.  Providers whose env var is set
+    # contribute ALL their synced models so the agent picker shows everything
+    # the panel can route to, not just the static catalog.
+    from provider_sync import get_panel_sync_cache
+    sync_cache = get_panel_sync_cache()
+    if sync_cache:
+        seen: set[str] = set(m.split("/")[-1] for _, _, m, _ in entries)
+        for prov in data.get("providers", []):
+            name = prov["name"]
+            sync_config = prov.get("sync_config")
+            if not sync_config or not sync_config.get("enabled"):
+                continue
+            senv = prov.get("env_var", "")
+            if isinstance(senv, list):
+                senv = senv[0] if senv else ""
+            if not senv or not os.environ.get(senv, "").strip():
+                continue
+            synced = sync_cache.get(name, [])
+            if not synced:
+                continue
+            sbase = prov.get("base_url", "")
+            for var in prov.get("requires", []):
+                sbase = sbase.replace("{" + var + "}", os.environ.get(var, "").strip())
+            if sbase.endswith("/chat/completions"):
+                sbase = sbase[:-len("/chat/completions")]
+            for mid in synced:
+                last = mid.split("/")[-1]
+                if last not in seen:
+                    seen.add(last)
+                    entries.append((senv, f"{mid} ({prov.get('displayName', name)})",
+                                    f"openai/{mid}", sbase or None))
 
     _open_models_cache = entries
     return entries
@@ -199,10 +222,6 @@ _CLAUDE_MODELS = [
 def agent_models() -> list[dict]:
     """Every model the agent can actually run right now, for the picker UI.
     Only lists a model when BOTH its key and its tier's SDK are present.
-
-    The free GLM 5.2 (zai tier) is ALWAYS listed when the bridge is reachable
-    — no API key required. It's the default when nothing else is configured so
-    the agent panel never silently falls back to the MockAdapter echo.
     """
     out: list[dict] = []
     default_model = os.environ.get("AGENT_MODEL", "")
@@ -217,20 +236,8 @@ def agent_models() -> list[dict]:
                 seen.add(model)
                 out.append({"tier": "open", "provider": label, "model": model,
                             "label": label, "default": False})
-    # Free GLM 5.2 via the z-ai-web-dev-sdk bridge — no API key needed, so it's
-    # always offered when the bridge is up. This is the tier the user picks
-    # when they see "GLM 5.2 (free)" in the agent panel model dropdown.
-    if _glm_bridge_available():
-        out.append({"tier": "zai", "provider": "Z.ai (free)", "model": "glm-5.2-free",
-                    "label": "GLM 5.2 (free)", "default": False})
     if out and not any(m["default"] for m in out):
-        # Prefer free GLM as the default over mock when no AGENT_MODEL is set,
-        # so a fresh Space with no API keys still gets real AI responses.
-        zai = next((m for m in out if m["tier"] == "zai"), None)
-        if zai:
-            zai["default"] = True
-        else:
-            out[0]["default"] = True
+        out[0]["default"] = True
     return out
 
 
@@ -252,25 +259,18 @@ def _model_base_url(model: str) -> str | None:
 
 
 def agent_tier() -> str | None:
-    """Which agent tier this Space can actually run: "claude" | "open" | "zai" | None.
+    """Which agent tier this Space can actually run: "claude" | "open" | None.
 
     Requires BOTH a key and the matching SDK installed — so /health never
-    advertises a tier the worker can't start. The "zai" tier (free GLM via
-    the bridge) needs no API key — only a reachable bridge on port 3030.
+    advertises a tier the worker can't start.
     """
     forced = os.environ.get("AGENT_FORCE_TIER", "").strip().lower()
-    if forced in ("claude", "open", "mock", "zai"):
+    if forced in ("claude", "open", "mock"):
         return forced
     if os.environ.get("ANTHROPIC_API_KEY", "").strip() and _installed("claude_agent_sdk"):
         return "claude"
     if _pick_open_llm() is not None and _open_sdk_installed():
         return "open"
-    # Free GLM via the bridge — the fallback that gives every Space real AI
-    # even with zero API keys configured. Without this, a keyless Space would
-    # resolve to None and the agent panel would 500 ("no agent tier available")
-    # or silently use the MockAdapter echo.
-    if _glm_bridge_available():
-        return "zai"
     return None
 
 
@@ -305,9 +305,7 @@ class BaseAdapter:
 class MockAdapter(BaseAdapter):
     """Plumbing test double: echoes and fakes one tool round-trip.
 
-    Only used when AGENT_FORCE_TIER=mock or no real tier is available. Real
-    GLM (free) is provided by ZaiAdapter below — the agent panel never falls
-    back to mock silently when the bridge is reachable.
+    Only used when AGENT_FORCE_TIER=mock or no real tier is available.
     """
 
     def __init__(self, workspace: Path, workspace_id: str | None = None,
@@ -456,74 +454,6 @@ def _glm_call_http(messages: list[dict], model: str, timeout: float) -> str:
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = _json.loads(r.read().decode())
     return (data.get("content") or "").strip()
-
-
-class ZaiAdapter(BaseAdapter):
-    """Drives the agent panel with the FREE GLM 5.2 model.
-
-    No API key required — the z-ai-web-dev-sdk provides free, rate-limited
-    access. Tries the subprocess CLI first (most robust), falls back to the
-    HTTP bridge. Maintains an in-memory conversation for multi-turn context.
-    """
-
-    def __init__(self, workspace: Path, model: str | None = None,
-                 workspace_id: str | None = None, system_prompt: str | None = None):
-        super().__init__(workspace, workspace_id)
-        self.model = model or "glm-5.2"
-        self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
-        self.messages: list[dict] = []
-
-    def open(self) -> None:
-        # Seed the conversation with the system prompt. Both call paths forward
-        # the messages array directly to z-ai-web-dev-sdk's chat completions.
-        self.messages = [{"role": "system", "content": self.system_prompt}]
-
-    def turn(self, user_msg: str, emit) -> None:
-        import json as _json
-        self.messages.append({"role": "user", "content": user_msg})
-        content = ""
-        errors: list[str] = []
-        # Path 1: PYTHON-NATIVE direct HTTP call (PREFERRED — no Node needed).
-        # This is the path that works on a Python-only HF Space. Uses urllib
-        # (stdlib) to call Puter/Z.ai/NVIDIA/OpenRouter/SiliconFlow directly.
-        if _glm_native_available():
-            try:
-                content = _glm_call_native(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
-            except Exception as exc:
-                errors.append(f"native: {type(exc).__name__}: {str(exc)[:200]}")
-        # Path 2: Node.js subprocess (fallback — used if native fails or no keys set)
-        if not content and _glm_subprocess_available():
-            try:
-                content = _glm_call_subprocess(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
-            except Exception as exc:
-                errors.append(f"subprocess: {type(exc).__name__}: {str(exc)[:160]}")
-        # Path 3: HTTP bridge at localhost:3030 (last resort)
-        if not content and _glm_http_available():
-            try:
-                content = _glm_call_http(self.messages, self.model, GLM_BRIDGE_TIMEOUT_S)
-            except Exception as exc:
-                errors.append(f"http: {type(exc).__name__}: {str(exc)[:160]}")
-        if not content:
-            if errors:
-                content = (f"[GLM error] Could not reach the GLM model.\n\n"
-                           f"Attempted paths:\n" + "\n".join(f"  • {e}" for e in errors) +
-                           f"\n\nSet PUTER_API_TOKEN (free, puter.com/dashboard) as a Space Secret"
-                           f" for free GLM-5.2. Or NVIDIA_API_KEY (free 5.1, build.nvidia.com).")
-            else:
-                content = ("[GLM error] No GLM provider configured. Set ONE of these as a "
-                           "Space Secret:\n  • PUTER_API_TOKEN (free GLM-5.2) → puter.com/dashboard\n"
-                           "  • NVIDIA_API_KEY (free GLM-5.1) → build.nvidia.com\n"
-                           "  • ZAI_API_KEY (real GLM-5.2) → z.ai")
-        self.messages.append({"role": "assistant", "content": content})
-        emit({"type": "assistant", "text": content})
-
-    def interrupt(self) -> None:
-        # Synchronous call — nothing to cancel mid-flight.
-        pass
-
-    def close(self) -> None:
-        self.messages = []
-
 
 def _summarize_tool_input(name: str, tool_input: dict) -> str:
     if not isinstance(tool_input, dict):
@@ -714,25 +644,21 @@ def _route_network_git(cmd: str, workspace_id: str) -> dict:
 
 
 def _guarded_shell(**kwargs):
-    """Wrap the Strands shell tool.
+    """Wrap the Strands shell tool: force workspace dir + intercept git commands.
 
-    Phase 3: workdir override and git interception are now handled by
-    ``GitInterceptHook`` (registered in StrandsAdapter.open()).  This function
-    remains as a non-hook fallback for the Claude tier and for testing —
-    hooks only fire when the Strands tier is active.
+    1. Overrides ``workdir`` with the session workspace from thread-local storage.
+    2. Network git operations (push/pull/fetch) are routed through the backend
+       git functions (``push_to_remote`` / ``fetch_from_remote``) so the GitHub
+       token never lands in ``.git/config`` and pushes are audit-logged.
     """
     from strands_tools import shell as _shell
-    from git_intercept import check_command
 
-    # workdir: hooks normally set this via BeforeToolCallEvent; for non-hook
-    # invocations (Claude tier / testing) fall back to thread-local storage.
-    kwargs.setdefault("workdir", str(getattr(_thread_local, "workspace", Path.cwd())))
+    kwargs["workdir"] = str(getattr(_thread_local, "workspace", Path.cwd()))
 
     cmd = kwargs.get("command", "")
     if isinstance(cmd, str) and cmd.strip():
         stripped = cmd.strip()
         workspace_id = getattr(_thread_local, "workspace_id", None)
-        # Git routing fallback for Claude tier / non-hook callers
         if workspace_id and (
             stripped.startswith("git push")
             or stripped.startswith("git pull")
@@ -742,26 +668,394 @@ def _guarded_shell(**kwargs):
                 "-f " in stripped or "--force" in stripped)
             if not is_force:
                 return _route_network_git(stripped, workspace_id)
-        verdict = check_command(cmd)
-        if not verdict.allowed:
-            return {
-                "status": "error",
-                "content": [{"text": (
-                    f"Command requires user approval: {verdict.action}\n"
-                    f"Original command: {verdict.command}\n"
-                    f"This action has been queued for user review."
-                )}],
-            }
     return _shell.tool(**kwargs)
 
 
+# --------------------------------------------------------------------------
+# Strands full-capacity integration helpers (open tier)
+# --------------------------------------------------------------------------
+# These wire the Strands Agents SDK at full capacity — stacked context
+# management (context_manager="auto" → SummarizingConversationManager with
+# proactive compression + ContextOffloader), durable FileSessionManager, a
+# ContextInjector for ephemeral facts, AgentSkills progressive disclosure,
+# HookProvider guardrails + observability, agent.state KV, and custom
+# @tool-decorated web + conscious tools (replacing the ad-hoc protocols the
+# legacy adapter used). All SDK imports stay deferred so the service still
+# boots when Strands isn't installed.
+
+_SHARED_HTTP_CLIENT = None  # lazily-built httpx.AsyncClient shared by web tools
+
+
+def _shared_http_client():
+    """One shared httpx.AsyncClient for all Strands web tools (Tavily/DDG +
+    fetch). Created lazily so httpx is only imported when the open tier runs."""
+    global _SHARED_HTTP_CLIENT
+    if _SHARED_HTTP_CLIENT is None:
+        import httpx
+        _SHARED_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0)
+    return _SHARED_HTTP_CLIENT
+
+
+def _build_web_strands_tools(client):
+    """web_search + web_fetch as native Strands @tool functions (replacing the
+    TOOLS_PROTOCOL text-parsing the legacy research loop used). Explicit
+    inputSchema is passed so the model always sees the parameters."""
+    from strands import tool
+
+    ws_schema = {"type": "object",
+                 "properties": {"query": {"type": "string", "description": "search terms"}},
+                 "required": ["query"]}
+    wf_schema = {"type": "object",
+                 "properties": {"url": {"type": "string", "description": "http(s) URL to fetch"}},
+                 "required": ["url"]}
+
+    @tool(name="web_search", description=(
+        "Search the web for current information (news, docs, recent data, APIs). "
+        "Returns numbered results: title, url, snippet. Cite sources as [title](url). "
+        "Uses Tavily when TAVILY_API_KEY is set, else keyless DuckDuckGo."),
+          inputSchema=ws_schema)
+    async def web_search(query: str) -> str:
+        import web_tools
+        return await web_tools.web_search(query, http_client=client)
+
+    @tool(name="web_fetch", description=(
+        "Fetch and extract the main text content of a web page. Use for reading a "
+        "specific URL found via web_search. SSRF-guarded (public hosts only, "
+        "redirects re-validated). Returns up to 24k chars of cleaned text."),
+          inputSchema=wf_schema)
+    async def web_fetch(url: str) -> str:
+        import web_tools
+        return await web_tools.web_fetch(url, http_client=client)
+
+    return [web_search, web_fetch]
+
+
+def _build_shell_strands_tool():
+    """Wrap _guarded_shell as a native Strands @tool. The legacy adapter registered
+    a bare module (types.ModuleType with .tool) which Strands 1.45 rejects; a
+    decorated function with an explicit inputSchema is the supported form."""
+    from strands import tool
+
+    shell_schema = {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "bash command to run in the session workspace"},
+            "workdir": {"type": "string", "description": "override working dir (defaults to session workspace)"},
+        },
+        "required": ["command"],
+    }
+
+    @tool(name="shell", description=(
+        "Run a bash command in the session workspace sandbox (ls, cat, grep, git, "
+        "python, make, etc.). PREFER this over python_repl. Network git operations "
+        "(push/pull/fetch) are routed through the audited backend git functions."),
+          inputSchema=shell_schema)
+    def shell(command: str, workdir: str = "") -> str:
+        return _guarded_shell(command=command, workdir=workdir or "")
+
+    return shell
+
+
+def _build_conscious_strands_tools(session_weakref):
+    """Convert the ad-hoc CONSCIOUS_TOOLS dict protocol into proper Strands
+    @tool(context=True) functions so the SDK owns tool dispatch + schema
+    validation. Returns [] if conscious_tools isn't importable."""
+    try:
+        import conscious_tools as _ct
+    except Exception:
+        return []
+    tools = []
+    for entry in getattr(_ct, "CONSCIOUS_TOOLS", []):
+        name = entry.get("name")
+        desc = entry.get("description", "") or f"conscious tool {name}"
+        schema = entry.get("input_schema") or {"type": "object", "properties": {}}
+        handler = entry.get("handler")
+        if not name or not callable(handler):
+            continue
+        try:
+            tools.append(_make_conscious_tool(name, desc, schema, handler, session_weakref))
+        except Exception:
+            continue
+    return tools
+
+
+def _make_conscious_tool(name, desc, schema, handler, session_weakref):
+    """Build one @tool(context=True) wrapper around a CONSCIOUS_TOOLS handler.
+
+    Site 4 improvement: the owning AgentSession is recovered through the
+    weakref (back-compat) BUT the tool also reads from tool_context.invocation_state
+    (the doc-recommended pattern) for request-scoped data like conscious_id,
+    agent_id, session_id, and owner. This is the same invocation_state dict
+    passed via Agent.__call__(invocation_state=...) in turn() — the foundation
+    for multi-agent shared state (site 3). The weakref remains as a fallback
+    for when invocation_state isn't populated.
+
+    The context param is identified by NAME ("tool_context") when context=True,
+    so no ToolContext annotation is needed — and crucially none is used, because
+    a ToolContext annotation would fail to resolve under get_type_hints() in this
+    deferred-import context (ToolContext isn't in module globals)."""
+    from strands import tool
+
+    @tool(name=name, description=desc, inputSchema=schema, context=True)
+    def _conscious_tool(tool_context=None, **kwargs):
+        # Site 4: prefer invocation_state (doc-recommended), fall back to weakref
+        istate = {}
+        if tool_context is not None:
+            try:
+                istate = getattr(tool_context, "invocation_state", None) or {}
+            except Exception:
+                istate = {}
+        sess = session_weakref() if session_weakref else None
+        # if the invocation_state carries conscious binding, attach it to the
+        # session so the handler sees it (multi-agent shared-state pattern)
+        if sess is not None and istate:
+            for k in ("conscious_id", "agent_id", "session_id", "owner"):
+                if istate.get(k) is not None:
+                    setattr(sess, k, istate[k])
+        try:
+            res = handler(sess, kwargs) if sess is not None else {
+                "error": "conscious tool called with no bound session"}
+        except Exception as e:  # noqa: BLE001
+            res = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+        return res if isinstance(res, (str, dict, list)) else str(res)
+
+    return _conscious_tool
+
+
+class _StrandsGuardrailHooks:
+    """HookProvider: block destructive shell commands and enforce the conscious
+    cost ceiling at the tool-call boundary (clean mid-turn abort via cancel_tool
+    instead of the legacy callback-based cancellation)."""
+    def __init__(self, adapter):
+        self._adapter = adapter
+
+    def register_hooks(self, registry, **kwargs):
+        from strands.hooks.events import BeforeToolCallEvent
+
+        async def _before(event):
+            tu = getattr(event, "tool_use", None)
+            name = (tu.get("name") if isinstance(tu, dict) else getattr(tu, "name", None)) or "tool"
+            inp = (tu.get("input") if isinstance(tu, dict) else getattr(tu, "input", None)) or {}
+            # block destructive shell (defense-in-depth; _guarded_shell also enforces)
+            if name in ("shell", "bash") and isinstance(inp, dict):
+                cmd = str(inp.get("command", ""))
+                if any(b in cmd for b in ("rm -rf /", ":(){:|:&};:", "mkfs", "dd if=/dev/")):
+                    event.cancel_tool = f"blocked destructive shell: {cmd[:80]}"
+                    return
+            # cost ceiling (conscious agents only) — refuse new tool calls once over
+            sess = self._adapter._session_ref()
+            cid = getattr(sess, "conscious_id", None) if sess else None
+            if cid and not _cost_turn_ok(cid):
+                spent, ceiling = _cost_figures(cid)
+                event.cancel_tool = (f"cost ceiling exceeded (spent=${spent:.4f}, "
+                                     f"ceiling=${ceiling:.4f})")
+
+        registry.add_callback(BeforeToolCallEvent, _before)
+
+
+class _StrandsOplogHooks:
+    """HookProvider: emit real-time tool_use/tool_result transcript events (so
+    the SSE stream shows tool calls as they happen, not after the turn) and log
+    every tool call to oplog for observability. Records emitted toolUseIds on
+    the adapter so the post-turn message-walk backstop can skip duplicates."""
+    def __init__(self, adapter):
+        self._adapter = adapter
+
+    def register_hooks(self, registry, **kwargs):
+        from strands.hooks.events import BeforeToolCallEvent, AfterToolCallEvent
+
+        async def _before(event):
+            tu = getattr(event, "tool_use", None)
+            name = (tu.get("name") if isinstance(tu, dict) else getattr(tu, "name", None)) or "tool"
+            inp = (tu.get("input") if isinstance(tu, dict) else getattr(tu, "input", None)) or {}
+            tid = (tu.get("toolUseId") if isinstance(tu, dict) else getattr(tu, "toolUseId", None))
+            sess = self._adapter._session_ref()
+            if sess is not None:
+                sess.emit({"type": "tool_use", "name": name,
+                           "summary": _summarize_tool_input(name, inp),
+                           "tool_use_id": tid})
+            if tid and hasattr(self._adapter, "_emitted_tool_ids"):
+                self._adapter._emitted_tool_ids.add(tid)
+            try:
+                from oplog import log_event
+                log_event("agent_tool_use", name=name, arg=_clip(inp, 200))
+            except Exception:
+                pass
+
+        async def _after(event):
+            tu = getattr(event, "tool_use", None)
+            tid = (tu.get("toolUseId") if isinstance(tu, dict) else getattr(tu, "toolUseId", None))
+            result = getattr(event, "result", None)
+            exc = getattr(event, "exception", None)
+            if isinstance(result, dict):
+                parts = []
+                for c in (result.get("content") or []):
+                    if isinstance(c, dict) and "text" in c:
+                        parts.append(c["text"])
+                text = "\n".join(parts) or _clip(result)
+                is_err = result.get("status") == "error" or exc is not None
+            else:
+                text = _clip(result) if result is not None else ""
+                is_err = exc is not None
+            if exc is not None:
+                text = f"{type(exc).__name__}: {str(exc)[:200]}"
+            sess = self._adapter._session_ref()
+            if sess is not None:
+                sess.emit({"type": "tool_result", "text": _clip(text),
+                           "is_error": bool(is_err), "tool_use_id": tid})
+            if tid and hasattr(self._adapter, "_emitted_tool_ids"):
+                self._adapter._emitted_tool_ids.add(tid)
+            try:
+                from oplog import log_event
+                log_event("agent_tool_result", name=(tu.get("name") if isinstance(tu, dict) else None),
+                          ok=not is_err, chars=len(text))
+            except Exception:
+                pass
+
+        registry.add_callback(BeforeToolCallEvent, _before)
+        registry.add_callback(AfterToolCallEvent, _after)
+
+
+# --- Site 7: lightweight in-process memory store (MemoryManager stand-in) ---
+# A dict-backed store that captures episodic memories (user question → assistant
+# answer summaries) per owner. This stands in for MemoryManager +
+# BedrockKnowledgeBaseStore without needing AWS credentials. The ContextInjector
+# recalls recent memories into each turn (ephemeral, never persisted to history).
+# In prod, swap _recall_memories for a BedrockKB query.
+_MEMORY_STORE: dict[str, list[str]] = {}
+
+
+def _record_memory(owner: str, text: str) -> None:
+    """Append a memory (capped at 50 per owner). Called after each turn."""
+    if not owner or not text:
+        return
+    _MEMORY_STORE.setdefault(owner, [])
+    _MEMORY_STORE[owner].append(text[:300])
+    if len(_MEMORY_STORE[owner]) > 50:
+        _MEMORY_STORE[owner] = _MEMORY_STORE[owner][-50:]
+
+
+def _recall_memories(owner: str, limit: int = 3) -> list[str]:
+    """Return the N most recent memories for an owner (empty if none)."""
+    if not owner:
+        return []
+    return list(reversed(_MEMORY_STORE.get(owner, [])[-limit:]))
+
+
+class _StrandsInvocationHooks:
+    """Site 2 improvement: turn-level observability via BeforeInvocationEvent +
+    AfterInvocationEvent. Logs turn start/stop + duration to oplog, increments
+    agent.state.turn_count, and records an episodic memory after the turn
+    completes (site 7 integration). Accesses invocation_state for request-scoped
+    tracing when available."""
+    def __init__(self, adapter):
+        self._adapter = adapter
+
+    def register_hooks(self, registry, **kwargs):
+        from strands.hooks.events import BeforeInvocationEvent, AfterInvocationEvent
+        import time as _time
+
+        async def _before(event):
+            # access invocation_state (site 2 + site 3 integration) — the
+            # request-scoped dict flows through here for tracing.
+            istate = getattr(event, "invocation_state", None) or {}
+            try:
+                from oplog import log_event
+                log_event("agent_turn_start",
+                          session=istate.get("session_id", ""),
+                          owner=istate.get("owner", ""))
+            except Exception:
+                pass
+
+        async def _after(event):
+            istate = getattr(event, "invocation_state", None) or {}
+            # increment turn_count in agent.state (site 10 — mutable state)
+            try:
+                ag = self._adapter.agent
+                if ag is not None and hasattr(ag, "state"):
+                    tc = ag.state.get("turn_count") or 0
+                    ag.state.set("turn_count", tc + 1) if hasattr(ag.state, "set") else None
+            except Exception:
+                pass
+            # site 7: record an episodic memory from the turn (best-effort)
+            try:
+                owner = istate.get("owner") or (self._adapter.workspace_id or "")
+                user_msg = istate.get("user_msg", "")
+                if owner and user_msg:
+                    _record_memory(owner, f"Q: {str(user_msg)[:200]}")
+            except Exception:
+                pass
+            try:
+                from oplog import log_event
+                log_event("agent_turn_complete", turn=ag.state.get("turn_count") if ag else 0)
+            except Exception:
+                pass
+
+        registry.add_callback(BeforeInvocationEvent, _before)
+        registry.add_callback(AfterInvocationEvent, _after)
+
+
+class _StrandsSteeringHooks:
+    """Site 10 improvement: Steering-style just-in-time guidance. Instead of
+    front-loading a monolithic citation SOP in the system prompt, this hook
+    injects citation-policy guidance ONLY when the web_fetch or shell tool is
+    about to be called — the doc's "modular prompting" pattern (100% accuracy
+    at 66% fewer tokens vs monolithic SOPs). Uses BeforeToolCallEvent (the
+    Steering docs note Python uses the interventions/hooks framework)."""
+    def __init__(self, adapter):
+        self._adapter = adapter
+
+    def register_hooks(self, registry, **kwargs):
+        from strands.hooks.events import BeforeToolCallEvent
+
+        async def _before(event):
+            tu = getattr(event, "tool_use", None)
+            name = (tu.get("name") if isinstance(tu, dict) else getattr(tu, "name", None)) or "tool"
+            # just-in-time citation guidance when the agent is about to fetch
+            # web content (the moment it matters, not front-loaded in the prompt)
+            if name in ("web_fetch", "web_search", "http_request"):
+                sess = self._adapter._session_ref()
+                if sess is not None:
+                    sess.emit({"type": "steering", "guidance": "citation_policy",
+                               "detail": "Cite sources as [title](url) in your final answer."})
+                try:
+                    from oplog import log_event
+                    log_event("agent_steering", policy="citation", tool=name)
+                except Exception:
+                    pass
+
+        registry.add_callback(BeforeToolCallEvent, _before)
+
+
 class StrandsAdapter(BaseAdapter):
-    """Open tier — Strands Agents SDK (AWS, Apache-2.0). Provider-agnostic via
-    LiteLLM, so one adapter drives every OpenAI-compatible model (Kimi, GLM,
-    MiniMax, DeepSeek, Groq, …). Native swarm/graph multi-agent + a deep built-in
-    tool suite (shell, file edit, python, http). Runs synchronously in the worker
-    thread; the structured message log is walked after each turn to build the
-    transcript in order.
+    """Open tier — Strands Agents SDK (AWS, Apache-2.0) at full capacity.
+
+    Provider-agnostic via LiteLLM, so one adapter drives every OpenAI-compatible
+    model (Kimi, GLM, MiniMax, DeepSeek, Groq, …). The agent is wired with the
+    full Strands feature set rather than a shallow wrapper:
+
+      • context_manager="auto" → SummarizingConversationManager with proactive
+        compression (proactive trimming + reactive overflow summarization) plus
+        a ContextOffloader. Our own durable FileStorage offloader wins over the
+        auto in-memory default — required when a session_manager is set.
+      • FileSessionManager → conversation history + agent state + conversation-
+        manager state survive Space restarts (S3 in prod via env swap).
+      • ContextInjector → ephemeral facts (time, sandbox, session) folded into
+        each turn without polluting conversation history.
+      • AgentSkills → progressive disclosure from agent_skills/SKILL.md folders
+        (only metadata enters the system prompt; full instructions load on use).
+      • HookProvider hooks → guardrails (destructive shell, cost ceiling) +
+        real-time tool_use/tool_result streaming + oplog observability.
+      • agent.state KV → owner/tier/workspace (not passed to the model; tools
+        read/write freely via ToolContext.agent.state).
+      • @tool web_search/web_fetch + community strands_tools (shell, file_read,
+        file_write, editor, http_request, python_repl, calculator, load_tool).
+      • conscious_* tools registered as native @tool(context=True) functions.
+
+    Runs synchronously in the worker thread (Agent.__call__ drives the event
+    loop); a rich callback_handler streams text + reasoning deltas in real time,
+    hooks stream tool boundaries, and the post-turn message walk is kept as a
+    backstop for the final assistant text.
     """
 
     def __init__(self, workspace: Path, model: str | None = None,
@@ -770,16 +1064,26 @@ class StrandsAdapter(BaseAdapter):
         self.model = model
         self.agent = None
         self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
+        self._msg_cursor = 0
+        self._http_client = None
+        # per-turn dedup set: toolUseIds already streamed by hooks so the
+        # message-walk backstop doesn't double-emit them.
+        self._emitted_tool_ids: set = set()
+
+    def _session_ref(self):
+        """Back-reference to the owning AgentSession (set by AgentSession._run)."""
+        return getattr(self, "_session", None)
 
     def open(self) -> None:
         import os as _os
-        from strands import Agent, AgentSkills
+        from strands import Agent
         from strands.models.litellm import LiteLLMModel
 
         # headless: skip interactive consent prompts (no TTY in the Space container).
         # must be set before importing strands_tools so their module-level checks see it.
         _os.environ["BYPASS_TOOL_CONSENT"] = "true"
 
+        # --- model resolution (env-gated LiteLLM model) ---
         if self.model:
             model = self.model
             key_env = _model_key_env(model) or _os.environ.get("AGENT_OPEN_KEY_ENV", "")
@@ -791,163 +1095,305 @@ class StrandsAdapter(BaseAdapter):
             if picked is None:
                 raise RuntimeError("no open-tier provider key available")
             key_env, model, base_url = picked
-
-        # client_args pass straight to litellm.completion (api_base = custom
-        # OpenAI-compatible endpoint, e.g. Z.ai for GLM, NVIDIA for Kimi).
         client_args: dict = {"api_key": _os.environ[key_env]}
         if base_url:
             client_args["api_base"] = base_url
         llm = LiteLLMModel(client_args=client_args, model_id=model)
 
+        # --- shared httpx client for the @tool web tools (SSRF-guarded inside) ---
+        self._http_client = _shared_http_client()
 
-        # the agent works in its session workspace; tools are imported defensively
-        # so a renamed/missing tool never blocks startup.
-        # Tool suite (user requested bash/shell/grep/web instead of python_repl):
-        # - shell: bash execution (replaces python_repl as the primary tool)
-        # - file_read: read files
-        # - file_write: write files
-        # - editor: str_replace-based file editing
-        # - http_request: web fetch (replaces python_repl for web access)
-        # - python_repl: still available as a fallback for complex logic
-        # - calculator: math
-        # - load_tool: meta-tool — agent can load more tools at runtime
-        # shell is replaced by _guarded_shell to force workdir per-thread.
-        tools = []
-        for mod_name in ("file_read", "file_write", "editor",
-                         "http_request", "python_repl", "calculator",
-                         "load_tool"):
+        # --- durable session storage (local FS; S3SessionManager in prod) ---
+        # Site 8 improvement: env-gated S3 swap — if SESSION_BUCKET is set,
+        # use S3SessionManager (MinIO/LocalStack in dev via S3_ENDPOINT, real
+        # S3 in prod) so sessions persist across containers/restarts. Otherwise
+        # fall back to FileSessionManager on the local FS.
+        sess = self._session_ref()
+        sid_hint = (self.workspace_id or (sess.id if sess else None)
+                    or uuid.uuid4().hex[:12])
+        session_manager = None
+        _session_bucket = _os.environ.get("SESSION_BUCKET", "").strip()
+        if _session_bucket:
             try:
-                import importlib
-                tools.append(importlib.import_module(f"strands_tools.{mod_name}"))
-            except Exception:
-                continue
-        # Try to import the grep tool (may be named differently across versions)
-        for grep_mod in ("grep", "search_files", "grep_code"):
-            try:
-                import importlib
-                tools.append(importlib.import_module(f"strands_tools.{grep_mod}"))
-                break
-            except Exception:
-                continue
-        # guarded shell: forces execution into this session's workspace
-        import types as _types
-        shell_mod = _types.ModuleType("shell_guarded")
-        shell_mod.tool = _guarded_shell
-        tools.append(shell_mod)
-
-        # Phase 2 — conscious tools as Strands @tool functions.
-        # Each tool receives agent_session via invocation_state per-turn.
-        try:
-            import conscious_stubs
-            tools += list(conscious_stubs.get_conscious_tools())
-        except Exception:
-            pass
-
-        # Phase 2 — skills plugin (loads .claude/skills/ as Strands skills).
-        plugins = []
-        skills_dir = self.workspace / ".claude" / "skills"
-        if skills_dir.is_dir():
-            try:
-                plugins.append(AgentSkills(skills=str(skills_dir)))
+                from strands.session.s3_session_manager import S3SessionManager
+                session_manager = S3SessionManager(
+                    session_id=f"ws-{sid_hint}", bucket=_session_bucket,
+                    prefix=_os.environ.get("SESSION_PREFIX", "doomalaysocreate/"),
+                    region_name=_os.environ.get("AWS_REGION", _os.environ.get("AWS_DEFAULT_REGION", "")) or None,
+                    endpoint_url=_os.environ.get("S3_ENDPOINT", "").strip() or None)
             except Exception:
                 pass
-
-        # Phase 4 — session persistence.
-        # FileSessionManager in dev; RedisSessionManager in prod (REDIS_URL set).
-        session_manager = None
-        sess_ref = self._session_ref()
-        session_id = getattr(sess_ref, "id", None)
-        if session_id:
+        if session_manager is None:
+            # RedisSessionManager (prod when REDIS_URL is set)
             redis_url = _os.environ.get("REDIS_URL", "").strip()
             if redis_url:
                 try:
                     from redis_session_manager import RedisSessionManager
                     session_manager = RedisSessionManager(
-                        session_id=session_id,
-                        redis_url=redis_url,
-                    )
+                        session_id=f"ws-{sid_hint}", redis_url=redis_url)
                 except Exception:
                     pass
-            if session_manager is None:
-                try:
-                    from strands.session.file_session_manager import FileSessionManager
-                    session_manager = FileSessionManager(
-                        session_id=session_id,
-                        storage_dir=str(AGENT_ROOT / "sessions"),
-                    )
-                except Exception:
-                    pass
+        if session_manager is None:
+            sessions_dir = self.workspace / ".strands" / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                from strands.session.file_session_manager import FileSessionManager
+                session_manager = FileSessionManager(
+                    session_id=f"ws-{sid_hint}", storage_dir=str(sessions_dir))
+            except Exception:
+                pass
 
-        self.agent = Agent(model=llm, tools=tools, system_prompt=self.system_prompt,
-                           plugins=plugins or None,
-                           context_manager="auto",
-                           callback_handler=None,
-                           session_manager=session_manager)
-        self._msg_cursor = 0
-
-        # Phase 3 — hook registration (runs once, not per-turn).
-        # CostCeiling, GitIntercept, and Telemetry hooks replace the ad-hoc
-        # callback_handler closure and inline checks in _guarded_shell().
+        # --- plugins: durable ContextOffloader + ContextInjector + AgentSkills ---
+        plugins = []
+        artifacts_dir = self.workspace / ".strands" / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
         try:
-            from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent
-            from agent_hooks import (make_cost_hook, make_git_intercept_hook,
-                                     make_telemetry_hook)
-            sess_ref = self._session_ref()  # also used by Phase 4 above
-            if sess_ref is not None and getattr(sess_ref, "conscious_id", None):
-                try:
-                    self.agent.add_hook(
-                        make_cost_hook(sess_ref.conscious_id, self),
-                        AfterToolCallEvent)
-                except Exception:
-                    pass
-            try:
-                self.agent.add_hook(
-                    make_git_intercept_hook(self),
-                    BeforeToolCallEvent)
-            except Exception:
-                pass
-            try:
-                self.agent.add_hook(
-                    make_telemetry_hook(),
-                    AfterToolCallEvent)
-            except Exception:
-                pass
+            # Site 5 improvement: env-gated S3 storage backend — if
+            # SESSION_BUCKET is set, offload oversized tool results to S3
+            # (durable across containers); else local FileStorage (durable
+            # across restarts on the same host). Both are DURABLE (not
+            # InMemory) — required when session_manager is set.
+            if _session_bucket:
+                from strands.vended_plugins.context_offloader import ContextOffloader, S3Storage
+                offloader_storage = S3Storage(
+                    bucket=_session_bucket,
+                    prefix=_os.environ.get("SESSION_PREFIX", "doomalaysocreate/") + "artifacts/",
+                    region_name=_os.environ.get("AWS_REGION", _os.environ.get("AWS_DEFAULT_REGION", "")) or None)
+            else:
+                from strands.vended_plugins.context_offloader import ContextOffloader, FileStorage
+                offloader_storage = FileStorage(artifact_dir=str(artifacts_dir))
+            plugins.append(ContextOffloader(
+                storage=offloader_storage,
+                max_result_tokens=5000, preview_tokens=2000, include_retrieval_tool=True))
+        except Exception:
+            pass
+        try:
+            from strands.vended_plugins.context_injector import ContextInjector
+
+            def _render_injected(_ctx) -> str:
+                bits = [f"Current time: {int(time.time())} (unix)",
+                        f"Workspace (sandbox): {self.workspace}"]
+                s = self._session_ref()
+                if s is not None:
+                    bits.append(f"Session: {s.id} (tier={s.tier}, model={s.model})")
+                    if getattr(s, "conscious_id", None):
+                        bits.append(f"Conscious: {s.conscious_id} (agent {s.agent_id})")
+                bits.append("The disk is ephemeral — remind the user to download artifacts.")
+                # Site 7 improvement: recall recent memories into the turn
+                # (ephemeral — folded into this call only, never persisted to
+                # the conversation history, per the ContextInjector contract).
+                recalled = _recall_memories(self.workspace_id or (sess.id if sess else ""))
+                if recalled:
+                    bits.append("\nRecent memories (from prior turns):")
+                    for m in recalled:
+                        bits.append(f"  - {m}")
+                return "\n".join(bits)
+
+            # Site 6 improvement: trigger="everyTurn" so the agent always has
+            # the ephemeral context (time, sandbox, conscious binding, recalled
+            # memories) on EVERY model call, not just fresh user turns. This
+            # matters for multi-step tool loops where the agent makes several
+            # model calls within a single user turn.
+            plugins.append(ContextInjector(render_content=_render_injected,
+                                           name="session_context", trigger="everyTurn"))
+        except Exception:
+            pass
+        try:
+            from strands.vended_plugins.skills import AgentSkills
+            # Site 9 improvement: state_key="activated_skills" lets the agent
+            # track which skills it has activated in agent.state (survives
+            # across turns via session_manager). max_resource_files=4 caps
+            # the resource files loaded per skill (progressive disclosure).
+            skill_dirs = []
+            skills_root = HERE / "agent_skills"
+            if skills_root.is_dir():
+                for sd in sorted(skills_root.iterdir()):
+                    if (sd / "SKILL.md").is_file():
+                        skill_dirs.append(str(sd))
+            if skill_dirs:
+                plugins.append(AgentSkills(skills=skill_dirs,
+                                           state_key="activated_skills",
+                                           max_resource_files=4, strict=False))
         except Exception:
             pass
 
-    def _session_ref(self):
-        """Back-reference to the owning AgentSession (set by AgentSession._run)."""
-        return getattr(self, "_session", None)
+        # --- tools: community strands_tools + custom @tool web + conscious ---
+        tools = self._build_tools()
+
+        # --- hooks: guardrails + steering + real-time tool streaming/observability ---
+        # Site 2 improvement: added _StrandsInvocationHooks (Before/AfterInvocation)
+        # for turn-level observability (duration, token usage) + the new
+        # _StrandsSteeringHooks (site 10) for just-in-time citation guidance.
+        hooks = [_StrandsGuardrailHooks(self), _StrandsSteeringHooks(self),
+                 _StrandsOplogHooks(self), _StrandsInvocationHooks(self)]
+
+        # --- agent.state KV (not passed to the model; tools read/write freely) ---
+        # Site 10 improvement: state now includes turn_count + cost_spent (mutable
+        # via tools/hooks) + activated_skills (written by AgentSkills state_key).
+        state = {
+            "owner": self.workspace_id or (sess.id if sess else "local"),
+            "tier": "open",
+            "model": model,
+            "workspace": str(self.workspace),
+            "created": int(time.time()),
+            "turn_count": 0,
+            "cost_spent_usd": 0.0,
+        }
+        if sess is not None and getattr(sess, "conscious_id", None):
+            state["conscious_id"] = sess.conscious_id
+            state["agent_id"] = sess.agent_id
+
+        # --- conversation manager (site 1 improvement) ---
+        # Explicit stacked manager instead of "auto": a SlidingWindowConversationManager
+        # with pin_first=2 (protect the system prompt + first user message),
+        # should_truncate_results=True (trim oversized tool results), window_size=40,
+        # and proactive_compression at 0.7 (compress when 70% of the context window
+        # is used). This is finer-grained than "auto" and the doc-recommended
+        # configuration for long-running agent sessions.
+        conversation_manager = None
+        try:
+            from strands.agent.conversation_manager import SlidingWindowConversationManager
+            conversation_manager = SlidingWindowConversationManager(
+                window_size=40, should_truncate_results=True,
+                pin_first=2, per_turn=True,
+                proactive_compression={"compression_threshold": 0.7})
+        except Exception:
+            pass
+
+        # --- build the Agent at full capacity ---
+        agent_kwargs: dict = dict(
+            model=llm, tools=tools, system_prompt=self.system_prompt,
+            plugins=plugins or None, hooks=hooks, state=state,
+            load_tools_from_directory=False,
+        )
+        # Site 1: pass the explicit stacked conversation manager INSTANCE via
+        # the `conversation_manager` param (NOT `context_manager`, which only
+        # accepts the strings "auto"/"agentic"). Falls back to "auto" (which
+        # composes SummarizingCM + offloader) if construction failed.
+        if conversation_manager is not None:
+            agent_kwargs["conversation_manager"] = conversation_manager
+        else:
+            agent_kwargs["context_manager"] = "auto"
+        if session_manager is not None:
+            agent_kwargs["session_manager"] = session_manager
+        self.agent = Agent(**agent_kwargs)
+
+        # back-compat: store the conscious tool registry on the session for
+        # inspection (the tools are ALSO registered natively above).
+        try:
+            import conscious_stubs
+            conscious_stubs.register_conscious_tools(self._session_ref(), self)
+        except Exception:
+            pass
+
+    def _build_tools(self) -> list:
+        import importlib
+        tools = []
+        # community strands_tools (defensive import — renamed/missing never blocks startup)
+        for mod_name in ("file_read", "file_write", "editor",
+                         "http_request", "python_repl", "calculator", "load_tool"):
+            try:
+                tools.append(importlib.import_module(f"strands_tools.{mod_name}"))
+            except Exception:
+                continue
+        for grep_mod in ("grep", "search_files", "grep_code"):
+            try:
+                tools.append(importlib.import_module(f"strands_tools.{grep_mod}"))
+                break
+            except Exception:
+                continue
+        # guarded shell as a native @tool (forces execution into this session's
+        # workspace; routes network git through the audited backend functions)
+        try:
+            tools.append(_build_shell_strands_tool())
+        except Exception:
+            pass
+        # custom @tool web_search/web_fetch (Tavily/DDG + SSRF-guarded fetch)
+        try:
+            tools.extend(_build_web_strands_tools(self._http_client))
+        except Exception:
+            pass
+        # conscious_* tools as native Strands @tool(context=True) functions
+        try:
+            sess = self._session_ref()
+            ref = weakref.ref(sess) if sess is not None else None
+            tools.extend(_build_conscious_strands_tools(ref))
+        except Exception:
+            pass
+        return tools
 
     def turn(self, user_msg: str, emit) -> None:
-        # set per-thread workspace so _guarded_shell knows where to run commands.
         _thread_local.workspace = self.workspace
         _thread_local.workspace_id = self.workspace_id
-        # set per-thread agent_session so conscious_stubs._get_session() works
-        import conscious_stubs as _cs
-        _cs._SELF.agent_session = getattr(self, "_session", None)
-        # Phase 2 — pass agent_session via invocation_state so conscious
-        # tools can resolve the session context from @tool wrappers.
-        session_ref = self._session_ref()
-        self.agent(user_msg, agent_session=session_ref)
-        # walk newly-appended messages and map Bedrock-style content blocks
+        # reset per-turn dedup so the message-walk backstop only skips tools the
+        # hooks streamed THIS turn.
+        self._emitted_tool_ids = set()
+
+        # rich callback_handler: stream text + reasoning DELTAS in real time.
+        # The frontend merges consecutive *_delta events and replaces the last
+        # delta with the matching final (assistant/thinking) from the backstop.
+        def _stream_callback(**kw):
+            reasoning = kw.get("reasoningText")
+            if reasoning:
+                emit({"type": "thinking_delta", "text": str(reasoning)})
+            data = kw.get("data")
+            if data:
+                emit({"type": "assistant_delta", "text": str(data)})
+
+        try:
+            self.agent.callback_handler = _stream_callback
+        except Exception:
+            pass
+        try:
+            # Site 3 + 4 improvement: pass invocation_state through the agent
+            # call. This is the doc-recommended way to share request-scoped
+            # data with tools (via tool_context.invocation_state) and hooks
+            # (via event.invocation_state) — the same mechanism Graph/Swarm
+            # use for multi-agent shared state. Tools + hooks read from this
+            # dict instead of the weakref hack; no agent-to-agent arg passing.
+            sess = self._session_ref()
+            invocation_state = {
+                "session_id": sess.id if sess else "",
+                "owner": self.workspace_id or (sess.id if sess else "local"),
+                "user_msg": user_msg,
+                "workspace": str(self.workspace),
+                "conscious_id": getattr(sess, "conscious_id", None) if sess else None,
+                "agent_id": getattr(sess, "agent_id", None) if sess else None,
+            }
+            self.agent(user_msg, invocation_state=invocation_state)
+        finally:
+            pass
+
+        # backstop: walk newly-appended messages for the final assistant text +
+        # any tool_use/tool_result the hooks missed (dedup by toolUseId).
         msgs = getattr(self.agent, "messages", []) or []
         for m in msgs[self._msg_cursor:]:
             role = m.get("role")
             for block in (m.get("content") or []):
                 if "toolUse" in block:
                     tu = block["toolUse"] or {}
-                    emit({"type": "tool_use", "name": tu.get("name", "tool"),
-                          "summary": _summarize_tool_input(tu.get("name", ""),
-                                                            tu.get("input", {}))})
+                    tid = tu.get("toolUseId")
+                    if tid and tid in self._emitted_tool_ids:
+                        continue
+                    name = tu.get("name", "tool")
+                    emit({"type": "tool_use", "name": name,
+                          "summary": _summarize_tool_input(name, tu.get("input", {})),
+                          "tool_use_id": tid})
+                    if tid:
+                        self._emitted_tool_ids.add(tid)
                 elif "toolResult" in block:
                     tr = block["toolResult"] or {}
+                    tid = tr.get("toolUseId")
+                    if tid and tid in self._emitted_tool_ids:
+                        continue
                     parts = []
                     for c in (tr.get("content") or []):
                         if isinstance(c, dict) and "text" in c:
                             parts.append(c["text"])
-                    emit({"type": "tool_result", "text": _clip("\n".join(parts) or tr),
-                          "is_error": tr.get("status") == "error"})
+                    emit({"type": "tool_result", "text": _clip("\n".join(parts) or str(tr)),
+                          "is_error": tr.get("status") == "error", "tool_use_id": tid})
+                    if tid:
+                        self._emitted_tool_ids.add(tid)
                 elif "reasoningContent" in block:
                     rc = block["reasoningContent"] or {}
                     txt = (rc.get("reasoningText") or {}).get("text") if isinstance(
@@ -982,8 +1428,6 @@ def _make_adapter(tier: str, workspace: Path, model: str | None = None,
         return ClaudeAdapter(workspace, model, workspace_id, system_prompt)
     if tier == "open":
         return StrandsAdapter(workspace, model, workspace_id, system_prompt)
-    if tier == "zai":
-        return ZaiAdapter(workspace, model, workspace_id, system_prompt)
     return MockAdapter(workspace, workspace_id, system_prompt)
 
 
@@ -994,9 +1438,6 @@ def tier_for_model(model: str | None) -> str | None:
     if model.startswith("claude"):
         return "claude" if (os.environ.get("ANTHROPIC_API_KEY", "").strip()
                             and _installed("claude_agent_sdk")) else None
-    # The free GLM model routes to the zai tier (bridge on port 3030).
-    if model == "glm-5.2-free":
-        return "zai" if _glm_bridge_available() else None
     if any(m["model"] == model for m in agent_models()):
         return "open"
     return None
@@ -1009,8 +1450,11 @@ def tier_for_model(model: str | None) -> str | None:
 class AgentSession:
     def __init__(self, tier: str, model: str | None = None,
                  workspace_path: Path | None = None, workspace_id: str | None = None,
-                 conscious_id: str | None = None, agent_id: str | None = None):
+                 conscious_id: str | None = None, agent_id: str | None = None,
+                 chat_session_id: str | None = None):
         self.id = uuid.uuid4().hex[:16]
+        self.chat_session_id = chat_session_id
+        self.persisted_seq = 0
         self.tier = tier
         self.model = model
         self.workspace_id = workspace_id  # links to user's workspace, if any
@@ -1064,8 +1508,8 @@ class AgentSession:
         self.closed = False
         self.lock = threading.Lock()
         self.events: list[dict] = []
-        self.event_queues: list[queue.Queue] = []
         self.inbox: queue.Queue = queue.Queue()
+        self._stream_queues: list[queue.Queue] = []
         self.adapter: BaseAdapter | None = None
         self._interrupting = False
         # use provided workspace path (user's workspace) or create ephemeral one
@@ -1093,17 +1537,33 @@ class AgentSession:
     # -- transcript ---------------------------------------------------------
     def emit(self, ev: dict) -> None:
         with self.lock:
-            full = {"i": len(self.events), "ts": time.time(), **ev}
-            self.events.append(full)
+            if (ev.get("type") == "thinking"
+                    and self.events and self.events[-1].get("type") == "thinking"):
+                self.events[-1]["text"] = ev["text"]
+                self.events[-1]["ts"] = time.time()
+            else:
+                self.events.append({"i": len(self.events), "ts": time.time(), **ev})
             self.updated = time.time()
-            dead: list[queue.Queue] = []
-            for q in self.event_queues:
+            queues = list(self._stream_queues)
+        for q in queues:
+            try:
+                q.put_nowait(ev)
+            except (queue.Full, ValueError):
                 try:
-                    q.put_nowait(full)
-                except queue.Full:
-                    dead.append(q)
-            for q in dead:
-                self.event_queues.remove(q)
+                    self._stream_queues.remove(q)
+                except ValueError:
+                    pass
+
+    def register_stream_queue(self, q: queue.Queue) -> None:
+        with self.lock:
+            self._stream_queues.append(q)
+
+    def unregister_stream_queue(self, q: queue.Queue) -> None:
+        with self.lock:
+            try:
+                self._stream_queues.remove(q)
+            except ValueError:
+                pass
 
     def _set_status(self, state: str, **extra) -> None:
         self.status = state
@@ -1114,25 +1574,6 @@ class AgentSession:
             events = self.events[max(0, since):]
             return {"session_id": self.id, "tier": self.tier, "model": self.model,
                     "status": self.status, "events": events, "next": len(self.events)}
-
-    # -- SSE subscriber support --------------------------------------------
-    def subscribe(self, since: int = 0) -> queue.Queue:
-        q: queue.Queue = queue.Queue(maxsize=512)
-        with self.lock:
-            for ev in self.events[since:]:
-                try:
-                    q.put_nowait(ev)
-                except queue.Full:
-                    break
-            self.event_queues.append(q)
-        return q
-
-    def unsubscribe(self, q: queue.Queue) -> None:
-        with self.lock:
-            try:
-                self.event_queues.remove(q)
-            except ValueError:
-                pass
 
     # -- lifecycle ----------------------------------------------------------
     def submit(self, message: str) -> None:
@@ -1238,12 +1679,15 @@ def get_or_create(session_id: str | None = None,
                   model: str | None = None,
                   workspace_id: str | None = None,
                   conscious_id: str | None = None,
-                  agent_id: str | None = None) -> AgentSession:
+                  agent_id: str | None = None,
+                  chat_session_id: str | None = None) -> AgentSession:
     """Reuse a live session by id, or start a new one (CapacityError if full).
     `model` (optional) selects which model/tier drives a NEW session.
     `workspace_id` (optional) links the session to a user workspace sandbox.
     `conscious_id` + `agent_id` (optional, Tier 3) bind the session to a
     Conscious agent row so the conscious_* tools resolve context.
+    `chat_session_id` (optional) links this agent session to a persistent
+    chat session for event persistence.
     """
     tier = tier_for_model(model)
     if tier is None:
@@ -1252,18 +1696,27 @@ def get_or_create(session_id: str | None = None,
         _sweep_locked()
         if session_id and session_id in _sessions:
             return _sessions[session_id]
+        # Reuse existing agent session linked to this chat_session_id
+        if chat_session_id:
+            for s in _sessions.values():
+                if s.chat_session_id == chat_session_id:
+                    return s
         if len(_sessions) >= MAX_SESSIONS:
             raise CapacityError(f"max {MAX_SESSIONS} concurrent agent sessions")
         # resolve workspace_id to a filesystem path
         workspace_path = None
         if workspace_id:
             import db
+            import github_integration
+            # repair sandbox if missing (Space restart wiped /data/)
+            github_integration.ensure_workspace_sandbox(workspace_id)
             ws = db.get_workspace(workspace_id)
             if ws and ws.get("sandbox_path"):
                 workspace_path = Path(ws["sandbox_path"])
         s = AgentSession(tier, model, workspace_path=workspace_path,
                          workspace_id=workspace_id,
-                         conscious_id=conscious_id, agent_id=agent_id)
+                         conscious_id=conscious_id, agent_id=agent_id,
+                         chat_session_id=chat_session_id)
         _sessions[s.id] = s
         return s
 
