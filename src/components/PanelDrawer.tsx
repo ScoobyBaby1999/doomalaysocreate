@@ -6,6 +6,8 @@ interface PanelInvocation {
   task_name: string;
   invoke_id: string;
   prompt: string;
+  status?: string;
+  panel?: string[];
   snapshot?: PanelSnapshot;
   error?: string;
 }

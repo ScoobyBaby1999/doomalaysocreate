@@ -835,6 +835,12 @@ export function ModelSelectOverlay() {
     [condensedSelect]
   );
 
+  const visibleProviders = useMemo(() => {
+    if (pricingFilter === "free")
+      return providers.filter((p) => p.name !== "opencode-go");
+    return providers;
+  }, [providers, pricingFilter]);
+
   const filteredCount = useMemo(() => {
     const target = pricingFilter === "free" ? visibleProviders : providers;
     if (!searchQuery.trim() && activeFilters.length === 0 && contextMin === 0)
@@ -867,12 +873,6 @@ export function ModelSelectOverlay() {
     }
     return null;
   }, [selectedModelId, providers, condensedModels]);
-
-  const visibleProviders = useMemo(() => {
-    if (pricingFilter === "free")
-      return providers.filter((p) => p.name !== "opencode-go");
-    return providers;
-  }, [providers, pricingFilter]);
 
   const anyFilterActive = activeFilters.length > 0 || contextMin > 0;
 

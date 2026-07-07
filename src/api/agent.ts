@@ -10,7 +10,9 @@ import { ApiError } from "./panel";
 export type AgentEvent =
   | { i: number; ts: number; type: "user"; text: string }
   | { i: number; ts: number; type: "assistant"; text: string }
+  | { i: number; ts: number; type: "assistant_delta"; text: string }
   | { i: number; ts: number; type: "thinking"; text: string }
+  | { i: number; ts: number; type: "thinking_delta"; text: string }
   | { i: number; ts: number; type: "tool_use"; name: string; summary: string }
   | { i: number; ts: number; type: "tool_result"; text: string; is_error: boolean }
   | {
