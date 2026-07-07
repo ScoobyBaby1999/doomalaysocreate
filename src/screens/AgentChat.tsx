@@ -167,7 +167,7 @@ export function AgentChat({
         const idx = prev.length - 1;
         if (idx >= 0 && prev[idx].type === ev.type) {
           const updated = [...prev];
-          updated[idx] = { ...updated[idx], text: updated[idx].text + ev.text };
+          updated[idx] = { ...updated[idx], text: (updated[idx] as { text: string }).text + ev.text } as AgentEvent;
           return updated;
         }
         return [...prev, ev];

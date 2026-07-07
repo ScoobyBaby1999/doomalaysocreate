@@ -34,6 +34,13 @@ export type AgentEvent =
       panel?: string[];
       snapshot?: PanelSnapshot;
       error?: string;
+    }
+  | {
+      i: number;
+      ts: number;
+      type: "steering";
+      guidance: string;
+      detail: string;
     };
 
 export type AgentStatus = "starting" | "idle" | "running" | "error";
