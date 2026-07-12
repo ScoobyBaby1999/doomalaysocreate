@@ -87,7 +87,11 @@ export interface ChatSession {
 }
 
 export class AgentClient {
-  constructor(private settings: Settings) {}
+  private settings: Settings;
+
+  constructor(settings: Settings) {
+    this.settings = settings;
+  }
 
   private async bearer(windowsBack = 0): Promise<string> {
     if (this.settings.rotationSecret) return deriveToken(this.settings.rotationSecret, windowsBack);
@@ -163,26 +167,14 @@ export class AgentClient {
     );
   }
 
-  /** Poll the transcript; `since` is the cursor returned as `next` last time.
-   *  NOTE: Session ID is in the URL path (not a header) because GET requests can't
-   *  have bodies. Backend logs should redact session IDs to prevent leakage via
-   *  proxy/CDN access logs. A future improvement could use short-lived signed tokens. */
+  /** Poll the transcript; `since` is the cursor returned as `next` last time. */
   poll(sessionId: string, since: number) {
     return this.req<AgentSnapshot>(`/api/agent/${sessionId}?since=${since}`);
   }
 
   /**
    * SSE stream for live agent events. Returns an AbortController that the
-   * caller can use to disconnect.  onEvent is called for each SSE data frame
-   * parsed as AgentEvent.
-   *
-   * Uses fetch() + ReadableStream so the Authorization header is set normally
-   * (no token leakage into URL query params or server access logs).
-   *
-   * NOTE: The older EventSource-based overload (no args) is NOT compatible.
-   * Callers MUST migrate to the new signature:
-   *   const ac = client.stream(sid, since, onEvent, onError?);
-   *   // later: ac.abort();
+   * caller can use to disconnect.
    */
   stream(
     sessionId: string,
@@ -268,16 +260,16 @@ export class AgentClient {
     );
   }
 
-  // -- chat session persistence -----------------------------------------------
+  // -- chat session persistence -------------------------------------------
 
   listChatSessions() {
     return this.req<{ sessions: ChatSession[] }>("/api/chat/sessions");
   }
 
-  createChatSession(title?: string) {
+  createChatSession(title?: string, model?: string) {
     return this.req<ChatSession>("/api/chat/sessions", {
       method: "POST",
-      body: JSON.stringify({ title: title || "New Chat" }),
+      body: JSON.stringify({ title: title || "New Chat", model }),
     });
   }
 
@@ -300,8 +292,20 @@ export class AgentClient {
     );
   }
 
-  /** Download an artifact. Plain <a href> can't carry the bearer, so we fetch
-   *  the bytes ourselves and trigger a download from an object URL. */
+  /** Persist events to a chat session (batch append for delta-sync). */
+  async persistEvents(sessionId: string, events: AgentEvent[]): Promise<void> {
+    if (!events.length) return;
+    try {
+      await this.raw(`/api/chat/sessions/${sessionId}/persist`, {
+        method: "POST",
+        body: JSON.stringify({ events }),
+      });
+    } catch {
+      // Non-fatal: events will be re-fetched from DB on next load
+    }
+  }
+
+  /** Download an artifact. */
   async download(sessionId: string, path: string): Promise<void> {
     const r = await this.raw(`/api/agent/${sessionId}/file?path=${encodeURIComponent(path)}`);
     if (!r.ok) throw new ApiError(r.status, `download failed (HTTP ${r.status})`);
