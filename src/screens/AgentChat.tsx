@@ -7,9 +7,6 @@ import { ChatMessageBubble } from "../components/ChatMessageBubble";
 import { SessionSidebar } from "../components/SessionSidebar";
 import { FileDrawer } from "../components/FileDrawer";
 import { PanelDrawer, type PanelInvocation } from "../components/PanelDrawer";
-import { GitStatus } from "../components/GitStatus";
-
-const EFFORTS: Array<"low" | "med" | "high" | "max"> = ["low", "med", "high", "max"];
 
 export function AgentChat({ settings }: { settings: Settings }) {
   // Model store
@@ -23,13 +20,24 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const modelDisplay = (() => {
     if (!selectedModelId) return null;
     for (const p of providers) {
-      const m = p.models.find((m) => m.id === selectedModelId || m.slotId === selectedSlotId);
-      if (m) return { label: m.displayName || m.id, color: p.color || "#5b8cff" };
+      const m = p.models.find(
+        (m) => m.id === selectedModelId || m.slotId === selectedSlotId,
+      );
+      if (m)
+        return {
+          label: m.displayName || m.id,
+          color: p.color || "#5b8cff",
+        };
     }
-    return { label: selectedModelId.split("/").pop() || selectedModelId, color: "#5b8cff" };
+    return {
+      label: selectedModelId.split("/").pop() || selectedModelId,
+      color: "#5b8cff",
+    };
   })();
 
-  // Get the actual model ID to send to backend (physical slot ID preferred)
+  // The model ID to send to the backend. Prefer the physical slot ID
+  // ("provider/model"), fall back to the logical ID. The backend resolves
+  // either form (see _handle_agent_post).
   const effectiveModelId = selectedSlotId || selectedModelId;
 
   // Chat store
@@ -52,6 +60,8 @@ export function AgentChat({ settings }: { settings: Settings }) {
     panelInvocations,
     sidebarOpen,
     cost,
+    queue,
+    isLoadingMessages,
     setInputText,
     setEffort,
     toggleWebSearch,
@@ -63,8 +73,10 @@ export function AgentChat({ settings }: { settings: Settings }) {
     createSession,
     switchSession,
     deleteSession,
+    renameSession,
     sendMessage,
     stopGeneration,
+    dequeueMessage,
   } = store;
 
   // Refs
@@ -72,32 +84,41 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastUserMsgRef = useRef("");
+  const stickToBottomRef = useRef(true);
 
-  // Keep client fresh
+  // Keep client fresh when settings change
   clientRef.current = new AgentClient(settings);
 
-  // Auto-scroll to bottom when messages change
+  // Auto-scroll behavior: only stick to bottom if the user is already there.
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    stickToBottomRef.current = atBottom;
+  }, []);
+
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && stickToBottomRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, isStreaming]);
 
-  // Load sessions on mount
+  // Load sessions on mount (auto-restores active session if any).
   useEffect(() => {
     loadSessions(clientRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Handle send
+  // Handle send — note the store handles queueing when busy.
   const handleSend = useCallback(
     async (text?: string) => {
       const msg = (text ?? inputText).trim();
-      if (!msg || isBusy) return;
+      if (!msg) return;
       lastUserMsgRef.current = msg;
       await sendMessage(clientRef.current, msg, effectiveModelId || undefined);
     },
-    [inputText, isBusy, effectiveModelId, sendMessage]
+    [inputText, effectiveModelId, sendMessage],
   );
 
   // Handle stop
@@ -111,7 +132,8 @@ export function AgentChat({ settings }: { settings: Settings }) {
     inputRef.current?.focus();
   }, [createSession, effectiveModelId]);
 
-  // Handle keydown
+  // Handle keydown — Enter sends, Shift+Enter newlines. While busy, Enter
+  // queues instead of being disabled.
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -119,7 +141,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
         handleSend();
       }
     },
-    [handleSend]
+    [handleSend],
   );
 
   // Auto-resize textarea
@@ -128,25 +150,28 @@ export function AgentChat({ settings }: { settings: Settings }) {
       setInputText(e.target.value);
       const el = e.target;
       el.style.height = "auto";
-      el.style.height = Math.min(el.scrollHeight, 120) + "px";
+      el.style.height = Math.min(el.scrollHeight, 160) + "px";
     },
-    [setInputText]
+    [setInputText],
   );
 
   // Settings panel
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const running = isBusy && (status === "running" || status === "starting");
+  const queueCount = queue.length;
 
   return (
-    <div className="flex flex-col h-full relative bg-background">
+    <div className="flex flex-col h-full relative bg-bg">
       {/* Header */}
-      <header className="flex items-center gap-2 px-3 h-11 border-b border-border shrink-0 bg-card/50">
+      <header className="flex items-center gap-2 px-3 h-11 border-b border-border shrink-0 bg-surface/50">
         {/* Session menu toggle */}
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
           className={`p-1.5 rounded-md transition-colors ${
-            sidebarOpen ? "text-accent bg-accent/10" : "text-muted-foreground hover:text-foreground hover:bg-muted"
+            sidebarOpen
+              ? "text-accent bg-accent/10"
+              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
           }`}
           title="Chat sessions"
         >
@@ -157,11 +182,19 @@ export function AgentChat({ settings }: { settings: Settings }) {
           </svg>
         </button>
 
+        {/* Active session title (truncated) */}
+        <div className="text-[12.5px] font-medium text-foreground truncate max-w-[140px]">
+          {activeSessionId
+            ? sessions.find((s) => s.id === activeSessionId)?.title || "New Chat"
+            : "New Chat"}
+        </div>
+
         {/* Model selector */}
         <button
           onClick={() => !running && openOverlay()}
           disabled={running}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border hover:border-accent transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed max-w-[200px]"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[200px] ml-auto"
+          title={selectedProviderName || "Select model"}
         >
           <span
             className="w-2 h-2 rounded-full shrink-0"
@@ -170,31 +203,33 @@ export function AgentChat({ settings }: { settings: Settings }) {
           <span className="truncate text-accent">
             {modelDisplay?.label || "Select model"}
           </span>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground shrink-0">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
         </button>
 
         {/* Cost indicator */}
-        {cost != null && (
+        {cost != null && cost > 0 && (
           <span className="text-[10px] text-muted-foreground tabular-nums">
             ${cost.toFixed(4)}
           </span>
         )}
 
-        {/* Spacer */}
-        <div className="flex-1" />
-
-        {/* Status */}
+        {/* Status pill */}
         {running && (
-          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <div className="flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
             <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
             <span className="capitalize">{status}</span>
           </div>
         )}
 
-        {/* Action buttons */}
+        {/* Files */}
         <button
           onClick={() => setFileDrawerOpen(!fileDrawerOpen)}
           className={`p-1.5 rounded-md transition-colors ${
-            fileDrawerOpen ? "text-accent bg-accent/10" : "text-muted-foreground hover:text-foreground hover:bg-muted"
+            fileDrawerOpen
+              ? "text-accent bg-accent/10"
+              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
           }`}
           title="Files"
         >
@@ -207,7 +242,9 @@ export function AgentChat({ settings }: { settings: Settings }) {
         <button
           onClick={() => setPanelDrawerOpen(!panelDrawerOpen)}
           className={`p-1.5 rounded-md transition-colors ${
-            panelDrawerOpen ? "text-accent bg-accent/10" : "text-muted-foreground hover:text-foreground hover:bg-muted"
+            panelDrawerOpen
+              ? "text-accent bg-accent/10"
+              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
           }`}
           title="Panel invocations"
         >
@@ -219,9 +256,9 @@ export function AgentChat({ settings }: { settings: Settings }) {
         {running ? (
           <button
             onClick={handleStop}
-            className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-md bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors font-medium"
+            className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-md bg-red-500/15 text-red-300 hover:bg-red-500/25 transition-colors font-medium shrink-0"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
               <rect x="6" y="6" width="12" height="12" rx="1" />
             </svg>
             Stop
@@ -229,9 +266,9 @@ export function AgentChat({ settings }: { settings: Settings }) {
         ) : (
           <button
             onClick={handleNewSession}
-            className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-md bg-accent/10 text-accent hover:bg-accent/20 transition-colors font-medium"
+            className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-md bg-accent/15 text-accent hover:bg-accent/25 transition-colors font-medium shrink-0"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <line x1="12" y1="5" x2="12" y2="19" />
               <line x1="5" y1="12" x2="19" y2="12" />
             </svg>
@@ -243,41 +280,92 @@ export function AgentChat({ settings }: { settings: Settings }) {
       {/* Messages area */}
       <div
         ref={scrollRef}
+        onScroll={handleScroll}
         className="flex-1 overflow-y-auto min-h-0 scroll-smooth"
       >
-        {messages.length === 0 && !isBusy ? (
+        {isLoadingMessages && messages.length === 0 ? (
+          <div className="flex items-center justify-center h-full">
+            <div className="flex items-center gap-2 text-muted-foreground text-[12px]">
+              <div className="w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+              Loading chat…
+            </div>
+          </div>
+        ) : messages.length === 0 && !isBusy ? (
           <EmptyState onSend={handleSend} />
         ) : (
-          <div className="py-4 space-y-1">
+          <div className="py-3 max-w-3xl mx-auto">
             {messages.map((msg) => (
               <ChatMessageBubble key={msg.id} message={msg} />
             ))}
 
-            {/* Typing indicator */}
-            {running && messages.length > 0 && messages[messages.length - 1].role === "user" && (
-              <div className="px-4 py-3">
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <span className="flex gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "0ms" }} />
-                    <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "150ms" }} />
-                    <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "300ms" }} />
-                  </span>
-                  <span className="text-[12px]">Thinking...</span>
+            {/* Typing indicator — only when the latest message is a user
+                message and we haven't received the first delta yet. */}
+            {running &&
+              messages.length > 0 &&
+              messages[messages.length - 1].role === "user" && (
+                <div className="px-4 py-2.5">
+                  <div className="flex items-center gap-2.5">
+                    <div className="shrink-0 w-7 h-7 rounded-md bg-accent/15 flex items-center justify-center">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5b8cff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 2a10 10 0 0 1 10 10c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2z" />
+                        <path d="M12 16v-4" />
+                        <path d="M12 8h.01" />
+                      </svg>
+                    </div>
+                    <span className="flex gap-1 items-center h-4">
+                      <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: "0ms" }} />
+                      <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: "150ms" }} />
+                      <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: "300ms" }} />
+                    </span>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
           </div>
         )}
       </div>
 
+      {/* Queue indicator (1-up: shows pending messages while LLM is busy) */}
+      {queueCount > 0 && (
+        <div className="border-t border-border bg-accent/5 px-3 py-2 shrink-0">
+          <div className="flex items-center gap-2 text-[11.5px] text-accent">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse">
+              <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+            </svg>
+            <span className="font-medium">
+              {queueCount} message{queueCount !== 1 ? "s" : ""} queued
+            </span>
+            <div className="flex-1 truncate text-muted-foreground/80">
+              Next: {queue[0]?.text.slice(0, 80)}
+              {queue[0] && queue[0].text.length > 80 ? "…" : ""}
+            </div>
+            <button
+              onClick={() => queue.forEach((q) => dequeueMessage(q.id))}
+              className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-surface2 transition-colors"
+              title="Clear queue"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Error banner */}
       {error && (
-        <div className="border-t border-destructive/30 bg-destructive/10 px-4 py-2.5 text-sm text-destructive flex items-center gap-3 shrink-0">
+        <div className="border-t border-red-500/30 bg-red-500/10 px-4 py-2.5 text-[13px] text-red-300 flex items-center gap-3 shrink-0">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+            <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
           <span className="flex-1">{error}</span>
+          <button
+            onClick={() => useChatStore.setState({ error: null })}
+            className="text-red-300/70 hover:text-red-200 px-2 py-0.5 text-[11px]"
+          >
+            dismiss
+          </button>
           {lastUserMsgRef.current && (
             <button
               onClick={() => handleSend(lastUserMsgRef.current)}
-              className="px-3 py-1 rounded-md border border-destructive/40 text-xs hover:bg-destructive/20 transition-colors shrink-0"
+              className="px-3 py-1 rounded-md border border-red-500/40 text-[11px] hover:bg-red-500/20 transition-colors shrink-0"
             >
               Retry
             </button>
@@ -286,11 +374,12 @@ export function AgentChat({ settings }: { settings: Settings }) {
       )}
 
       {/* Input area */}
-      <div className="border-t border-border bg-card/50 pt-2 pb-3 px-3 shrink-0">
+      <div className="border-t border-border bg-surface/30 pt-2 pb-3 px-3 shrink-0">
         {/* Quick settings */}
         {settingsOpen && (
           <div className="flex items-center gap-1.5 px-1 pb-2 overflow-x-auto">
-            {EFFORTS.map((e) => (
+            <span className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mr-1 shrink-0">Effort</span>
+            {(["low", "med", "high", "max"] as const).map((e) => (
               <button
                 key={e}
                 onClick={() => setEffort(e)}
@@ -303,7 +392,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
                 {e}
               </button>
             ))}
-            <div className="w-px h-4 bg-border mx-1" />
+            <div className="w-px h-4 bg-border mx-1 shrink-0" />
             <button
               onClick={toggleWebSearch}
               className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 flex items-center gap-1 ${
@@ -334,13 +423,13 @@ export function AgentChat({ settings }: { settings: Settings }) {
         )}
 
         {/* Input row */}
-        <div className="flex items-end gap-2">
+        <div className="flex items-end gap-2 max-w-3xl mx-auto">
           <button
             onClick={() => setSettingsOpen((p) => !p)}
             className={`p-2 rounded-lg transition-colors shrink-0 mb-0.5 ${
               settingsOpen
                 ? "text-accent bg-accent/10"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                : "text-muted-foreground hover:text-foreground hover:bg-surface2"
             }`}
             title="Settings"
           >
@@ -356,35 +445,47 @@ export function AgentChat({ settings }: { settings: Settings }) {
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
             rows={1}
-            placeholder="Ask the agent to build, edit, run, or pack something..."
-            disabled={isBusy}
-            className="flex-1 resize-none bg-muted border border-border rounded-xl px-3.5 py-2.5 text-[15px] leading-relaxed outline-none focus:border-accent disabled:opacity-50 min-h-[40px] max-h-[120px] transition-colors"
+            placeholder={
+              isBusy
+                ? "Queue another message… (Enter to queue, Shift+Enter for newline)"
+                : "Ask the agent to build, edit, run, or pack something…"
+            }
+            className="flex-1 resize-none bg-surface2 border border-border rounded-xl px-3.5 py-2.5 text-[14.5px] leading-relaxed outline-none focus:border-accent min-h-[40px] max-h-[160px] transition-colors placeholder:text-muted-foreground/60"
           />
 
           <button
             onClick={() => (running ? handleStop() : handleSend())}
-            disabled={!running && (isBusy || !inputText.trim())}
-            className={`h-10 px-4 rounded-xl font-medium text-sm disabled:opacity-40 disabled:cursor-not-allowed shrink-0 transition-all ${
+            disabled={!running && !inputText.trim()}
+            className={`h-10 px-4 rounded-xl font-medium text-[13px] disabled:opacity-40 disabled:cursor-not-allowed shrink-0 transition-all flex items-center gap-1.5 ${
               running
-                ? "bg-destructive/90 text-destructive-foreground hover:bg-destructive"
-                : "bg-accent text-accent-foreground hover:bg-accent/90"
+                ? "bg-red-500/90 text-white hover:bg-red-500"
+                : "bg-accent text-white hover:bg-accent/90"
             }`}
+            title={running ? "Stop" : "Send (or queue if busy)"}
           >
             {running ? (
-              <span className="flex items-center gap-1.5">
+              <>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                   <rect x="6" y="6" width="12" height="12" rx="1" />
                 </svg>
                 Stop
-              </span>
+              </>
+            ) : isBusy ? (
+              <>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                Queue
+              </>
             ) : (
-              <span className="flex items-center gap-1.5">
+              <>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="22" y1="2" x2="10" y2="14" />
                   <polygon points="22 2 15 22 10 14 2 9 22 2" />
                 </svg>
                 Send
-              </span>
+              </>
             )}
           </button>
         </div>
@@ -396,8 +497,12 @@ export function AgentChat({ settings }: { settings: Settings }) {
         sessions={sessions}
         activeId={activeSessionId}
         isLoading={false}
-        onSelect={(id) => switchSession(clientRef.current, id)}
+        onSelect={(id) => {
+          switchSession(clientRef.current, id);
+          setSidebarOpen(false);
+        }}
         onDelete={(id) => deleteSession(clientRef.current, id)}
+        onRename={(id, title) => renameSession(clientRef.current, id, title)}
         onNew={handleNewSession}
         onClose={() => setSidebarOpen(false)}
       />
@@ -414,7 +519,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
       <PanelDrawer
         open={panelDrawerOpen}
         onClose={() => setPanelDrawerOpen(false)}
-        invocations={panelInvocations}
+        invocations={panelInvocations as PanelInvocation[]}
       />
     </div>
   );
@@ -454,12 +559,13 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
           </svg>
         </div>
 
-        <h2 className="text-lg font-semibold text-foreground mb-2">
+        <h2 className="text-[17px] font-semibold text-foreground mb-2">
           What would you like to build?
         </h2>
-        <p className="text-sm text-muted-foreground mb-8 leading-relaxed">
+        <p className="text-[13px] text-muted-foreground mb-8 leading-relaxed">
           The agent works in a private workspace and can build, edit, run, or
-          pack your code. Files appear in the file drawer.
+          pack your code. Files appear in the file drawer. You can queue
+          multiple messages while it works.
         </p>
 
         {/* Suggestions */}
@@ -468,7 +574,7 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
             <button
               key={i}
               onClick={() => onSend(s)}
-              className="w-full text-left text-[13px] px-4 py-3 rounded-xl border border-border hover:border-accent/50 hover:bg-accent/5 transition-all text-muted-foreground hover:text-foreground leading-relaxed"
+              className="w-full text-left text-[12.5px] px-4 py-3 rounded-xl border border-border hover:border-accent/50 hover:bg-accent/5 transition-all text-muted-foreground hover:text-foreground leading-relaxed"
             >
               {s}
             </button>

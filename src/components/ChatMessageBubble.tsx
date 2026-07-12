@@ -25,7 +25,6 @@ function toolIcon(name: string): string {
   for (const key of Object.keys(TOOL_ICONS)) {
     if (k.includes(key)) return TOOL_ICONS[key];
   }
-  "Wrench";
   return "Wrench";
 }
 
@@ -38,40 +37,58 @@ interface ChatMessageBubbleProps {
 }
 
 export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
-  // User message — right-aligned bubble
+  // -- User message: right-aligned bubble with pending indicator ----------
   if (message.role === "user") {
     return (
-      <div className="flex justify-end px-4 py-2">
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-accent/10 px-4 py-2.5 text-[15px] leading-relaxed text-foreground">
-          {message.content}
-        </div>
-      </div>
-    );
-  }
-
-  // Assistant message — left-aligned with markdown
-  if (message.role === "assistant") {
-    return (
-      <div className="flex justify-start px-4 py-2">
-        <div className="max-w-[90%] text-[15px] leading-relaxed text-foreground">
-          <Markdown text={message.content} />
-          {message.isStreaming && (
-            <span className="inline-block w-1.5 h-4 ml-0.5 bg-accent animate-pulse align-middle" />
+      <div className="flex justify-end px-4 py-1.5 group">
+        <div className="flex flex-col items-end gap-0.5 max-w-[85%]">
+          <div
+            className={`rounded-2xl rounded-br-md px-4 py-2.5 text-[14.5px] leading-relaxed whitespace-pre-wrap break-words ${
+              message.pending
+                ? "bg-accent/10 text-foreground/70 italic"
+                : "bg-accent/15 text-foreground"
+            }`}
+          >
+            {message.content}
+          </div>
+          {message.pending && (
+            <span className="text-[10px] text-muted-foreground/70 pr-1">
+              sending…
+            </span>
           )}
         </div>
       </div>
     );
   }
 
-  // Thinking message — collapsible
+  // -- Assistant message: left-aligned with avatar + markdown -------------
+  if (message.role === "assistant") {
+    return (
+      <div className="flex justify-start px-4 py-1.5 group">
+        <div className="flex gap-2.5 max-w-[92%]">
+          <Avatar kind="assistant" />
+          <div className="flex-1 min-w-0 pt-0.5">
+            <div className="text-[14.5px] leading-relaxed text-foreground">
+              <Markdown text={message.content || (message.isStreaming ? "" : "")} />
+              {message.isStreaming && (
+                <span className="inline-block w-[6px] h-[15px] ml-0.5 bg-accent animate-pulse align-middle rounded-sm" />
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // -- Thinking: collapsible card -----------------------------------------
   if (message.role === "thinking") {
     return (
       <div className="px-4 py-1">
-        <Collapsible label="Thinking">
-          <div className="text-[13px] text-muted-foreground leading-relaxed">
+        <Collapsible label="Thinking" kind="thinking">
+          <div className="text-[12.5px] text-muted-foreground leading-relaxed">
             <Markdown text={message.content} />
             {message.isStreaming && (
-              <span className="inline-block w-1.5 h-3 ml-0.5 bg-muted-foreground animate-pulse align-middle" />
+              <span className="inline-block w-[6px] h-[12px] ml-0.5 bg-muted-foreground/60 animate-pulse align-middle rounded-sm" />
             )}
           </div>
         </Collapsible>
@@ -79,16 +96,15 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
     );
   }
 
-  // Tool use — compact indicator
+  // -- Tool message: compact indicator or collapsible result --------------
   if (message.role === "tool") {
     if (message.toolName === "result") {
-      // Tool result
       const isDiffContent = !message.isError && isDiff(message.content);
       if (isDiffContent) {
         return (
           <div className="px-4 py-1">
             <div className="rounded-lg border border-border overflow-hidden max-w-2xl">
-              <div className="px-3 py-1.5 text-[11px] text-muted-foreground border-b border-border bg-muted/30 font-medium">
+              <div className="px-3 py-1.5 text-[11px] text-muted-foreground border-b border-border bg-surface/50 font-medium">
                 Diff
               </div>
               <DiffView diff={message.content} />
@@ -98,8 +114,11 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
       }
       return (
         <div className="px-4 py-1">
-          <Collapsible label={message.isError ? "Result (error)" : "Result"} error={message.isError}>
-            <div className="text-[13px] overflow-x-auto">
+          <Collapsible
+            label={message.isError ? "Result (error)" : "Result"}
+            kind={message.isError ? "error" : "result"}
+          >
+            <div className="text-[12.5px] overflow-x-auto">
               <Markdown text={message.content} />
             </div>
           </Collapsible>
@@ -107,16 +126,16 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
       );
     }
 
-    // Tool use indicator
+    // Tool use indicator (no result yet)
     return (
-      <div className="px-4 py-1">
-        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+      <div className="px-4 py-0.5">
+        <div className="flex items-center gap-2 text-[11.5px] text-muted-foreground">
           <span className="flex items-center gap-1.5">
             <ToolIcon name={message.toolName || "tool"} />
-            <span className="font-medium text-accent">{message.toolName}</span>
+            <span className="font-medium text-accent/90">{message.toolName}</span>
           </span>
           {message.toolSummary ? (
-            <span className="font-mono text-[11px] truncate max-w-[300px] opacity-60">
+            <span className="font-mono text-[10.5px] truncate max-w-[300px] opacity-70">
               {message.toolSummary}
             </span>
           ) : null}
@@ -125,32 +144,35 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
     );
   }
 
-  // Status message
+  // -- Status message -----------------------------------------------------
   if (message.role === "status") {
     if (message.isError) {
       return (
-        <div className="px-4 py-2">
-          <div className="max-w-2xl mx-auto rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            {message.content}
+        <div className="px-4 py-1.5">
+          <div className="max-w-2xl mx-auto rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2.5 text-[13px] text-red-300 flex items-start gap-2">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 shrink-0">
+              <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <span className="flex-1">{message.content}</span>
           </div>
         </div>
       );
     }
     return (
       <div className="px-4 py-1 text-center">
-        <span className="text-[11px] text-muted-foreground italic">
+        <span className="text-[10.5px] text-muted-foreground/70 italic">
           {message.content}
         </span>
       </div>
     );
   }
 
-  // Panel message
+  // -- Panel message ------------------------------------------------------
   if (message.role === "panel") {
     return (
-      <div className="px-4 py-2">
-        <div className="max-w-2xl mx-auto rounded-xl border border-border bg-muted/20 overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-muted/30">
+      <div className="px-4 py-1.5">
+        <div className="max-w-2xl mx-auto rounded-xl border border-border bg-surface/40 overflow-hidden">
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-surface/60">
             <span
               className={`h-2 w-2 rounded-full ${
                 message.panelStatus === "starting"
@@ -160,8 +182,8 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
                   : "bg-emerald-400"
               }`}
             />
-            <span className="text-sm font-medium">Panel: {message.content}</span>
-            <span className="ml-auto text-[11px] text-muted-foreground capitalize">
+            <span className="text-[12.5px] font-medium">Panel: {message.content}</span>
+            <span className="ml-auto text-[10.5px] text-muted-foreground capitalize">
               {message.panelStatus}
             </span>
           </div>
@@ -177,78 +199,122 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
 // Sub-components
 // ---------------------------------------------------------------------------
 
+function Avatar({ kind }: { kind: "assistant" | "user" }) {
+  if (kind === "assistant") {
+    return (
+      <div className="shrink-0 w-7 h-7 rounded-md bg-accent/15 flex items-center justify-center">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5b8cff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 2a10 10 0 0 1 10 10c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2z" />
+          <path d="M12 16v-4" />
+          <path d="M12 8h.01" />
+        </svg>
+      </div>
+    );
+  }
+  return null;
+}
+
 function Collapsible({
   label,
   children,
-  error,
+  kind,
 }: {
   label: string;
   children: React.ReactNode;
-  error?: boolean;
+  kind?: "thinking" | "result" | "error";
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(kind === "error");
+  const borderClass =
+    kind === "error"
+      ? "border-red-500/30"
+      : kind === "thinking"
+      ? "border-border bg-surface/20"
+      : "border-border";
+  const labelClass =
+    kind === "error" ? "text-red-300" : "text-muted-foreground";
   return (
-    <div
-      className={`rounded-lg border ${
-        error ? "border-destructive/30" : "border-border"
-      } max-w-2xl`}
-    >
+    <div className={`rounded-lg border ${borderClass} max-w-2xl`}>
       <button
         onClick={() => setOpen((o) => !o)}
-        className={`w-full text-left text-[11px] px-3 py-1.5 font-medium ${
-          error ? "text-destructive" : "text-muted-foreground"
-        }`}
+        className={`w-full text-left text-[11px] px-3 py-1.5 font-medium ${labelClass} hover:bg-surface/40 transition-colors flex items-center gap-2`}
       >
-        <span className="inline-block w-3">
-          {open ? "\u25BE" : "\u25B8"}
-        </span>{" "}
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={`transition-transform ${open ? "rotate-90" : ""}`}
+        >
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
         {label}
       </button>
-      {open && <div className="px-3 pb-3 border-t border-border/50">{children}</div>}
+      {open && (
+        <div className="px-3 pb-3 pt-1 border-t border-border/50">{children}</div>
+      )}
     </div>
   );
 }
 
 function ToolIcon({ name }: { name: string }) {
   const iconName = toolIcon(name);
-  // Simple SVG icons
+  const props = {
+    width: 12,
+    height: 12,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
   if (iconName === "Terminal") {
     return (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
+      <svg {...props}>
+        <polyline points="4 17 10 11 4 5" />
+        <line x1="12" y1="19" x2="20" y2="19" />
       </svg>
     );
   }
   if (iconName === "FileEdit") {
     return (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+      <svg {...props}>
+        <path d="M12 20h9" />
+        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
       </svg>
     );
   }
   if (iconName === "Eye") {
     return (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" />
+      <svg {...props}>
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+        <circle cx="12" cy="12" r="3" />
       </svg>
     );
   }
   if (iconName === "Search") {
     return (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+      <svg {...props}>
+        <circle cx="11" cy="11" r="8" />
+        <line x1="21" y1="21" x2="16.65" y2="16.65" />
       </svg>
     );
   }
   if (iconName === "Globe") {
     return (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+      <svg {...props}>
+        <circle cx="12" cy="12" r="10" />
+        <line x1="2" y1="12" x2="22" y2="12" />
+        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
       </svg>
     );
   }
   return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg {...props}>
       <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
     </svg>
   );
