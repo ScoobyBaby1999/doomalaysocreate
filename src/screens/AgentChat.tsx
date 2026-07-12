@@ -1,630 +1,416 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import type { Settings, Effort } from "../api/panel";
-import type { Workspace } from "../api/github";
-import {
-  AgentClient,
-  type AgentEvent,
-  type AgentFile,
-  type AgentStatus,
-  type ChatSession,
-} from "../api/agent";
-import { Markdown } from "../components/Markdown";
-import { JudgeCard } from "../components/JudgeCard";
+import { useEffect, useRef, useCallback, useState } from "react";
+import type { Settings } from "../api/panel";
+import { AgentClient } from "../api/agent";
+import { useChatStore } from "../state/chatStore";
 import { useModelStore } from "../lib/model-store";
-import { PanelDrawer, type PanelInvocation } from "../components/PanelDrawer";
-import { FileDrawer } from "../components/FileDrawer";
-import { DiffView } from "../components/DiffView";
-import { GitStatus } from "../components/GitStatus";
+import { ChatMessageBubble } from "../components/ChatMessageBubble";
 import { SessionSidebar } from "../components/SessionSidebar";
-import { useMediaQuery } from "../hooks/useMediaQuery";
+import { FileDrawer } from "../components/FileDrawer";
+import { PanelDrawer, type PanelInvocation } from "../components/PanelDrawer";
+import { GitStatus } from "../components/GitStatus";
 
-const SESSION_KEY = "doomalaysocreate.agent.session";
-const CHAT_SESSION_KEY = "doomalaysocreate.agent.chat_session_v2";
-const MODEL_KEY = "doomalaysocreate.agent.model";
-const EFFORTS: Effort[] = ["low", "med", "high", "max"];
+const EFFORTS: Array<"low" | "med" | "high" | "max"> = ["low", "med", "high", "max"];
 
-export function AgentChat({
-  settings,
-  workspaceId,
-}: {
-  settings: Settings;
-  workspaceId?: string;
-}) {
-  const [selected, setSelected] = useState<string>(localStorage.getItem(MODEL_KEY) || "");
-  const [events, setEvents] = useState<AgentEvent[]>([]);
-  const [status, setStatus] = useState<AgentStatus>("idle");
-  const [files, setFiles] = useState<AgentFile[]>([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [cost, setCost] = useState<number | null>(null);
-  const [effort, setEffort] = useState<Effort>("med");
-  const [webSearch, setWebSearch] = useState(false);
-  const [deepResearch, setDeepResearch] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
-  const [panelDrawerOpen, setPanelDrawerOpen] = useState(false);
-  const [panelInvocations, setPanelInvocations] = useState<PanelInvocation[]>([]);
-  const [sessionSidebarOpen, setSessionSidebarOpen] = useState(false);
-  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
-
+export function AgentChat({ settings }: { settings: Settings }) {
+  // Model store
   const openOverlay = useModelStore((s) => s.openOverlay);
   const selectedModelId = useModelStore((s) => s.selectedModelId);
   const selectedProviderName = useModelStore((s) => s.selectedProviderName);
   const providers = useModelStore((s) => s.providers);
-  const selectedModelLabel = (() => {
-    if (!selectedModelId) return selected || null;
+  const selectedSlotId = useModelStore((s) => s.selectedSlotId);
+
+  // Derive display info for selected model
+  const modelDisplay = (() => {
+    if (!selectedModelId) return null;
     for (const p of providers) {
-      const m = p.models.find((m) => m.id === selectedModelId);
-      if (m) return m.displayName;
+      const m = p.models.find((m) => m.id === selectedModelId || m.slotId === selectedSlotId);
+      if (m) return { label: m.displayName || m.id, color: p.color || "#5b8cff" };
     }
-    return selectedModelId;
-  })();
-  const selectedProviderColor = (() => {
-    if (!selectedProviderName) return "#5b8cff";
-    const p = providers.find((g) => g.name === selectedProviderName);
-    return p?.color || "#5b8cff";
+    return { label: selectedModelId.split("/").pop() || selectedModelId, color: "#5b8cff" };
   })();
 
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(workspaceId || null);
-  const sessionRef = useRef<string | null>(sessionStorage.getItem(SESSION_KEY));
-  const chatSessionIdRef = useRef<string | null>(localStorage.getItem(CHAT_SESSION_KEY));
-  const lastMsgRef = useRef<string>("");
-  const listRef = useRef<VirtuosoHandle>(null);
-  const client = useRef(new AgentClient(settings));
-  client.current = new AgentClient(settings);
-  const abortRef = useRef<AbortController | null>(null);
+  // Get the actual model ID to send to backend (physical slot ID preferred)
+  const effectiveModelId = selectedSlotId || selectedModelId;
 
-  // load model list on mount
-  useEffect(() => {
-    let alive = true;
-    client.current
-      .models()
-      .then((r) => {
-        if (!alive) return;
-        const valid = r.models.find((m) => m.model === selected);
-        if (!valid) {
-          const def = r.models.find((m) => m.default) || r.models[0];
-          if (def) {
-            setSelected(def.model);
-            localStorage.setItem(MODEL_KEY, def.model);
-          }
-        }
-      })
-      .catch(() => {});
-    return () => { alive = false; };
-  }, [settings.baseUrl, selected]);
+  // Chat store
+  const store = useChatStore();
+  const {
+    sessions,
+    activeSessionId,
+    messages,
+    isBusy,
+    isStreaming,
+    status,
+    inputText,
+    error,
+    effort,
+    webSearch,
+    deepResearch,
+    files,
+    fileDrawerOpen,
+    panelDrawerOpen,
+    panelInvocations,
+    sidebarOpen,
+    cost,
+    setInputText,
+    setEffort,
+    toggleWebSearch,
+    toggleDeepResearch,
+    setSidebarOpen,
+    setFileDrawerOpen,
+    setPanelDrawerOpen,
+    loadSessions,
+    createSession,
+    switchSession,
+    deleteSession,
+    sendMessage,
+    stopGeneration,
+  } = store;
 
-  // load workspaces on mount (if github connected)
-  useEffect(() => {
-    if (!settings.githubSessionId) return;
-    let alive = true;
-    fetch(`${settings.baseUrl}/api/workspaces`, {
-      headers: { Authorization: `Bearer ${settings.githubSessionId}` },
-    })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("fetch workspaces failed"))))
-      .then((data) => { if (alive) setWorkspaces(data.workspaces || []); })
-      .catch(() => {});
-    return () => { alive = false; };
-  }, [settings.baseUrl, settings.githubSessionId]);
+  // Refs
+  const clientRef = useRef(new AgentClient(settings));
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const lastUserMsgRef = useRef("");
 
-  // load chat sessions + restore active session on mount
+  // Keep client fresh
+  clientRef.current = new AgentClient(settings);
+
+  // Auto-scroll to bottom when messages change
   useEffect(() => {
-    let alive = true;
-    client.current.listChatSessions()
-      .then((r) => {
-        if (!alive) return;
-        setChatSessions(r.sessions);
-        const active = chatSessionIdRef.current;
-        if (active && r.sessions.find((s) => s.id === active)) {
-          return client.current.getChatEvents(active);
-        }
-        return null;
-      })
-      .then((evData) => {
-        if (!alive || !evData) return;
-        setEvents(evData.events);
-        // Try to resume agent session polling if we have an agent session ID
-        const sid = sessionRef.current;
-        if (sid) {
-          client.current.poll(sid, 0)
-            .then((snap) => {
-              if (!alive) return;
-              setStatus(snap.status);
-              if (snap.events.length && snap.events.length > evData.events.length) {
-                setEvents(snap.events);
-              }
-              if (snap.status === "running" || snap.status === "starting") {
-                pollUntilSettled(sid, snap.next);
-              }
-            })
-            .catch(() => {
-              sessionRef.current = null;
-              sessionStorage.removeItem(SESSION_KEY);
-            });
-        }
-      })
-      .catch(() => {});
-    return () => { alive = false };
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, isStreaming]);
+
+  // Load sessions on mount
+  useEffect(() => {
+    loadSessions(clientRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function refreshFiles(sid?: string | null) {
-    const id = sid ?? sessionRef.current;
-    if (id) {
-      try {
-        const f = await client.current.files(id);
-        setFiles(f.files);
-      } catch { /* ignore */ }
-    }
-  }
+  // Handle send
+  const handleSend = useCallback(
+    async (text?: string) => {
+      const msg = (text ?? inputText).trim();
+      if (!msg || isBusy) return;
+      lastUserMsgRef.current = msg;
+      await sendMessage(clientRef.current, msg, effectiveModelId || undefined);
+    },
+    [inputText, isBusy, effectiveModelId, sendMessage]
+  );
 
-  function handleSSEEvent(ev: AgentEvent) {
-    setEvents((prev) => {
-      if (ev.type === "assistant_delta" || ev.type === "thinking_delta") {
-        const idx = prev.length - 1;
-        if (idx >= 0 && prev[idx].type === ev.type) {
-          const updated = [...prev];
-          updated[idx] = { ...updated[idx], text: (updated[idx] as { text: string }).text + ev.text } as AgentEvent;
-          return updated;
-        }
-        return [...prev, ev];
-      }
-      const last = prev[prev.length - 1];
-      if (last?.type === "assistant_delta" || last?.type === "thinking_delta") {
-        return [...prev.slice(0, -1), ev];
-      }
-      return [...prev, ev];
-    });
-    if (ev.type === "status") {
-      const s = ev as any;
-      if (typeof s.cost_usd === "number") setCost(s.cost_usd);
-      if (s.state === "panel") {
-        setPanelInvocations((prev) => {
-          const inv = s.invoke_id;
-          const existing = prev.findIndex((p) => p.invoke_id === inv);
-          const entry: PanelInvocation = {
-            invoke_id: inv,
-            task_name: s.task_name,
-            prompt: s.prompt,
-            panel: s.panel,
-            status: s.status || "starting",
-            snapshot: s.snapshot,
-            error: s.error,
-          };
-          if (existing >= 0) {
-            const upd = [...prev];
-            upd[existing] = entry;
-            return upd;
-          }
-          return [...prev, entry];
-        });
-        if (s.status === "done" && chatSessionIdRef.current) {
-          refreshFiles(sessionRef.current);
-        }
-      }
-    }
-  }
+  // Handle stop
+  const handleStop = useCallback(async () => {
+    await stopGeneration(clientRef.current);
+  }, [stopGeneration]);
 
-  async function pollUntilSettled(sessionId: string, since: number) {
-    let cursor = since;
-    const ac = abortRef.current;
-    for (;;) {
-      if (ac?.signal.aborted) return cursor;
-      const snap = await client.current.poll(sessionId, cursor);
-      if (snap.events.length) {
-        setEvents((prev) => [...prev, ...snap.events]);
-        cursor = snap.next;
-        for (const e of snap.events) {
-          if (e.type === "status" && typeof e.cost_usd === "number") setCost(e.cost_usd);
-          if (e.type === "panel") {
-            setPanelInvocations((prev) => {
-              const inv = e.invoke_id;
-              const existing = prev.findIndex((p) => p.invoke_id === inv);
-              const entry: PanelInvocation = {
-                task_name: e.task_name || "panel",
-                invoke_id: inv || "",
-                prompt: e.prompt || "",
-                snapshot: e.snapshot,
-                error: e.error,
-              };
-              if (existing >= 0) {
-                const next = [...prev];
-                next[existing] = { ...next[existing], ...entry };
-                return next;
-              }
-              if (e.status === "starting") return [...prev, entry];
-              return prev;
-            });
-          }
-        }
+  // Handle new session
+  const handleNewSession = useCallback(async () => {
+    await createSession(clientRef.current, effectiveModelId || undefined);
+    inputRef.current?.focus();
+  }, [createSession, effectiveModelId]);
+
+  // Handle keydown
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
       }
-      setStatus(snap.status);
-      if (snap.status !== "running" && snap.status !== "starting") {
-        if (snap.status !== "error") {
-          client.current.files(sessionId).then((f) => setFiles(f.files)).catch(() => {});
-        }
-        return cursor;
-      }
-      await new Promise((res) => setTimeout(res, 200));
-    }
-  }
+    },
+    [handleSend]
+  );
 
-  const switchSession = useCallback(async (chatSessionId: string) => {
-    abortRef.current?.abort();
-    chatSessionIdRef.current = chatSessionId;
-    localStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
-    sessionRef.current = null;
-    sessionStorage.removeItem(SESSION_KEY);
-    setEvents([]);
-    setFiles([]);
-    setStatus("idle");
-    setError("");
-    setCost(null);
-    setBusy(false);
-    setPanelInvocations([]);
-    try {
-      const evData = await client.current.getChatEvents(chatSessionId);
-      setEvents(evData.events);
-    } catch { /* ignore */ }
-  }, []);
+  // Auto-resize textarea
+  const handleInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      setInputText(e.target.value);
+      const el = e.target;
+      el.style.height = "auto";
+      el.style.height = Math.min(el.scrollHeight, 120) + "px";
+    },
+    [setInputText]
+  );
 
-  async function send(text?: string) {
-    const message = (text ?? input).trim();
-    if (!message || busy) return;
-    if (text === undefined) setInput("");
-    lastMsgRef.current = message;
-    setBusy(true);
-    setError("");
-    abortRef.current?.abort();
-    const ac = new AbortController();
-    abortRef.current = ac;
-    setEvents((prev) => [
-      ...prev,
-      { i: -1, ts: Date.now() / 1000, type: "user", text: message } as AgentEvent,
-    ]);
-    setStatus("running");
-    try {
-      const start = await client.current.send(
-        message,
-        sessionRef.current ?? undefined,
-        sessionRef.current ? undefined : selectedModelId || selected || undefined,
-        selectedWorkspace ?? undefined,
-        chatSessionIdRef.current ?? undefined,
-      );
-      sessionRef.current = start.session_id;
-      sessionStorage.setItem(SESSION_KEY, start.session_id);
-      if (start.chat_session_id) {
-        chatSessionIdRef.current = start.chat_session_id;
-        localStorage.setItem(CHAT_SESSION_KEY, start.chat_session_id);
-        // Add new session to list if not already there
-        setChatSessions((prev) => {
-          if (!start.chat_session_id) return prev;
-          if (prev.find((s) => s.id === start.chat_session_id)) return prev;
-          return [{ id: start.chat_session_id, title: "New Chat", model: start.model, workspace_id: null, created_at: "", updated_at: "" }, ...prev];
-        });
-      }
-      // Try SSE streaming first; fall back to polling
-      let streamSince = 0;
-      let sseSucceeded = false;
-      if (!ac.signal.aborted) {
-        const sseAc = client.current.stream(
-          start.session_id,
-          0,
-          (ev) => handleSSEEvent(ev),
-          () => {},
-        );
-        await new Promise<void>((resolve) => {
-          const timeout = setTimeout(() => resolve(), 800);
-          const check = setInterval(() => {
-            if (ac.signal.aborted) { clearInterval(check); clearTimeout(timeout); resolve(); return; }
-            setEvents((prev) => {
-              if (prev.some((e) => e.i >= 0 && e.type !== "assistant_delta" && e.type !== "thinking_delta")) {
-                sseSucceeded = true;
-                const last = prev[prev.length - 1];
-                streamSince = last ? last.i + 1 : prev.length;
-              }
-              return prev;
-            });
-            if (sseSucceeded) { clearInterval(check); clearTimeout(timeout); sseAc.abort(); resolve(); }
-          }, 100);
-        });
-        if (!ac.signal.aborted && !sseSucceeded) {
-          sseAc.abort();
-          const fresh = await client.current.poll(start.session_id, 0);
-          setEvents((prev) => [...prev.slice(0, -1), ...fresh.events]);
-          if (!ac.signal.aborted) {
-            await pollUntilSettled(start.session_id, fresh.next);
-          }
-        } else if (!ac.signal.aborted && sseSucceeded) {
-          client.current.stream(
-            start.session_id,
-            streamSince,
-            (ev) => {
-              if (ac.signal.aborted) return;
-              handleSSEEvent(ev);
-              if (ev.type === "status") {
-                const st = ev as any;
-                setStatus(st.state || "idle");
-                if (st.state === "idle" || st.state === "error") {
-                  refreshFiles(start.session_id);
-                }
-              }
-            },
-            () => {},
-          );
-        }
-      }
-      // Reload full conversation from DB to restore any history that was lost
-      // when the agent session's in-memory events replaced the DB-backed events.
-      if (chatSessionIdRef.current) {
-        try {
-          const dbEvents = await client.current.getChatEvents(chatSessionIdRef.current);
-          if (!ac.signal.aborted) setEvents(dbEvents.events);
-        } catch { /* non-fatal */ }
-      }
-      // Refresh session list after completion to get updated title
-      client.current.listChatSessions().then((r) => {
-        if (!ac.signal.aborted) setChatSessions(r.sessions);
-      }).catch(() => {});
-    } catch (e) {
-      if (ac.signal.aborted) return;
-      sessionRef.current = null;
-      sessionStorage.removeItem(SESSION_KEY);
-      setError(e instanceof Error ? e.message : String(e));
-      setStatus("error");
-    } finally {
-      if (!ac.signal.aborted) setBusy(false);
-    }
-  }
+  // Settings panel
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
-  async function stop() {
-    if (!sessionRef.current) return;
-    setStatus("idle");
-    try { await client.current.interrupt(sessionRef.current); }
-    catch { setError("Interrupt failed"); setStatus("running"); }
-  }
-
-  async function newSession(model?: string) {
-    abortRef.current?.abort();
-    sessionRef.current = null;
-    sessionStorage.removeItem(SESSION_KEY);
-    setEvents([]);
-    setFiles([]);
-    setStatus("idle");
-    setError("");
-    setCost(null);
-    setBusy(false);
-    setPanelInvocations([]);
-    setSessionSidebarOpen(false);
-    if (model) { setSelected(model); localStorage.setItem(MODEL_KEY, model); }
-    // Create persistent session in DB
-    try {
-      const cs = await client.current.createChatSession();
-      chatSessionIdRef.current = cs.id;
-      localStorage.setItem(CHAT_SESSION_KEY, cs.id);
-      setChatSessions((prev) => [cs, ...prev]);
-    } catch { /* ignore */ }
-  }
-
-  async function deleteSession(sessionId: string) {
-    try {
-      await client.current.deleteChatSession(sessionId);
-      setChatSessions((prev) => prev.filter((s) => s.id !== sessionId));
-      if (chatSessionIdRef.current === sessionId) {
-        chatSessionIdRef.current = null;
-        localStorage.removeItem(CHAT_SESSION_KEY);
-        setEvents([]);
-      }
-    } catch { /* ignore */ }
-  }
-
-  const isDesktop = useMediaQuery("(min-width: 768px)"); void isDesktop;
-
-  const running = status === "running" || status === "starting";
+  const running = isBusy && (status === "running" || status === "starting");
 
   return (
-    <div className="flex flex-col h-full relative">
-      {/* header */}
-      <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted shrink-0">
+    <div className="flex flex-col h-full relative bg-background">
+      {/* Header */}
+      <header className="flex items-center gap-2 px-3 h-11 border-b border-border shrink-0 bg-card/50">
+        {/* Session menu toggle */}
         <button
-          onClick={() => setSessionSidebarOpen((o) => !o)}
-          className={`text-sm px-1 shrink-0 ${sessionSidebarOpen ? "text-accent" : "text-muted hover:text-accent"}`}
-          title="Sessions"
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          className={`p-1.5 rounded-md transition-colors ${
+            sidebarOpen ? "text-accent bg-accent/10" : "text-muted-foreground hover:text-foreground hover:bg-muted"
+          }`}
+          title="Chat sessions"
         >
-          ☰
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="3" y1="6" x2="21" y2="6" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
         </button>
+
+        {/* Model selector */}
         <button
           onClick={() => !running && openOverlay()}
           disabled={running}
-          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[12px] disabled:opacity-50 max-w-[45%]"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border hover:border-accent transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed max-w-[200px]"
         >
-          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: selectedProviderColor || "#5b8cff" }} />
-          <span className="text-accent truncate">{selectedModelLabel || "Select model"}</span>
+          <span
+            className="w-2 h-2 rounded-full shrink-0"
+            style={{ background: modelDisplay?.color || "#5b8cff" }}
+          />
+          <span className="truncate text-accent">
+            {modelDisplay?.label || "Select model"}
+          </span>
         </button>
-        {workspaces.length > 0 && (
-          <select
-            value={selectedWorkspace || ""}
-            onChange={(e) => {
-              setSelectedWorkspace(e.target.value || null);
-              setFiles([]);
-              refreshFiles(sessionRef.current);
-            }}
-            disabled={running}
-            className="bg-surface border border-border rounded-lg px-2 py-1 text-[12px] text-accent outline-none focus:border-accent disabled:opacity-50 max-w-[35%]"
-          >
-            <option value="">(sandbox)</option>
-            {workspaces.map((w) => (
-              <option key={w.id} value={w.id}>{w.title || w.id}</option>
-            ))}
-          </select>
+
+        {/* Cost indicator */}
+        {cost != null && (
+          <span className="text-[10px] text-muted-foreground tabular-nums">
+            ${cost.toFixed(4)}
+          </span>
         )}
-        {cost != null && <span className="text-[10px] shrink-0">${cost.toFixed(4)}</span>}
-        <span className="ml-auto text-[10px] capitalize shrink-0">{status}</span>
+
+        {/* Spacer */}
+        <div className="flex-1" />
+
+        {/* Status */}
+        {running && (
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+            <span className="capitalize">{status}</span>
+          </div>
+        )}
+
+        {/* Action buttons */}
         <button
-          onClick={() => setFileDrawerOpen((o) => !o)}
-          className="text-muted hover:text-accent text-sm px-1"
+          onClick={() => setFileDrawerOpen(!fileDrawerOpen)}
+          className={`p-1.5 rounded-md transition-colors ${
+            fileDrawerOpen ? "text-accent bg-accent/10" : "text-muted-foreground hover:text-foreground hover:bg-muted"
+          }`}
           title="Files"
         >
-          📎
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M13.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+            <polyline points="13 2 13 9 20 9" />
+          </svg>
         </button>
+
         <button
-          onClick={() => setPanelDrawerOpen((o) => !o)}
-          className={`text-sm px-1 ${panelDrawerOpen ? "text-accent" : "text-muted hover:text-accent"}`}
+          onClick={() => setPanelDrawerOpen(!panelDrawerOpen)}
+          className={`p-1.5 rounded-md transition-colors ${
+            panelDrawerOpen ? "text-accent bg-accent/10" : "text-muted-foreground hover:text-foreground hover:bg-muted"
+          }`}
           title="Panel invocations"
         >
-          💬
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
         </button>
+
         {running ? (
-          <button onClick={stop} className="text-rose-300 underline shrink-0">stop</button>
+          <button
+            onClick={handleStop}
+            className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-md bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors font-medium"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="6" width="12" height="12" rx="1" />
+            </svg>
+            Stop
+          </button>
         ) : (
-          <button onClick={() => newSession()} className="text-accent underline shrink-0">new</button>
+          <button
+            onClick={handleNewSession}
+            className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-md bg-accent/10 text-accent hover:bg-accent/20 transition-colors font-medium"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            New
+          </button>
+        )}
+      </header>
+
+      {/* Messages area */}
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto min-h-0 scroll-smooth"
+      >
+        {messages.length === 0 && !isBusy ? (
+          <EmptyState onSend={handleSend} />
+        ) : (
+          <div className="py-4 space-y-1">
+            {messages.map((msg) => (
+              <ChatMessageBubble key={msg.id} message={msg} />
+            ))}
+
+            {/* Typing indicator */}
+            {running && messages.length > 0 && messages[messages.length - 1].role === "user" && (
+              <div className="px-4 py-3">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <span className="flex gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "0ms" }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "150ms" }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "300ms" }} />
+                  </span>
+                  <span className="text-[12px]">Thinking...</span>
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </div>
 
-      <div className="flex-1 min-h-0 relative">
-        <Virtuoso
-          ref={listRef}
-          className="h-full"
-          data={events}
-          followOutput="smooth"
-          itemContent={(_, ev) => <EventRow ev={ev} />}
-          components={{
-            Footer: () => (
-              <>
-{running && events.some((e) => e.type === "user") &&
-  !events.some((e) => e.type === "assistant" || e.type === "thinking" || e.type === "tool_use") && (
-                  <div className="px-3 py-3 max-w-2xl mx-auto">
-                    <div className="flex items-center gap-2 text-muted">
-                      <span className="flex gap-0.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "0ms" }} />
-                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "150ms" }} />
-                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "300ms" }} />
-                      </span>
-                      <span className="text-[12px]">thinking</span>
-                    </div>
-                  </div>
-                )}
-                {events.length === 0 ? (
-                  <div className="text-center text-muted text-sm mt-20 px-6">
-                    Ask the agent to build, edit, run, or pack something. It works in a
-                    private workspace — files appear in the 📎 drawer.
-                  </div>
-                ) : (
-                  <div className="h-2" />
-                )}
-              </>
-            ),
-          }}
-        />
-      </div>
-
+      {/* Error banner */}
       {error && (
-        <div className="border-t border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-300 flex items-center gap-2 shrink-0">
+        <div className="border-t border-destructive/30 bg-destructive/10 px-4 py-2.5 text-sm text-destructive flex items-center gap-3 shrink-0">
           <span className="flex-1">{error}</span>
-          {lastMsgRef.current && (
-            <button onClick={() => send(lastMsgRef.current)} className="px-2 py-1 rounded-lg border border-rose-400/40 text-xs">
+          {lastUserMsgRef.current && (
+            <button
+              onClick={() => handleSend(lastUserMsgRef.current)}
+              className="px-3 py-1 rounded-md border border-destructive/40 text-xs hover:bg-destructive/20 transition-colors shrink-0"
+            >
               Retry
             </button>
           )}
         </div>
       )}
 
-      <div className="border-t border-border bg-bg pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] shrink-0">
+      {/* Input area */}
+      <div className="border-t border-border bg-card/50 pt-2 pb-3 px-3 shrink-0">
+        {/* Quick settings */}
         {settingsOpen && (
-          <div className="flex items-center gap-2 px-3 pb-2 overflow-x-auto">
+          <div className="flex items-center gap-1.5 px-1 pb-2 overflow-x-auto">
             {EFFORTS.map((e) => (
               <button
                 key={e}
                 onClick={() => setEffort(e)}
-                className={`text-[11px] px-2 py-0.5 rounded-full border shrink-0 ${
-                  effort === e ? "border-accent text-accent" : "border-border text-muted"
+                className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 ${
+                  effort === e
+                    ? "border-accent text-accent bg-accent/10"
+                    : "border-border text-muted-foreground hover:border-accent/50"
                 }`}
               >
                 {e}
               </button>
             ))}
+            <div className="w-px h-4 bg-border mx-1" />
             <button
-              onClick={() => setWebSearch((p) => !p)}
-              className={`text-[11px] px-2 py-0.5 rounded-full border shrink-0 flex items-center gap-1 ${
-                webSearch ? "border-accent text-accent" : "border-border text-muted"
+              onClick={toggleWebSearch}
+              className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 flex items-center gap-1 ${
+                webSearch
+                  ? "border-accent text-accent bg-accent/10"
+                  : "border-border text-muted-foreground hover:border-accent/50"
               }`}
             >
-              🌐 Web
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+              </svg>
+              Web
             </button>
             <button
-              onClick={() => setDeepResearch((p) => !p)}
-              className={`text-[11px] px-2 py-0.5 rounded-full border shrink-0 flex items-center gap-1 ${
-                deepResearch ? "border-accent text-accent" : "border-border text-muted"
+              onClick={toggleDeepResearch}
+              className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 flex items-center gap-1 ${
+                deepResearch
+                  ? "border-accent text-accent bg-accent/10"
+                  : "border-border text-muted-foreground hover:border-accent/50"
               }`}
             >
-              🔬 Deep
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z" /><circle cx="12" cy="10" r="3" />
+              </svg>
+              Deep
             </button>
           </div>
         )}
-        <div className="flex items-end gap-2 px-2">
-          <button
-            onClick={() => {}}
-            className="text-muted hover:text-accent text-lg pb-2 shrink-0"
-            title="Attach files (coming soon)"
-          >
-            <span className="opacity-50">+</span>
-          </button>
+
+        {/* Input row */}
+        <div className="flex items-end gap-2">
           <button
             onClick={() => setSettingsOpen((p) => !p)}
-            className={`text-sm pb-2 shrink-0 ${settingsOpen ? "text-accent" : "text-muted hover:text-accent"}`}
+            className={`p-2 rounded-lg transition-colors shrink-0 mb-0.5 ${
+              settingsOpen
+                ? "text-accent bg-accent/10"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted"
+            }`}
             title="Settings"
           >
-            ⚙
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
           </button>
+
           <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-            }}
+            ref={inputRef}
+            value={inputText}
+            onChange={handleInputChange}
+            onKeyDown={handleKeyDown}
             rows={1}
-            placeholder="Tell the agent what to do…"
-            className="flex-1 resize-none bg-surface border border-border rounded-2xl px-3 py-2 text-[15px] outline-none focus:border-accent max-h-32"
+            placeholder="Ask the agent to build, edit, run, or pack something..."
+            disabled={isBusy}
+            className="flex-1 resize-none bg-muted border border-border rounded-xl px-3.5 py-2.5 text-[15px] leading-relaxed outline-none focus:border-accent disabled:opacity-50 min-h-[40px] max-h-[120px] transition-colors"
           />
+
           <button
-            onClick={() => (running ? stop() : send())}
-            disabled={!running && (busy || !input.trim())}
-            className={`h-10 px-4 rounded-2xl font-medium disabled:opacity-40 shrink-0 ${
-              running ? "bg-rose-500/80 text-white" : "bg-accent text-white"
+            onClick={() => (running ? handleStop() : handleSend())}
+            disabled={!running && (isBusy || !inputText.trim())}
+            className={`h-10 px-4 rounded-xl font-medium text-sm disabled:opacity-40 disabled:cursor-not-allowed shrink-0 transition-all ${
+              running
+                ? "bg-destructive/90 text-destructive-foreground hover:bg-destructive"
+                : "bg-accent text-accent-foreground hover:bg-accent/90"
             }`}
           >
-            {running ? "Stop" : "Send"}
+            {running ? (
+              <span className="flex items-center gap-1.5">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="6" width="12" height="12" rx="1" />
+                </svg>
+                Stop
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="22" y1="2" x2="10" y2="14" />
+                  <polygon points="22 2 15 22 10 14 2 9 22 2" />
+                </svg>
+                Send
+              </span>
+            )}
           </button>
         </div>
       </div>
 
-      {/* Git status bar — only when workspace is selected */}
-      {selectedWorkspace && (
-        <div className="shrink-0">
-          <GitStatus client={client.current} wsId={selectedWorkspace} />
-        </div>
-      )}
-
+      {/* Overlays */}
       <SessionSidebar
-        open={sessionSidebarOpen}
-        sessions={chatSessions}
-        activeId={chatSessionIdRef.current}
-        onSelect={switchSession}
-        onDelete={deleteSession}
-        onNew={newSession}
-        onClose={() => setSessionSidebarOpen(false)}
+        open={sidebarOpen}
+        sessions={sessions}
+        activeId={activeSessionId}
+        isLoading={false}
+        onSelect={(id) => switchSession(clientRef.current, id)}
+        onDelete={(id) => deleteSession(clientRef.current, id)}
+        onNew={handleNewSession}
+        onClose={() => setSidebarOpen(false)}
       />
+
       <FileDrawer
         open={fileDrawerOpen}
         onClose={() => setFileDrawerOpen(false)}
         files={files}
-        sessionId={sessionRef.current}
+        sessionId={null}
         settings={settings}
-        onRefresh={() => refreshFiles()}
+        onRefresh={() => {}}
       />
+
       <PanelDrawer
         open={panelDrawerOpen}
         onClose={() => setPanelDrawerOpen(false)}
@@ -634,151 +420,61 @@ export function AgentChat({
   );
 }
 
-const TOOL_ICONS: Record<string, string> = {
-  bash: "⌘", shell: "⌘",
-  write: "✎", edit: "✎", str_replace: "✎", fileeditor: "✎",
-  read: "👁", view: "👁",
-  glob: "🔍", grep: "🔍", search: "🔍",
-  web: "🌐", fetch: "🌐", http_request: "🌐",
-};
+// ---------------------------------------------------------------------------
+// Empty state
+// ---------------------------------------------------------------------------
 
-function toolIcon(name: string): string {
-  const k = name.toLowerCase();
-  for (const key of Object.keys(TOOL_ICONS)) if (k.includes(key)) return TOOL_ICONS[key];
-  return "⚙";
-}
+function EmptyState({ onSend }: { onSend: (text: string) => void }) {
+  const suggestions = [
+    "Build a React component that displays a data table with sorting and filtering",
+    "Create a Python script that fetches data from an API and saves it to CSV",
+    "Write a Dockerfile for a Node.js application with multi-stage build",
+    "Set up a CI/CD pipeline configuration for running tests on every push",
+  ];
 
-function isDiff(text: string): boolean {
-  return text.includes("---") && text.includes("+++") && /^diff --git/.test(text.trim());
-}
-
-function EventRow({ ev }: { ev: AgentEvent }) {
-  if (ev.type === "user") {
-    return (
-      <div className="px-3 py-1.5 max-w-2xl mx-auto flex justify-end">
-        <div className="rounded-2xl rounded-br-sm bg-surface2 px-3 py-2 text-[15px] max-w-[85%] whitespace-pre-wrap">
-          {ev.text}
-        </div>
-      </div>
-    );
-  }
-  if (ev.type === "assistant" || ev.type === "assistant_delta") {
-    return (
-      <div className="px-3 py-1.5 max-w-2xl mx-auto">
-        <Markdown text={ev.text} />
-      </div>
-    );
-  }
-  if (ev.type === "thinking" || ev.type === "thinking_delta") {
-    return (
-      <div className="px-3 py-1 max-w-2xl mx-auto">
-        <Collapsible label="thinking"><Markdown text={ev.text} /></Collapsible>
-      </div>
-    );
-  }
-  if (ev.type === "tool_use") {
-    return (
-      <div className="px-3 py-1 max-w-2xl mx-auto">
-        <div className="text-[12px] text-muted flex items-baseline gap-2">
-          <span className="text-accent shrink-0">
-            {toolIcon(ev.name)} <span className="font-medium">{ev.name}</span>
-          </span>
-          {ev.summary ? (
-            <span className="font-mono text-[11px] truncate">{ev.summary}</span>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-  if (ev.type === "tool_result") {
-    const isDiffContent = !ev.is_error && isDiff(ev.text);
-    if (isDiffContent) {
-      return (
-        <div className="px-3 py-1 max-w-2xl mx-auto">
-          <div className="rounded-lg border border-border overflow-hidden">
-            <div className="px-2 py-1 text-[11px] text-muted border-b border-border bg-surface/50">diff</div>
-            <DiffView diff={ev.text} />
-          </div>
-        </div>
-      );
-    }
-    return (
-      <div className="px-3 py-1 max-w-2xl mx-auto">
-        <Collapsible label={ev.is_error ? "result (error)" : "result"} error={ev.is_error}>
-          <Markdown text={ev.text} />
-        </Collapsible>
-      </div>
-    );
-  }
-  if (ev.type === "status" && ev.state === "error") {
-    return (
-      <div className="px-3 py-1.5 max-w-2xl mx-auto">
-        <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">
-          {ev.detail || "agent error"}
-        </div>
-      </div>
-    );
-  }
-  if (ev.type === "status" && ev.state === "idle" && ev.detail === "interrupted") {
-    return (
-      <div className="px-3 py-1 max-w-2xl mx-auto text-center text-[11px] text-muted">
-        — stopped —
-      </div>
-    );
-  }
-  if (ev.type === "panel") {
-    return <PanelEventRow ev={ev} />;
-  }
-  return null;
-}
-
-function PanelEventRow({ ev }: { ev: Extract<AgentEvent, { type: "panel" }> }) {
-  const snap = ev.snapshot;
-  const status = ev.status;
   return (
-    <div className="px-3 py-1.5 max-w-2xl mx-auto">
-      <div className="rounded-xl border border-border bg-surface overflow-hidden">
-        <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
-          <span className={`h-2 w-2 rounded-full ${status === "starting" ? "bg-muted" : status === "running" ? "bg-accent animate-pulse" : "bg-emerald-400"}`} />
-          <span className="text-sm font-medium">Panel: {ev.task_name || "judges"}</span>
-          <span className="ml-auto text-[11px] text-muted">{status}</span>
+    <div className="flex flex-col items-center justify-center h-full px-6 py-12">
+      <div className="max-w-md w-full text-center">
+        {/* Icon */}
+        <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mx-auto mb-5">
+          <svg
+            width="28"
+            height="28"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="text-accent"
+          >
+            <path d="M12 2a10 10 0 0 1 10 10c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2z" />
+            <path d="M12 16v-4" />
+            <path d="M12 8h.01" />
+          </svg>
         </div>
-        {snap ? (
-          <div className="px-3 py-2 space-y-1.5">
-            <div className="text-[11px] text-muted">
-              {snap.meta.judges_settled}/{snap.meta.judges_total} settled · {snap.meta.age_s}s
-            </div>
-            {snap.judges.map((j) => (
-              <JudgeCard key={j.model} judge={j} />
-            ))}
-          </div>
-        ) : status === "starting" ? (
-          <div className="px-3 py-2 text-sm text-muted">Starting panel…</div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
 
-function Collapsible({
-  label, children, error,
-}: {
-  label: string; children: React.ReactNode; error?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className={`rounded-lg border ${error ? "border-rose-500/30" : "border-border"}`}>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className={`w-full text-left text-[11px] px-2 py-1 ${error ? "text-rose-300" : "text-muted"}`}
-      >
-        {open ? "▾" : "▸"} {label}
-      </button>
-      {open && (
-        <div className="px-2 pb-2 text-[13px] overflow-x-auto">
-          {children}
+        <h2 className="text-lg font-semibold text-foreground mb-2">
+          What would you like to build?
+        </h2>
+        <p className="text-sm text-muted-foreground mb-8 leading-relaxed">
+          The agent works in a private workspace and can build, edit, run, or
+          pack your code. Files appear in the file drawer.
+        </p>
+
+        {/* Suggestions */}
+        <div className="space-y-2 text-left">
+          {suggestions.map((s, i) => (
+            <button
+              key={i}
+              onClick={() => onSend(s)}
+              className="w-full text-left text-[13px] px-4 py-3 rounded-xl border border-border hover:border-accent/50 hover:bg-accent/5 transition-all text-muted-foreground hover:text-foreground leading-relaxed"
+            >
+              {s}
+            </button>
+          ))}
         </div>
-      )}
+      </div>
     </div>
   );
 }
