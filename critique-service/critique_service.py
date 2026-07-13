@@ -975,9 +975,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def _log_request(self, method: str, route: str, status: int, latency_ms: float, error: str | None = None) -> None:
         """Safely records request metrics and structural metadata to the RAM ring buffer."""
-        # Skip debug endpoints to avoid feedback loops (DebugScreen polls every 5s)
-        if route.startswith("/api/debug/"):
-            return
         from debug_log import log_entry
         import hashlib
         import base64
@@ -1061,6 +1058,11 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
+        # --- Chat session routes (bearer-gated; identity via X-JWT) ---
+        if route == "/api/chat/sessions" or route.startswith("/api/chat/sessions/"):
+            import chat_routes
+            chat_routes.handle_request("GET", self.path, {}, self)
+            return
         # --- HF Spaces health check ---
         if route == "/-/health":
             self._send_json(200, {"status": "ok", "service": "doomalaysocreate"})
@@ -1085,12 +1087,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             self._handle_debug_diagnose()
-            return
-        if route == "/api/debug/stream":
-            if not self._auth_ok():
-                self._send_json(401, {"error": "missing or invalid bearer token"})
-                return
-            self._handle_debug_stream()
             return
         # --- Tier 3: Conscious routes (bearer-gated; JWT enforced inside) ---
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
@@ -1290,9 +1286,21 @@ class Handler(BaseHTTPRequestHandler):
                                   "models": agent_sessions.agent_models()})
             return
         if route.startswith("/api/agent/"):
-            if not self._auth_ok():
+            #   transcript polling + artifact access + SSE stream share the service bearer token.
+            #   SSE via EventSource can't set custom headers, so the stream endpoint also
+            #   accepts the token as a ?bearer= query parameter.
+            ok = self._auth_ok()
+            if not ok and route.endswith("/stream"):
+                from urllib.parse import parse_qs, urlsplit
+                q = parse_qs(urlsplit(self.path).query)
+                token_q = q.get("bearer", [None])[0]
+                if token_q:
+                    self.headers["Authorization"] = f"Bearer {token_q}"
+                    ok = self._auth_ok()
+            if not ok:
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
+            # SSE stream endpoint — keep-alive, must be handled differently than JSON responses
             if route.endswith("/stream"):
                 self._handle_agent_stream(route)
                 return
@@ -1354,15 +1362,6 @@ class Handler(BaseHTTPRequestHandler):
             parts = ws_rest.split("/", 1)
             ws_id = parts[0]
             sub = parts[1] if len(parts) > 1 else ""
-            if sub == "status":
-                self._handle_workspace_status(ws_id)
-                return
-            if sub == "diff":
-                self._handle_workspace_diff(ws_id)
-                return
-            if sub == "log":
-                self._handle_workspace_log(ws_id)
-                return
             if sub == "logs":
                 self._handle_workspace_logs(ws_id)
                 return
@@ -1381,23 +1380,6 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/api/auth/push-requests/"):
             req_id = route[len("/api/auth/push-requests/"):]
             self._handle_push_request_status(req_id)
-            return
-        # --- Chat session routes (bearer-gated) ---
-        if route == "/api/chat/sessions":
-            if not self._auth_ok():
-                self._send_json(401, {"error": "missing or invalid bearer token"})
-                return
-            self._handle_chat_sessions_list()
-            return
-        if route.startswith("/api/chat/sessions/"):
-            if not self._auth_ok():
-                self._send_json(401, {"error": "missing or invalid bearer token"})
-                return
-            rest = route[len("/api/chat/sessions/"):]
-            if rest.endswith("/events"):
-                self._handle_chat_session_events(rest[:-len("/events")])
-                return
-            self._handle_chat_session_get(rest)
             return
         # -----------------------------------------------------------------------
         if not route.startswith("/api") and self._serve_static(urlsplit(self.path).path):
@@ -1576,7 +1558,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- agent orchestrator routes ------------------------------------------
 
     def _handle_agent_post(self, payload: dict) -> None:
-        #   POST /api/agent {message, session_id?, chat_session_id?, workspace_id?} -> 202
+        #   POST /api/agent {message, session_id?, workspace_id?} -> 202 {session_id, tier, status}
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
             self._send_json(400, {"error": "'message' (non-empty string) is required"})
@@ -1593,19 +1575,38 @@ class Handler(BaseHTTPRequestHandler):
         model = payload.get("model")
         model = model.strip() if isinstance(model, str) and model.strip() else None
         if model:
+            # Fuzzy-match: the frontend sends a normalized model ID
+            # (e.g. "deepseek-v4-flash-free") but the agent SDK needs the litellm
+            # format (e.g. "openai/deepseek-v4-flash-free"). Also check alias so
+            # models resolve regardless of provider prefix.
             resolved = None
             for m in agent_sessions.agent_models():
                 if m["model"] == model or m["model"].split("/")[-1] == model or m["model"].endswith("/" + model):
                     resolved = m["model"]
                     break
-            if not resolved:
-                self._send_json(400, {"error": f"model not available: {model}"})
-                return
-            model = resolved
-        if not model:
-            log_event("agent_no_model",
-                      payload_keys=list(payload.keys()),
-                      message_preview=message[:100])
+            # If not found, try resolving a logical model ID (e.g. "glm-5.1")
+            # via the panel's logical_models mapping. This bridges the model
+            # picker's condensed view (which uses logical IDs) to the agent's
+            # physical slot IDs.
+            if not resolved and "/" not in model:
+                try:
+                    panel_obj: Panel = self.server.panel  # type: ignore[attr-defined]
+                    spec = panel_obj.logical_models.get(model)
+                    if spec and spec.get("candidates"):
+                        for cand in spec["candidates"]:
+                            provider = cand.get("provider", "")
+                            model_id = cand.get("model", "")
+                            if provider and model_id:
+                                resolved = f"{provider}/{model_id}"
+                                break
+                except Exception:
+                    pass
+            # If we resolved, use it; otherwise let the backend try with what
+            # we have (don't fail hard — agent_sessions.tier_for_model will
+            # pick a sane default if the model is bogus).
+            if resolved:
+                model = resolved
+        # optional workspace_id: link agent to a user workspace sandbox
         workspace_id = payload.get("workspace_id")
         workspace_id = workspace_id.strip() if isinstance(workspace_id, str) and workspace_id.strip() else None
         if workspace_id:
@@ -1613,6 +1614,11 @@ class Handler(BaseHTTPRequestHandler):
             if not ws:
                 self._send_json(404, {"error": "workspace not found"})
                 return
+            # ownership check: agent must operate in caller's workspace.
+            # The service bearer token in Authorization was already verified by
+            # _auth_and_body; here we additionally require GitHub identity,
+            # carried in the X-JWT header (NOT Authorization, which is reserved
+            # for the service/rotation token).
             user_id = self._require_user_from_jwt()
             if not user_id:
                 self._send_json(401, {"error": "GitHub identity required — connect GitHub in settings"})
@@ -1620,13 +1626,23 @@ class Handler(BaseHTTPRequestHandler):
             if ws["user_id"] != user_id:
                 self._send_json(403, {"error": "access denied"})
                 return
-        # Chat session linking: if no existing agent session but we have a chat_session_id,
-        # use it. If we have neither, create a new chat session in DB.
+        # Optional chat_session_id: link this agent turn to a persistent chat
+        # session for history. If absent, we auto-create one so every message
+        # has a persistent home (matches the frontend's expectations).
         chat_session_id = payload.get("chat_session_id")
-        chat_session_id = chat_session_id.strip() if isinstance(chat_session_id, str) else None
-        if not session_id and not chat_session_id:
-            cs = db.create_chat_session(model=model, workspace_id=workspace_id)
-            chat_session_id = cs["id"]
+        chat_session_id = (chat_session_id.strip()
+                           if isinstance(chat_session_id, str) and chat_session_id.strip()
+                           else None)
+        if not chat_session_id:
+            # Auto-create a chat session for this turn
+            try:
+                import chat_routes
+                cs_user = self._require_user_from_jwt()
+                cs = chat_routes.create_chat_session(
+                    model=model, workspace_id=workspace_id, user_id=cs_user)
+                chat_session_id = cs["id"]
+            except Exception:
+                chat_session_id = None
         try:
             session = agent_sessions.get_or_create(session_id, model,
                                                    workspace_id=workspace_id,
@@ -1640,11 +1656,84 @@ class Handler(BaseHTTPRequestHandler):
             return
         session.submit(message.strip())
         resp = {"session_id": session.id, "tier": session.tier,
-                "model": session.model, "status": session.status,
-                "chat_session_id": chat_session_id or session.chat_session_id}
+                "model": session.model, "status": session.status}
         if session.workspace_id:
             resp["workspace_id"] = session.workspace_id
+        if chat_session_id:
+            resp["chat_session_id"] = chat_session_id
         self._send_json(202, resp)
+
+    def _handle_agent_stream(self, route: str) -> None:
+        """SSE endpoint: GET /api/agent/<sid>/stream
+
+        Subscribes to the session's event queue and pushes real-time events
+        as SSE ``data:`` frames. Falls back to polling if the session doesn't
+        support queue-based subscription (legacy sessions).
+        """
+        from urllib.parse import parse_qs, urlsplit
+        sid = route[len("/api/agent/"):-len("/stream")]
+        session = agent_sessions.get_session(sid)
+        if session is None:
+            self._send_json(404, {"error": "no such agent session"})
+            return
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            since = int(query.get("since", ["0"])[0])
+        except ValueError:
+            since = 0
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        # Use queue-based subscription if available, else fall back to polling
+        sub = getattr(session, "subscribe", None)
+        if sub is not None:
+            q = sub(since)
+            try:
+                while True:
+                    try:
+                        ev = q.get(timeout=30)
+                    except queue.Empty:
+                        try:
+                            self.wfile.write(b": heartbeat\n\n")
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError, OSError):
+                            break
+                        continue
+                    if ev is None:
+                        break
+                    line = f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                    try:
+                        self.wfile.write(line.encode("utf-8"))
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        break
+            finally:
+                unsub = getattr(session, "unsubscribe", None)
+                if unsub is not None:
+                    unsub(q)
+        else:
+            # Legacy polling fallback
+            import time as _time
+            cursor = since
+            try:
+                while True:
+                    snap = session.snapshot(since=cursor)
+                    for ev in snap.get("events", []):
+                        self.wfile.write(f"id: {cursor}\ndata: {json.dumps(ev)}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                        cursor += 1
+                    status = snap.get("status", "running")
+                    if status not in ("running", "starting"):
+                        break
+                    _time.sleep(0.2)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
 
     def _handle_agent_get(self, route: str) -> None:
         from urllib.parse import parse_qs, urlsplit
@@ -1661,17 +1750,7 @@ class Handler(BaseHTTPRequestHandler):
                 since = int(query.get("since", ["0"])[0])
             except ValueError:
                 since = 0
-            snap = session.snapshot(since=since)
-            # Persist new events to chat_events if this agent session is linked to a chat session
-            if session.chat_session_id and snap["events"]:
-                new_events = [ev for ev in snap["events"] if ev.get("i", -1) >= session.persisted_seq]
-                if new_events:
-                    try:
-                        db.append_chat_events(session.chat_session_id, new_events)
-                        session.persisted_seq = snap["next"]
-                    except Exception:
-                        pass  # non-fatal
-            self._send_json(200, snap)
+            self._send_json(200, session.snapshot(since=since))
             return
 
         if len(parts) == 2 and parts[1] == "files":   # list artifacts
@@ -1717,106 +1796,6 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json(404, {"error": "not found"})
-
-    def _handle_agent_stream(self, route: str) -> None:
-        """SSE endpoint — pushes agent events in real-time.
-        GET /api/agent/<sid>/stream  →  text/event-stream"""
-        sid = route[len("/api/agent/"):-len("/stream")]
-        session = agent_sessions.get_session(sid)
-        if session is None:
-            self._send_json(404, {"error": "no such agent session"})
-            return
-        import queue
-        q: queue.Queue = queue.Queue(maxsize=512)
-        session.register_stream_queue(q)
-        try:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            # Send existing events as initial snapshot
-            snap = session.snapshot(0)
-            for ev in snap["events"]:
-                self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
-            self.wfile.flush()
-            last_seq = snap["next"]
-            while True:
-                try:
-                    ev = q.get(timeout=5.0)
-                    self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
-                    self.wfile.flush()
-                    last_seq = ev.get("i", -1) + 1
-                except queue.Empty:
-                    snap = session.snapshot(last_seq)
-                    if snap["status"] not in ("running", "starting"):
-                        if session.chat_session_id and snap["events"]:
-                            new_evs = [ev for ev in snap["events"] if ev.get("i", -1) >= session.persisted_seq]
-                            if new_evs:
-                                try:
-                                    db.append_chat_events(session.chat_session_id, new_evs)
-                                    session.persisted_seq = snap["next"]
-                                except Exception:
-                                    pass
-                        done = json.dumps({"status": snap["status"]})
-                        self.wfile.write(f"event: done\ndata: {done}\n\n".encode())
-                        self.wfile.flush()
-                        return
-                    self.wfile.write(b": keepalive\n\n")
-                    self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
-        finally:
-            session.unregister_stream_queue(q)
-
-    # -- chat session handlers ------------------------------------------------
-
-    def _handle_chat_sessions_list(self) -> None:
-        sessions = db.list_chat_sessions()
-        self._send_json(200, {"sessions": sessions})
-
-    def _handle_chat_session_get(self, session_id: str) -> None:
-        cs = db.get_chat_session(session_id)
-        if not cs:
-            self._send_json(404, {"error": "chat session not found"})
-            return
-        self._send_json(200, cs)
-
-    def _handle_chat_session_events(self, session_id: str) -> None:
-        cs = db.get_chat_session(session_id)
-        if not cs:
-            self._send_json(404, {"error": "chat session not found"})
-            return
-        events = db.get_chat_events(session_id)
-        self._send_json(200, {"session_id": session_id, "events": events})
-
-    def _handle_chat_session_create(self, payload: dict) -> None:
-        title = str(payload.get("title", "New Chat")).strip() or "New Chat"
-        model = str(payload.get("model", "")).strip() or None
-        cs = db.create_chat_session(title=title, model=model)
-        self._send_json(201, cs)
-
-    def _handle_chat_session_update(self, session_id: str, payload: dict) -> None:
-        fields = {}
-        if "title" in payload:
-            title = str(payload["title"]).strip()
-            if title:
-                fields["title"] = title
-        if "model" in payload:
-            fields["model"] = str(payload["model"]).strip() or None
-        updated = db.update_chat_session(session_id, **fields)
-        if not updated:
-            self._send_json(404, {"error": "chat session not found"})
-            return
-        self._send_json(200, updated)
-
-    def _handle_chat_session_delete(self, session_id: str) -> None:
-        ok = db.delete_chat_session(session_id)
-        if not ok:
-            self._send_json(404, {"error": "chat session not found"})
-            return
-        self._send_json(200, {"deleted": session_id})
 
     def _read_json_body(self) -> dict | None:
         """Parse the request body as JSON (no auth check — caller already
@@ -1943,7 +1922,7 @@ class Handler(BaseHTTPRequestHandler):
         _ALLOWED = {
             "NVIDIA_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
             "OPENROUTER_API_KEY", "CEREBRAS_API_KEY",
-            "CF_API_TOKEN", "CF_ACCOUNT_ID", "ZAI_API_KEY", "MOONSHOT_API_KEY",
+            "CF_API_TOKEN", "CF_ACCOUNT_ID", "MOONSHOT_API_KEY",
             "TAVILY_API_KEY", "ANTHROPIC_API_KEY",
         }
         if key_name not in _ALLOWED:
@@ -2529,53 +2508,9 @@ class Handler(BaseHTTPRequestHandler):
             ]
         })
 
-    def _handle_debug_stream(self) -> None:
-        """SSE endpoint: streams log entries in real-time.
-        
-        GET /api/debug/stream (auth-gated)
-        Sends `data: <json>\n\n` for each new log entry. Includes an initial
-        backlog of the last 20 entries on connect. Sends keepalive comments
-        every 30s to keep the connection open.
-        """
-        import queue as _queue
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self._set_csp_header()
-        self.end_headers()
-
-        q = debug_log.subscribe()
-        try:
-            backlog = debug_log.get_recent_logs(tail=20)
-            for record in backlog:
-                line = f"data: {json.dumps(record, ensure_ascii=False)}\n\n"
-                self.wfile.write(line.encode("utf-8"))
-            self.wfile.flush()
-
-            while True:
-                try:
-                    record = q.get(timeout=30)
-                    line = f"data: {json.dumps(record, ensure_ascii=False)}\n\n"
-                    self.wfile.write(line.encode("utf-8"))
-                    self.wfile.flush()
-                except _queue.Empty:
-                    self.wfile.write(b": keepalive\n\n")
-                    self.wfile.flush()
-        except BrokenPipeError:
-            pass
-        except ConnectionResetError:
-            pass
-        except Exception:
-            pass
-        finally:
-            debug_log.unsubscribe(q)
-
     def _handle_workspace_get(self, ws_id: str) -> None:
-        user_id = self._workspace_user(ws_id)
+        user_id = self._require_user()
         if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
             return
         ws = github_integration.get_workspace(ws_id)
         if not ws:
@@ -2584,9 +2519,7 @@ class Handler(BaseHTTPRequestHandler):
         if ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
-        # Repair sandbox if missing (e.g. after Space restart)
-        github_integration.ensure_workspace_sandbox(ws_id)
-        self._send_json(200, github_integration.get_workspace(ws_id))
+        self._send_json(200, ws)
 
     def _handle_workspace_create(self) -> None:
         user_id = self._require_user()
@@ -2613,9 +2546,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(exc)})
 
     def _handle_workspace_update(self, ws_id: str) -> None:
-        user_id = self._workspace_user(ws_id)
+        user_id = self._require_user()
         if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
             return
         payload = self._read_json_body()
         if payload is None:
@@ -2631,9 +2563,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(exc)})
 
     def _handle_workspace_delete(self, ws_id: str) -> None:
-        user_id = self._workspace_user(ws_id)
+        user_id = self._require_user()
         if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
             return
         ws = db.get_workspace(ws_id)
         if not ws or ws["user_id"] != user_id:
@@ -2645,9 +2576,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "workspace not found"})
 
     def _handle_workspace_commit(self, ws_id: str) -> None:
-        user_id = self._workspace_user(ws_id)
+        user_id = self._require_user()
         if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
             return
         payload = self._read_json_body()
         if payload is None:
@@ -2660,7 +2590,6 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
-        github_integration.ensure_workspace_sandbox(ws_id)
         try:
             sha = github_integration.commit_changes(ws["sandbox_path"], message)
             self._send_json(200, {"commit_sha": sha})
@@ -2668,9 +2597,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(exc)})
 
     def _handle_workspace_push(self, ws_id: str) -> None:
-        user_id = self._workspace_user(ws_id)
+        user_id = self._require_user()
         if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
             return
         payload = self._read_json_body()
         if payload is None:
@@ -2679,7 +2607,6 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
-        github_integration.ensure_workspace_sandbox(ws_id)
         branch = payload.get("branch", ws.get("current_branch", "main"))
         force = bool(payload.get("force", False))
         auto = bool(payload.get("auto_approve", False))
@@ -2704,9 +2631,8 @@ class Handler(BaseHTTPRequestHandler):
             })
 
     def _handle_workspace_pr(self, ws_id: str) -> None:
-        user_id = self._workspace_user(ws_id)
+        user_id = self._require_user()
         if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
             return
         payload = self._read_json_body()
         if payload is None:
@@ -2719,7 +2645,6 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
-        github_integration.ensure_workspace_sandbox(ws_id)
         auto = bool(payload.get("auto_approve", False))
         if auto:
             try:
@@ -2745,15 +2670,13 @@ class Handler(BaseHTTPRequestHandler):
             })
 
     def _handle_workspace_publish(self, ws_id: str) -> None:
-        user_id = self._workspace_user(ws_id)
+        user_id = self._require_user()
         if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
             return
         ws = db.get_workspace(ws_id)
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
-        github_integration.ensure_workspace_sandbox(ws_id)
         try:
             entry = github_integration.publish_workspace(user_id, ws_id)
             self._send_json(200, entry)
@@ -2761,9 +2684,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(exc)})
 
     def _handle_workspace_unpublish(self, ws_id: str) -> None:
-        user_id = self._workspace_user(ws_id)
+        user_id = self._require_user()
         if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
             return
         ws = db.get_workspace(ws_id)
         if not ws or ws["user_id"] != user_id:
@@ -2808,9 +2730,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, result)
 
     def _handle_workspace_logs(self, ws_id: str) -> None:
-        user_id = self._workspace_user(ws_id)
+        user_id = self._require_user()
         if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
             return
         ws = db.get_workspace(ws_id)
         if not ws or ws["user_id"] != user_id:
@@ -2864,129 +2785,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json(502, {"error": str(exc)})
 
-    def _workspace_user(self, ws_id: str) -> str | None:
-        """Resolve user_id for a workspace request without sending 401.
-
-        Tries JWT from Authorization/X-JWT first (frontend), falls back to
-        rotation token + workspace ownership (AgentClient uses rotation
-        tokens). Returns None if unauthorised — caller sends the HTTP
-        response. Does NOT send any response itself.
-        """
-        payload = None
-        auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth[len("Bearer "):].strip()
-            if token:
-                payload = jwt_auth.verify_jwt(token, expected_aud=self._space_host())
-                if not payload:
-                    payload = jwt_auth.verify_jwt(token, allow_any_aud=True)
-        if not payload:
-            x_jwt = self.headers.get("X-JWT", "").strip()
-            if x_jwt:
-                payload = jwt_auth.verify_jwt(x_jwt, expected_aud=self._space_host())
-                if not payload:
-                    payload = jwt_auth.verify_jwt(x_jwt, allow_any_aud=True)
-        if payload:
-            user_id = payload["sub"]
-            user = db.get_user(user_id)
-            if not user:
-                github_id = payload.get("github_id")
-                github_username = payload.get("github_username")
-                github_token_enc = payload.get("github_token_enc")
-                hf_id = payload.get("hf_id")
-                hf_token_enc = payload.get("hf_token_enc")
-                db.upsert_user(
-                    user_id=user_id,
-                    github_id=github_id if (github_id and github_token_enc) else None,
-                    github_username=github_username if (github_id and github_token_enc) else None,
-                    github_token_encrypted=github_token_enc if (github_id and github_token_enc) else None,
-                    hf_id=hf_id if (hf_id and hf_token_enc) else None,
-                    hf_token_encrypted=hf_token_enc if (hf_id and hf_token_enc) else None,
-                )
-            return user_id
-        if self._auth_ok():
-            ws = db.get_workspace(ws_id)
-            if ws:
-                return ws["user_id"]
-        return None
-
-    def _handle_workspace_status(self, ws_id: str) -> None:
-        """GET /api/workspaces/<id>/status — return git status --porcelain as structured JSON."""
-        user_id = self._workspace_user(ws_id)
-        if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
-            return
-        ws = db.get_workspace(ws_id)
-        if not ws or ws["user_id"] != user_id:
-            self._send_json(403, {"error": "access denied"})
-            return
-        github_integration.ensure_workspace_sandbox(ws_id)
-        try:
-            raw = github_integration.run_git_command(ws["sandbox_path"], "status", "--porcelain")
-            files = []
-            for line in raw.splitlines():
-                line = line.strip()
-                if len(line) < 3:
-                    continue
-                files.append({"status": line[:2].strip(), "path": line[3:]})
-            # Also get current branch
-            branch = github_integration.run_git_command(ws["sandbox_path"], "rev-parse", "--abbrev-ref", "HEAD")
-            self._send_json(200, {"branch": branch, "files": files, "dirty": len(files) > 0})
-        except Exception as exc:
-            self._send_json(500, {"error": str(exc)})
-
-    def _handle_workspace_diff(self, ws_id: str) -> None:
-        """GET /api/workspaces/<id>/diff — return git diff (unified, staged+unstaged)."""
-        user_id = self._workspace_user(ws_id)
-        if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
-            return
-        ws = db.get_workspace(ws_id)
-        if not ws or ws["user_id"] != user_id:
-            self._send_json(403, {"error": "access denied"})
-            return
-        github_integration.ensure_workspace_sandbox(ws_id)
-        try:
-            raw = github_integration.run_git_command(ws["sandbox_path"], "diff", "--no-color")
-            self._send_json(200, {"diff": raw, "has_changes": bool(raw.strip())})
-        except Exception as exc:
-            self._send_json(500, {"error": str(exc)})
-
-    def _handle_workspace_log(self, ws_id: str) -> None:
-        """GET /api/workspaces/<id>/log?limit=10 — return recent git log."""
-        user_id = self._workspace_user(ws_id)
-        if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
-            return
-        ws = db.get_workspace(ws_id)
-        if not ws or ws["user_id"] != user_id:
-            self._send_json(403, {"error": "access denied"})
-            return
-        github_integration.ensure_workspace_sandbox(ws_id)
-        from urllib.parse import parse_qs, urlsplit
-        qs = parse_qs(urlsplit(self.path).query)
-        try:
-            limit = min(int(qs.get("limit", ["10"])[0]), 50)
-        except (ValueError, IndexError):
-            limit = 10
-        try:
-            raw = github_integration.run_git_command(
-                ws["sandbox_path"], "log", f"-{limit}", "--format=%H|%an|%ae|%ai|%s")
-            commits = []
-            for line in raw.splitlines():
-                parts = line.split("|", 4)
-                if len(parts) == 5:
-                    commits.append({"hash": parts[0], "author": parts[1],
-                                    "email": parts[2], "date": parts[3],
-                                    "message": parts[4]})
-            self._send_json(200, {"commits": commits})
-        except Exception as exc:
-            self._send_json(500, {"error": str(exc)})
-
     def _handle_workspace_checkout(self, ws_id: str) -> None:
-        user_id = self._workspace_user(ws_id)
+        user_id = self._require_user()
         if not user_id:
-            self._send_json(401, {"error": "unauthorized"})
             return
         payload = self._read_json_body()
         if payload is None:
@@ -2999,7 +2800,6 @@ class Handler(BaseHTTPRequestHandler):
         if not ws or ws["user_id"] != user_id:
             self._send_json(403, {"error": "access denied"})
             return
-        github_integration.ensure_workspace_sandbox(ws_id)
         try:
             github_integration.checkout_branch(ws["sandbox_path"], branch)
             db.update_workspace(ws_id, current_branch=branch)
@@ -3125,22 +2925,13 @@ class Handler(BaseHTTPRequestHandler):
             ws_id = route[len("/api/workspaces/"):-len("/checkout")]
             self._handle_workspace_checkout(ws_id)
             return
-        # --- Chat session POST routes (bearer-gated) ---
-        if route == "/api/chat/sessions":
-            payload = self._auth_and_body()
-            if payload is None:
-                return
-            self._handle_chat_session_create(payload)
-            return
-        if route.startswith("/api/chat/sessions/") and route.endswith("/update"):
-            if not self._auth_ok():
-                self._send_json(401, {"error": "missing or invalid bearer token"})
-                return
-            sid = route[len("/api/chat/sessions/"):-len("/update")]
+        # --- Chat session routes (bearer-gated; identity via X-JWT) -----------
+        if route == "/api/chat/sessions" or route.startswith("/api/chat/sessions/"):
+            import chat_routes
             payload = self._read_json_body()
             if payload is None:
                 return
-            self._handle_chat_session_update(sid, payload)
+            chat_routes.handle_request("POST", self.path, payload, self)
             return
         # -----------------------------------------------------------------------
         # POST /api/agent shares the same _auth_and_body gate as the panel routes
@@ -3225,6 +3016,11 @@ class Handler(BaseHTTPRequestHandler):
     def _do_DELETE(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
+        # --- Chat session routes (bearer-gated; identity via X-JWT) ---
+        if route.startswith("/api/chat/sessions/"):
+            import chat_routes
+            chat_routes.handle_request("DELETE", self.path, {}, self)
+            return
         # --- Debug log clear (auth-gated) ---
         if route == "/api/debug/clear":
             if not self._auth_ok():
@@ -3248,12 +3044,6 @@ class Handler(BaseHTTPRequestHandler):
             ws_id = route[len("/api/workspaces/"):]
             if ws_id:
                 self._handle_workspace_delete(ws_id)
-                return
-        # chat session deletion
-        if route.startswith("/api/chat/sessions/"):
-            sid = route[len("/api/chat/sessions/"):]
-            if sid:
-                self._handle_chat_session_delete(sid)
                 return
         # template deletion
         if not route.startswith("/api/templates/"):
@@ -3550,12 +3340,12 @@ def main() -> int:
     server.jobs = _jobs  # type: ignore[attr-defined]
 
     log_event("startup", host=host, port=port,
-              providers=[p.name for p in _panel.providers],
-              default_panel=_panel.default_panel,
+              providers=[p.name for p in panel.providers],
+              default_panel=panel.default_panel,
               token_configured=_auth_configured(),
               token_rotation=bool(os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip()))
     print(f"doomalaysocreate model panel listening on {host}:{port}  "
-          f"(providers={[p.name for p in _panel.providers]})", flush=True)
+          f"(providers={[p.name for p in panel.providers]})", flush=True)
     # Graceful shutdown: on SIGTERM (HF Space rebuild/stop), upload DB one last time
     import signal
     signal.signal(signal.SIGTERM, lambda *a: server.shutdown())
