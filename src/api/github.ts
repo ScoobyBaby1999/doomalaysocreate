@@ -313,6 +313,11 @@ export class GitHubClient {
     );
   }
 
+  /** List files in a workspace sandbox (no active agent session needed). */
+  workspaceFiles(id: string): Promise<{ workspace_id: string; files: { path: string; size: number; mtime: number }[] }> {
+    return this.req(`/api/workspace/files?workspace_id=${encodeURIComponent(id)}`);
+  }
+
   // -- Registry ------------------------------------------------------------
 
   publish(id: string): Promise<RegistryEntry> {
