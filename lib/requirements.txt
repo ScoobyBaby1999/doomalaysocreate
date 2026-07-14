@@ -24,3 +24,6 @@ strands-agents-tools>=0.8
 # with "No module named 'fastapi'". Pin minimal versions.
 fastapi>=0.100
 uvicorn>=0.23
+# litellm imports orjson for fast JSON serialization. Without it the agent
+# tier crashes at call time with "No module named 'orjson'".
+orjson>=3.9
