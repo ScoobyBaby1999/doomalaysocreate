@@ -82,16 +82,6 @@ AGENT_SYSTEM_PROMPT = (
 #   picker surfaces EVERY entry whose key is set, not just the first.
 #   Overridable via AGENT_OPEN_MODEL / AGENT_OPEN_BASE_URL / AGENT_OPEN_KEY_ENV.
 
-# Providers in our catalog → fetch models + base_url dynamically.
-_PROVIDER_AGENT_MAP: dict[str, tuple[str, str]] = {
-    "nvidia": ("NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1"),
-    "opencode-zen": ("OPENCODE_ZEN_API_KEY", "https://opencode.ai/zen/v1"),
-    "opencode-go": ("OPENCODE_GO_API_KEY", "https://opencode.ai/zen/go/v1"),
-    "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
-    "cloudflare": ("CF_API_TOKEN", "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1"),
-    "github-models": ("GITHUB_TOKEN", "https://models.github.ai/inference"),
-}
-
 _open_models_cache: list[tuple[str, str, str, str | None, dict | None]] | None = None
 
 
@@ -842,6 +832,44 @@ class StrandsAdapter(BaseAdapter):
         shell_mod = _types.ModuleType("shell")
         shell_mod.tool = _guarded_shell
         tools.append(shell_mod)
+
+        # Register the agent_panel tool so the agent can invoke the judge
+        # panel directly from chat. This wraps the conscious_tools._agent_panel
+        # handler as a Strands-compatible tool module.
+        try:
+            import conscious_tools
+            sess = self._session_ref()
+            if sess is not None:
+                def _panel_tool_wrapper(**kwargs):
+                    """Invoke the judge panel for a critique. Args: prompt (str, required),
+                    panel (list, optional), effort (str, optional), profile (str, optional)."""
+                    result = conscious_tools._agent_panel(sess, kwargs)
+                    return result
+                panel_mod = _types.ModuleType("agent_panel")
+                panel_mod.tool = _panel_tool_wrapper
+                panel_mod.TOOL_SPEC = {
+                    "name": "agent_panel",
+                    "description": (
+                        "Invoke the multi-model judge panel for a critique. "
+                        "Fans the prompt out to a diverse panel of frontier LLMs "
+                        "and returns merged results. Use for code review, plan "
+                        "critique, or getting multiple expert opinions."
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "The critique prompt"},
+                            "panel": {"type": "array", "items": {"type": "string"},
+                                      "description": "Optional: list of model names"},
+                            "effort": {"type": "string", "description": "low|med|high|max"},
+                        },
+                        "required": ["prompt"],
+                    },
+                }
+                tools.append(panel_mod)
+        except Exception:
+            pass
+
         # Log which tools loaded so we can verify capabilities
         loaded = [getattr(t, "TOOL_SPEC", {}).get("name", "?") if hasattr(t, "TOOL_SPEC")
                   else getattr(t, "__name__", "?") for t in tools]
@@ -853,8 +881,8 @@ class StrandsAdapter(BaseAdapter):
         self.agent = Agent(model=llm, tools=tools, system_prompt=self.system_prompt,
                            callback_handler=None)
         self._msg_cursor = 0
-        # Tier 3 — register conscious tools on the owning session (Phase 1:
-        # stored for inspection; Phase 2 wraps them as strands_tools modules).
+        # Register conscious tools for inspection (the panel tool is already
+        # registered above as a Strands tool).
         try:
             import conscious_stubs
             conscious_stubs.register_conscious_tools(self._session_ref(), self)
