@@ -98,7 +98,10 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
     the agent without hardcoding model names.
     """
     global _open_models_cache
-    if _open_models_cache is not None:
+    # Re-probe if the cache is empty — the panel sync may not have completed
+    # on the first call (cache poisoning fix). A non-empty cache is still
+    # trusted (the catalog + synced models don't change at runtime).
+    if _open_models_cache is not None and len(_open_models_cache) > 0:
         return _open_models_cache
 
     entries: list[tuple[str, str, str, str | None]] = []
@@ -169,16 +172,52 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
     return entries
 
 
-def _resolve_open_model(user_model: str) -> tuple[str, str | None] | None:
-    """Match a user-provided model name (e.g. ``deepseek-v4-flash-free``) to a
-    litellm model string + base_url from the dynamic open-models list.
+def _resolve_open_model(user_model: str) -> tuple[str, str | None, str | None, str | None] | None:
+    """Match a user-provided model name to a litellm model string + base_url +
+    env_var + provider name from the dynamic open-models list.
 
-    Returns ``(litellm_model, base_url)`` or ``None`` if no match.
+    Handles all input formats:
+    - Canonical litellm: ``openai/kimi-k2.6`` (exact match)
+    - Panel provider/model: ``privatemodeai/kimi-k2.6`` (match by last segment)
+    - Logical/bare name: ``kimi-k2.6`` (match by last segment)
+    - Partial: ``deepseek-v4-flash`` (match by last segment)
+
+    Prefers an exact full match, then falls back to last-segment matching.
+    When the same model name exists on multiple providers, the first one in
+    catalog order wins (same as _build_open_models dedup). To route to a
+    specific provider, pass ``provider/model`` — the provider prefix is
+    matched against the env_var's provider name.
+
+    Returns ``(litellm_model, base_url, env_var, provider_name)`` or ``None``.
     """
+    if not user_model:
+        return None
     user_last = user_model.split("/")[-1]
-    for _env, _label, model, base in _build_open_models():
-        if model == user_model or model.split("/")[-1] == user_last:
-            return (model, base)
+    # Also extract a provider hint if the user passed "provider/model"
+    user_provider = user_model.split("/")[0] if "/" in user_model else ""
+    models = _build_open_models()
+    # Pass 1: exact full match (canonical litellm string)
+    for _env, _label, model, base in models:
+        if model == user_model:
+            return (model, base, _env, _label)
+    # Pass 2: match by provider hint + last segment (e.g. "privatemodeai/kimi-k2.6")
+    if user_provider:
+        for env, label, model, base in models:
+            model_last = model.split("/")[-1]
+            # label looks like "kimi-k2.6 (PrivateMode AI)" — extract provider
+            label_provider = ""
+            if "(" in label and ")" in label:
+                label_provider = label[ label.index("(") + 1 : label.rindex(")") ].strip().lower()
+            # env var maps to provider: PRIVATEMODEAI_API_KEY -> privatemodeai
+            env_provider = env.lower().replace("_api_key", "").replace("_token", "").replace("_api_token", "")
+            if (model_last == user_last and
+                (user_provider.lower() in env_provider or
+                 user_provider.lower() in label_provider.lower())):
+                return (model, base, env, label)
+    # Pass 3: last-segment match (bare logical names, partial names)
+    for env, label, model, base in models:
+        if model.split("/")[-1] == user_last:
+            return (model, base, env, label)
     return None
 
 
@@ -694,6 +733,10 @@ class StrandsAdapter(BaseAdapter):
         self.model = model
         self.agent = None
         self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
+        # Resolved routing info (set by open(), surfaced in snapshot for verification)
+        self.resolved_model: str | None = None
+        self.resolved_provider: str | None = None
+        self.resolved_api_base: str | None = None
 
     def open(self) -> None:
         import os as _os
@@ -705,9 +748,22 @@ class StrandsAdapter(BaseAdapter):
         _os.environ["BYPASS_TOOL_CONSENT"] = "true"
 
         if self.model:
-            model = self.model
-            key_env = _model_key_env(model) or _os.environ.get("AGENT_OPEN_KEY_ENV", "")
-            base_url = _model_base_url(model)
+            # CRITICAL: resolve through _resolve_open_model so we get the
+            # canonical litellm model string (openai/<model_id>) + the correct
+            # api_base + env_var for this specific model. Without this, a
+            # panel-format string like "privatemodeai/kimi-k2.6" reaches
+            # LiteLLM directly and throws BadRequestError.
+            pair = _resolve_open_model(self.model)
+            if pair:
+                model, base_url, key_env, provider_label = pair
+            else:
+                # Fallback: use the raw model string + best-effort key/base lookup.
+                # This path may fail in LiteLLM if the string isn't a recognized
+                # litellm format, but we keep it for AGENT_OPEN_* overrides.
+                model = self.model
+                key_env = _model_key_env(model) or _os.environ.get("AGENT_OPEN_KEY_ENV", "")
+                base_url = _model_base_url(model)
+                provider_label = None
             if not key_env or not _os.environ.get(key_env, "").strip():
                 raise RuntimeError(f"no API key for model {model}")
         else:
@@ -715,6 +771,12 @@ class StrandsAdapter(BaseAdapter):
             if picked is None:
                 raise RuntimeError("no open-tier provider key available")
             key_env, model, base_url = picked
+            provider_label = None
+
+        # Record resolved routing for verification (snapshot + /api/agent response)
+        self.resolved_model = model
+        self.resolved_api_base = base_url
+        self.resolved_provider = provider_label or key_env
 
         # client_args pass straight to litellm.completion (api_base = custom
         # OpenAI-compatible endpoint, e.g. Z.ai for GLM, NVIDIA for Kimi).
@@ -1012,7 +1074,15 @@ class AgentSession:
     def snapshot(self, since: int = 0) -> dict:
         with self.lock:
             events = self.events[max(0, since):]
+            # Include resolved routing info so the frontend can verify which
+            # model/provider actually served the request (not just what was
+            # requested). self.adapter is set in _run() after open(); before
+            # that, resolved_* are None.
+            adapter = self.adapter
             return {"session_id": self.id, "tier": self.tier, "model": self.model,
+                    "resolved_model": getattr(adapter, "resolved_model", None),
+                    "resolved_provider": getattr(adapter, "resolved_provider", None),
+                    "resolved_api_base": getattr(adapter, "resolved_api_base", None),
                     "status": self.status, "events": events, "next": len(self.events)}
 
     # -- lifecycle ----------------------------------------------------------
@@ -1115,6 +1185,22 @@ def get_session(session_id: str) -> AgentSession | None:
         return _sessions.get(session_id)
 
 
+def _normalize_model_for_compare(model: str | None) -> str | None:
+    """Normalize a model string for comparison so that equivalent models from
+    different formats compare equal. E.g. all of these -> "kimi-k2.6":
+      "kimi-k2.6", "openai/kimi-k2.6", "privatemodeai/kimi-k2.6"
+    Returns None if model is None/empty.
+    """
+    if not model:
+        return None
+    m = model.strip()
+    if not m:
+        return None
+    # Strip the litellm "openai/" prefix and any "provider/" prefix
+    parts = m.split("/")
+    return parts[-1].lower()
+
+
 def get_or_create(session_id: str | None = None,
                   model: str | None = None,
                   workspace_id: str | None = None,
@@ -1136,11 +1222,28 @@ def get_or_create(session_id: str | None = None,
         _sweep_locked()
         if session_id and session_id in _sessions:
             return _sessions[session_id]
-        # Reuse existing agent session linked to this chat_session_id
+        # Reuse existing agent session linked to this chat_session_id — BUT
+        # only if the model hasn't changed. If the user switched models mid-
+        # conversation, we must create a fresh agent session so the new model
+        # actually takes effect (the old session's adapter is pinned to the
+        # old model). The old session is closed to free its resources.
         if chat_session_id:
+            existing = None
             for s in _sessions.values():
                 if s.chat_session_id == chat_session_id:
-                    return s
+                    existing = s
+                    break
+            if existing is not None:
+                # Normalize both model strings for comparison so
+                # "kimi-k2.6" and "openai/kimi-k2.6" are treated as the same.
+                norm_existing = _normalize_model_for_compare(existing.model)
+                norm_new = _normalize_model_for_compare(model)
+                if norm_new is None or norm_existing == norm_new:
+                    return existing
+                # Model changed — close the old session and fall through to
+                # create a new one with the new model.
+                existing.close()
+                _sessions.pop(existing.id, None)
         if len(_sessions) >= MAX_SESSIONS:
             raise CapacityError(f"max {MAX_SESSIONS} concurrent agent sessions")
         # resolve workspace_id to a filesystem path

@@ -1576,33 +1576,27 @@ class Handler(BaseHTTPRequestHandler):
         session_id = session_id.strip() if isinstance(session_id, str) else None
         model = payload.get("model")
         model = model.strip() if isinstance(model, str) and model.strip() else None
+        # Model resolution: the frontend can send any of these formats:
+        #   - Canonical litellm:  "openai/kimi-k2.6"
+        #   - Panel provider/model: "privatemodeai/kimi-k2.6"
+        #   - Logical/bare name:  "kimi-k2.6" or "deepseek-v4-flash"
+        # We normalize to the canonical litellm string via _resolve_open_model.
+        # If that fails, we try the panel's logical_models mapping as a bridge.
+        # If still unresolved, we pass the raw model through — StrandsAdapter.open()
+        # also calls _resolve_open_model as a last line of defense, and
+        # tier_for_model falls back to mock if nothing matches.
         if model:
-            # Fuzzy-match: the frontend sends a normalized model ID
-            # (e.g. "deepseek-v4-flash-free") but the agent SDK needs the litellm
-            # format (e.g. "openai/deepseek-v4-flash-free"). Also check alias so
-            # models resolve regardless of provider prefix.
             resolved = None
-            for m in agent_sessions.agent_models():
-                if m["model"] == model or m["model"].split("/")[-1] == model or m["model"].endswith("/" + model):
-                    resolved = m["model"]
-                    break
-            # If not found, try agent_sessions._resolve_open_model which searches
-            # the full open-models list (built from providers_catalog + synced
-            # models) and returns the correct litellm format (openai/<model_id>)
-            # with the matching base_url. This handles logical IDs, partial
-            # names, and provider/model strings from the panel's logical_models.
-            if not resolved:
-                try:
-                    pair = agent_sessions._resolve_open_model(model)
-                    if pair:
-                        resolved = pair[0]  # litellm_model (already openai/...)
-                except Exception:
-                    pass
-            # Last resort: resolve a logical model ID (e.g. "glm-5.1") via the
-            # panel's logical_models mapping, then re-resolve the physical
-            # provider/model through _resolve_open_model to get the litellm
-            # format. NEVER pass provider/model directly to LiteLLM — it needs
-            # the openai/ prefix for custom OpenAI-compatible endpoints.
+            try:
+                pair = agent_sessions._resolve_open_model(model)
+                if pair:
+                    resolved = pair[0]  # canonical litellm string (openai/...)
+            except Exception:
+                pass
+            # Bridge: resolve a bare logical ID via the panel's logical_models
+            # mapping, then re-resolve through _resolve_open_model to get the
+            # litellm format. This handles the condensed model picker which
+            # uses logical IDs.
             if not resolved and "/" not in model:
                 try:
                     panel_obj: Panel = self.server.panel  # type: ignore[attr-defined]
@@ -1612,27 +1606,17 @@ class Handler(BaseHTTPRequestHandler):
                             provider = cand.get("provider", "")
                             model_id = cand.get("model", "")
                             if provider and model_id:
-                                # Try to resolve provider/model through the
-                                # open-models list to get the correct litellm
-                                # prefix + base_url.
                                 pair = agent_sessions._resolve_open_model(
                                     f"{provider}/{model_id}")
                                 if pair:
                                     resolved = pair[0]
                                     break
-                                # Fallback: if the provider/model isn't in the
-                                # open list (e.g. a provider with no key), try
-                                # just the model_id — _resolve_open_model will
-                                # match it by suffix against any provider.
                                 pair = agent_sessions._resolve_open_model(model_id)
                                 if pair:
                                     resolved = pair[0]
                                     break
                 except Exception:
                     pass
-            # If we resolved, use it; otherwise let the backend try with what
-            # we have (don't fail hard — agent_sessions.tier_for_model will
-            # pick a sane default if the model is bogus).
             if resolved:
                 model = resolved
         # optional workspace_id: link agent to a user workspace sandbox
@@ -1685,7 +1669,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         session.submit(message.strip())
         resp = {"session_id": session.id, "tier": session.tier,
-                "model": session.model, "status": session.status}
+                "model": session.model, "status": session.status,
+                "requested_model": model}
+        # Include resolved routing info if available (set by StrandsAdapter.open()
+        # in a background thread — may be None if the adapter hasn't opened yet).
+        adapter = getattr(session, "adapter", None)
+        if adapter is not None:
+            rm = getattr(adapter, "resolved_model", None)
+            rp = getattr(adapter, "resolved_provider", None)
+            if rm:
+                resp["resolved_model"] = rm
+            if rp:
+                resp["resolved_provider"] = rp
         if session.workspace_id:
             resp["workspace_id"] = session.workspace_id
         if chat_session_id:
