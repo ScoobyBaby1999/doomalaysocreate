@@ -759,6 +759,8 @@ export const useChatStore = create<ChatState>()(
           status: "idle",
           isBusy: false,
           isStreaming: false,
+          cost: null,
+          files: [],
           currentModel: null,
           resolvedModel: null,
           resolvedProvider: null,
@@ -987,6 +989,11 @@ async function _runTurn(
       model || undefined,
       get().workspaceId || undefined,
       sessionId,
+      {
+        effort: get().effort,
+        web_search: get().webSearch,
+        deep_research: get().deepResearch,
+      },
     );
     agentSid = start.session_id;
 

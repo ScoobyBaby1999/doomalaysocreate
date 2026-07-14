@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 import type { Settings } from "../api/panel";
 import { AgentClient } from "../api/agent";
+import { GitHubClient } from "../api/github";
 import { useChatStore } from "../state/chatStore";
 import { useModelStore } from "../lib/model-store";
 import { ChatMessageBubble } from "../components/ChatMessageBubble";
@@ -66,6 +67,9 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const resolvedModel = useChatStore((s) => s.resolvedModel);
   const resolvedProvider = useChatStore((s) => s.resolvedProvider);
   const requestedModel = useChatStore((s) => s.requestedModel);
+  // Workspace
+  const workspaceId = useChatStore((s) => s.workspaceId);
+  const setWorkspaceId = useChatStore((s) => s.setWorkspaceId);
   // Actions (stable references from zustand — don't cause re-renders)
   const setInputText = useChatStore((s) => s.setInputText);
   const setEffort = useChatStore((s) => s.setEffort);
@@ -94,6 +98,15 @@ export function AgentChat({ settings }: { settings: Settings }) {
   // when settings actually change, NOT on every render.
   const client = useMemo(() => new AgentClient(settings), [settings]);
   clientRef.current = client;
+
+  // Workspace list — fetched from the backend so the user can select which
+  // sandbox the agent works in.
+  const [workspaces, setWorkspaces] = useState<{ id: string; title: string; source_repo?: string | null }[]>([]);
+  const [wsOpen, setWsOpen] = useState(false);
+  const ghClient = useMemo(() => new GitHubClient(settings), [settings]);
+  useEffect(() => {
+    ghClient.listWorkspaces().then((r) => setWorkspaces(r.workspaces || [])).catch(() => {});
+  }, [ghClient]);
 
   // Auto-scroll behavior: only stick to bottom if the user is already there.
   const handleScroll = useCallback(() => {
@@ -195,11 +208,63 @@ export function AgentChat({ settings }: { settings: Settings }) {
             : "New Chat"}
         </div>
 
+        {/* Workspace selector — lets the user pick which sandbox the agent
+            works in. Shows the current workspace title (or "No workspace")
+            and a dropdown to switch. */}
+        <div className="relative ml-auto">
+          <button
+            onClick={() => setWsOpen((v) => !v)}
+            disabled={running}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[160px]"
+            title={workspaceId || "No workspace (ephemeral)"}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-muted-foreground">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+            <span className="truncate">
+              {workspaceId
+                ? (workspaces.find((w) => w.id === workspaceId)?.title || "Workspace")
+                : "No workspace"}
+            </span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground shrink-0">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+          {wsOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setWsOpen(false)} />
+              <div className="absolute right-0 top-full mt-1 z-50 min-w-[200px] max-w-[280px] rounded-lg border border-border bg-surface shadow-lg overflow-hidden">
+                <button
+                  onClick={() => { setWorkspaceId(null); setWsOpen(false); }}
+                  className={`w-full text-left px-3 py-2 text-[11.5px] hover:bg-accent/10 transition-colors ${!workspaceId ? "text-accent font-medium" : ""}`}
+                >
+                  No workspace (ephemeral)
+                </button>
+                {workspaces.map((ws) => (
+                  <button
+                    key={ws.id}
+                    onClick={() => { setWorkspaceId(ws.id); setWsOpen(false); }}
+                    className={`w-full text-left px-3 py-2 text-[11.5px] hover:bg-accent/10 transition-colors truncate ${workspaceId === ws.id ? "text-accent font-medium" : ""}`}
+                  >
+                    <div className="truncate">{ws.title}</div>
+                    {ws.source_repo && <div className="text-[9px] text-muted-foreground truncate">{ws.source_repo}</div>}
+                  </button>
+                ))}
+                {workspaces.length === 0 && (
+                  <div className="px-3 py-2 text-[10px] text-muted-foreground">
+                    No workspaces. Connect GitHub in the Workspaces tab.
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
         {/* Model selector */}
         <button
           onClick={() => !running && openOverlay()}
           disabled={running}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[200px] ml-auto"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[200px]"
           title={selectedProviderName || "Select model"}
         >
           <span

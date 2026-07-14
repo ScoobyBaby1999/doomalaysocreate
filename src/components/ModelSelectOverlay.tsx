@@ -430,7 +430,7 @@ function ProviderBox({
                   >
                     {"\u25b8"}
                   </span>
-                  <span className="text=[9px] leading-none">
+                  <span className="text-[9px] leading-none">
                     {showDimmed ? `Hide ${dimmed.length} dimmed` : `Show ${dimmed.length} dimmed`}
                   </span>
                 </button>

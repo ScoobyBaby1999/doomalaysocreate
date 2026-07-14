@@ -69,7 +69,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: Ch
           <Avatar kind="assistant" />
           <div className="flex-1 min-w-0 pt-0.5">
             <div className="text-[14.5px] leading-relaxed text-foreground">
-              <Markdown text={message.content || (message.isStreaming ? "" : "")} />
+              <Markdown text={message.content} />
               {message.isStreaming && (
                 <span className="inline-block w-[6px] h-[15px] ml-0.5 bg-accent animate-pulse align-middle rounded-sm" />
               )}

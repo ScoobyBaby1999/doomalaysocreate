@@ -48,6 +48,7 @@ export function DebugScreen({ settings }: { settings: Settings }) {
       setError("No auth token set — configure in Settings first.");
       return;
     }
+    setLoading(true);
     try {
       const token = settings.rotationSecret
         ? await deriveToken(settings.rotationSecret)

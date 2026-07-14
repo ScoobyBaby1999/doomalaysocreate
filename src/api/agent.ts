@@ -159,13 +159,24 @@ export class AgentClient {
    * `model` selects which model/tier drives a NEW session.
    * `workspaceId` links the agent to a user workspace sandbox.
    * `chatSessionId` links to a persistent chat session for history.
+   * `opts` carries effort/web_search/deep_research toggles.
    */
-  send(message: string, sessionId?: string, model?: string, workspaceId?: string, chatSessionId?: string) {
+  send(
+    message: string,
+    sessionId?: string,
+    model?: string,
+    workspaceId?: string,
+    chatSessionId?: string,
+    opts?: { effort?: string; web_search?: boolean; deep_research?: boolean },
+  ) {
     const body: Record<string, unknown> = { message };
     if (sessionId) body.session_id = sessionId;
     if (model) body.model = model;
     if (workspaceId) body.workspace_id = workspaceId;
     if (chatSessionId) body.chat_session_id = chatSessionId;
+    if (opts?.effort) body.effort = opts.effort;
+    if (opts?.web_search) body.web_search = true;
+    if (opts?.deep_research) body.deep_research = true;
     return this.req<AgentStart>("/api/agent", {
       method: "POST",
       body: JSON.stringify(body),
