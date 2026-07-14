@@ -719,6 +719,11 @@ def _guarded_shell(tool_use=None, **kwargs):
     """
     import subprocess
 
+    # Extract toolUseId for the Strands ToolResult format (REQUIRED)
+    tool_use_id = ""
+    if tool_use and isinstance(tool_use, dict):
+        tool_use_id = tool_use.get("toolUseId", "")
+
     # Extract the command from the tool_use input (Strands format) or
     # from kwargs (direct call format for backwards compat).
     cmd = ""
@@ -730,7 +735,7 @@ def _guarded_shell(tool_use=None, **kwargs):
         cmd = kwargs.get("command", "")
 
     if not isinstance(cmd, str) or not cmd.strip():
-        return {"status": "error",
+        return {"status": "error", "toolUseId": tool_use_id,
                 "content": [{"text": "command (non-empty string) is required"}]}
 
     workdir = str(getattr(_thread_local, "workspace", Path.cwd()))
@@ -746,7 +751,9 @@ def _guarded_shell(tool_use=None, **kwargs):
         is_force = stripped.startswith("git push") and (
             "-f " in stripped or "--force" in stripped)
         if not is_force:
-            return _route_network_git(stripped, workspace_id)
+            result = _route_network_git(stripped, workspace_id)
+            result["toolUseId"] = tool_use_id
+            return result
 
     # Execute the command directly via subprocess for reliable output capture
     try:
@@ -767,14 +774,15 @@ def _guarded_shell(tool_use=None, **kwargs):
         if result.returncode != 0:
             output = f"Exit code: {result.returncode}\n{output}"
         return {
+            "toolUseId": tool_use_id,
             "status": status,
-            "content": [{"text": output[:50000]}],  # cap at 50k chars
+            "content": [{"text": output[:50000]}],
         }
     except subprocess.TimeoutExpired:
-        return {"status": "error",
+        return {"toolUseId": tool_use_id, "status": "error",
                 "content": [{"text": f"Command timed out after 300s: {stripped[:200]}"}]}
     except Exception as exc:
-        return {"status": "error",
+        return {"toolUseId": tool_use_id, "status": "error",
                 "content": [{"text": f"Shell error: {exc}"}]}
 
 
@@ -926,11 +934,16 @@ class StrandsAdapter(BaseAdapter):
                     """Invoke the judge panel for a critique."""
                     # Extract args from tool_use (Strands format) or kwargs
                     args = {}
+                    tool_use_id = ""
                     if tool_use and isinstance(tool_use, dict):
                         args = tool_use.get("input", {}) or {}
+                        tool_use_id = tool_use.get("toolUseId", "")
                     if not args:
                         args = kwargs
                     result = conscious_tools._agent_panel(sess, args)
+                    # Ensure toolUseId is in the result (Strands requirement)
+                    if isinstance(result, dict) and "toolUseId" not in result:
+                        result["toolUseId"] = tool_use_id
                     return result
                 panel_mod = _types.ModuleType("agent_panel")
                 panel_mod.__file__ = __file__
