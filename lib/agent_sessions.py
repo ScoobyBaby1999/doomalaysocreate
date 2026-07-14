@@ -1087,6 +1087,36 @@ class StrandsAdapter(BaseAdapter):
                         emit({"type": "assistant", "text": block["text"]})
         self._msg_cursor = len(msgs)
 
+        # COST TRANSPARENCY: emit usage/cost info after each turn.
+        # Strands tracks this on the agent's _loop_state.
+        try:
+            usage = getattr(self.agent, "_loop_state", {}).get("usage", None) if hasattr(self.agent, "_loop_state") else None
+            if usage is None:
+                # Try the agent's messages for usage metadata
+                for m in reversed(msgs):
+                    meta = m.get("metadata", {}) if isinstance(m, dict) else {}
+                    if meta.get("usage"):
+                        usage = meta["usage"]
+                        break
+            if usage:
+                input_tokens = usage.get("inputTokens", 0) if isinstance(usage, dict) else getattr(usage, "inputTokens", 0)
+                output_tokens = usage.get("outputTokens", 0) if isinstance(usage, dict) else getattr(usage, "outputTokens", 0)
+                total_tokens = usage.get("totalTokens", 0) if isinstance(usage, dict) else getattr(usage, "totalTokens", 0)
+                cost = getattr(self.agent, "_loop_state", {}).get("total_cost_usd", None) if hasattr(self.agent, "_loop_state") else None
+                emit({
+                    "type": "status",
+                    "state": "idle",
+                    "detail": "",
+                    "cost_usd": cost,
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": total_tokens,
+                    },
+                })
+        except Exception:
+            pass
+
     def interrupt(self) -> None:
         canceler = getattr(self.agent, "cancel", None)
         if callable(canceler):
