@@ -249,7 +249,7 @@ def _pick_open_llm() -> tuple[str, str, str | None] | None:
         return (key_env,
                 os.environ.get("AGENT_OPEN_MODEL", "groq/llama-3.3-70b-versatile"),
                 os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or None)
-    for env_key, _label, model, base_url in _build_open_models():
+    for env_key, _label, model, base_url, _extra in _build_open_models():
         if os.environ.get(env_key, "").strip():
             model = os.environ.get("AGENT_OPEN_MODEL", "").strip() or model
             base_url = os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or base_url
@@ -282,7 +282,7 @@ def agent_models() -> list[dict]:
                         "label": label, "default": model == default_model})
     if _open_sdk_installed():
         seen: set[str] = set()
-        for env_key, label, model, _base in _build_open_models():
+        for env_key, label, model, _base, _extra in _build_open_models():
             if os.environ.get(env_key, "").strip() and model not in seen:
                 seen.add(model)
                 out.append({"tier": "open", "provider": label, "model": model,
