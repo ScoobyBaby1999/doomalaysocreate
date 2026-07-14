@@ -40,7 +40,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: Ch
   // -- User message: right-aligned bubble with pending indicator ----------
   if (message.role === "user") {
     return (
-      <div className="flex justify-end px-4 py-1.5 group">
+      <div className="flex justify-end px-4 py-1.5 group fade-in">
         <div className="flex flex-col items-end gap-0.5 max-w-[85%]">
           <div
             className={`rounded-2xl rounded-br-md px-4 py-2.5 text-[14.5px] leading-relaxed whitespace-pre-wrap break-words ${
@@ -65,7 +65,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: Ch
   if (message.role === "assistant") {
     return (
       <div className="flex justify-start px-4 py-1.5 group">
-        <div className="flex gap-2.5 max-w-[92%]">
+        <div className="flex gap-2.5 max-w-[92%] fade-in">
           <Avatar kind="assistant" />
           <div className="flex-1 min-w-0 pt-0.5">
             <div className="text-[14.5px] leading-relaxed text-foreground">
@@ -83,7 +83,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: Ch
   // -- Thinking: collapsible card -----------------------------------------
   if (message.role === "thinking") {
     return (
-      <div className="px-4 py-1">
+      <div className="px-4 py-1 fade-in">
         <Collapsible label="Thinking" kind="thinking" defaultOpen={!!message.isStreaming}>
           <div className="text-[12.5px] text-muted-foreground leading-relaxed">
             <Markdown text={message.content} />
@@ -102,7 +102,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: Ch
       const isDiffContent = !message.isError && isDiff(message.content);
       if (isDiffContent) {
         return (
-          <div className="px-4 py-1">
+          <div className="px-4 py-1 fade-in">
             <div className="rounded-lg border border-border overflow-hidden max-w-2xl">
               <div className="px-3 py-1.5 text-[11px] text-muted-foreground border-b border-border bg-surface/50 font-medium">
                 Diff
@@ -113,7 +113,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: Ch
         );
       }
       return (
-        <div className="px-4 py-1">
+        <div className="px-4 py-1 fade-in">
           <Collapsible
             label={message.isError ? "Result (error)" : "Result"}
             kind={message.isError ? "error" : "result"}
