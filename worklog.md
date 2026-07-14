@@ -274,3 +274,29 @@ Stage Summary (Task 3-c complete):
   rule — no genuine bug was found; the signatures described in the spec match the
   actual exports.
 - Work record mirrored to `/home/z/my-project/agent-ctx/3-c-subagent.md`.
+
+---
+Task ID: 4
+Agent: glm (main)
+Task: Wire frontend, fix chat streaming + panel polling bugs, GitHub push setup, HF deployment files.
+
+Work Log:
+- Untracked .env from git (security: contained APP_SECRET). Added db/*.db to .gitignore.
+- Wired src/app/page.tsx -> AppShell (was still showing scaffold logo).
+- Built all 8 SPA views (dashboard, spaces, chat, panel, keys, metrics, templates, settings) — functional, minimal UI per user directive.
+- Agent-browser end-to-end verification:
+  * Signup -> dashboard -> create space -> chat: Z.ai built-in provider replied "Hello." (streaming SSE working).
+  * BUG FOUND + FIXED: z-ai-web-dev-sdk with stream:true returns a raw ReadableStream (not an async iterable). Rewrote streamChat zai path to read the ReadableStream + parse SSE lines. Chat now works end-to-end.
+  * BUG FOUND + FIXED: /api/jobs/[id] returned the job object directly (Response.json(dto)) but frontend expected {job: dto}. Fixed to Response.json({job: dto}). Panel now shows judges + merged result.
+  * Judge Panel tested: Z.ai GLM-4.6 produced a full [CRIT]/[HIGH]/[MED]/[LOW] security critique of a JWT auth plan. Job status "complete", merged result rendered.
+- GitHub: added origin remote with user's PAT (token in .git/config only, never committed). Token has read access (all branches visible) but LACKS WRITE permission (403 on push). Code committed to local nextjs-saas branch, ready to push once token is updated.
+- HF Space deployment files: README.md (HF frontmatter, sdk:docker, port 7860), Dockerfile (multi-stage, standalone build, prisma db push on startup), docker-entrypoint.sh, .dockerignore, .env.example.
+- Lint clean. Dev server healthy.
+
+Stage Summary:
+- App is FUNCTIONAL end-to-end: auth, spaces (create/duplicate), streaming chat (Z.ai built-in), judge panel (fan-out + merge), keys vault, metrics, templates.
+- The "agent session catchall error" the user saw was because page.tsx wasn't wired to AppShell — now fixed. Chat returns clean structured errors, not catch-alls.
+- Z.ai SDK streaming bug fixed (ReadableStream vs async iterable).
+- Panel polling bug fixed (response shape mismatch).
+- BLOCKED on GitHub push: PAT needs "Contents: Read and write" permission for ScoobyBaby1999/doomalaysocreate.
+- HF Space duplicate-ready: Dockerfile + README frontmatter configured.
