@@ -670,20 +670,22 @@ export function AgentChat({ settings }: { settings: Settings }) {
 
 function EmptyState({ onSend }: { onSend: (text: string) => void }) {
   const suggestions = [
-    "Build a React component that displays a data table with sorting and filtering",
-    "Create a Python script that fetches data from an API and saves it to CSV",
-    "Write a Dockerfile for a Node.js application with multi-stage build",
-    "Set up a CI/CD pipeline configuration for running tests on every push",
+    { icon: "⚛️", text: "Build a React component that displays a data table with sorting and filtering" },
+    { icon: "🐍", text: "Create a Python script that fetches data from an API and saves it to CSV" },
+    { icon: "🐳", text: "Write a Dockerfile for a Node.js application with multi-stage build" },
+    { icon: "🔄", text: "Set up a CI/CD pipeline configuration for running tests on every push" },
+    { icon: "🔍", text: "Clone a GitHub repo and review the code for bugs and improvements" },
+    { icon: "📊", text: "Analyze a dataset and create a visualization with matplotlib" },
   ];
 
   return (
-    <div className="flex flex-col items-center justify-center h-full px-6 py-12">
-      <div className="max-w-md w-full text-center">
+    <div className="flex flex-col items-center justify-center h-full px-6 py-8 overflow-y-auto">
+      <div className="max-w-lg w-full text-center">
         {/* Icon */}
-        <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mx-auto mb-5">
+        <div className="w-16 h-16 rounded-2xl bg-accent/10 flex items-center justify-center mx-auto mb-5 empty-state-icon">
           <svg
-            width="28"
-            height="28"
+            width="32"
+            height="32"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -698,26 +700,41 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
           </svg>
         </div>
 
-        <h2 className="text-[17px] font-semibold text-foreground mb-2">
+        <h2 className="text-[18px] font-semibold text-foreground mb-2">
           What would you like to build?
         </h2>
-        <p className="text-[13px] text-muted-foreground mb-8 leading-relaxed">
+        <p className="text-[13px] text-muted-foreground mb-6 leading-relaxed">
           The agent works in a private workspace and can build, edit, run, or
-          pack your code. Files appear in the file drawer. You can queue
-          multiple messages while it works.
+          pack your code. It has a real bash shell, file operations, web access,
+          and can invoke the judge panel for critiques.
         </p>
 
         {/* Suggestions */}
-        <div className="space-y-2 text-left">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-left">
           {suggestions.map((s, i) => (
             <button
               key={i}
-              onClick={() => onSend(s)}
-              className="w-full text-left text-[12.5px] px-4 py-3 rounded-xl border border-border hover:border-accent/50 hover:bg-accent/5 transition-all text-muted-foreground hover:text-foreground leading-relaxed"
+              onClick={() => onSend(s.text)}
+              className="flex items-start gap-2.5 text-left text-[12px] px-3 py-2.5 rounded-xl border border-border hover:border-accent/50 hover:bg-accent/5 transition-all text-muted-foreground hover:text-foreground leading-relaxed card-hover"
             >
-              {s}
+              <span className="text-base shrink-0">{s.icon}</span>
+              <span>{s.text}</span>
             </button>
           ))}
+        </div>
+
+        {/* Tips */}
+        <div className="mt-6 flex items-center justify-center gap-4 text-[10px] text-muted-foreground/50">
+          <span className="flex items-center gap-1">
+            <kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Enter</kbd>
+            to send
+          </span>
+          <span className="flex items-center gap-1">
+            <kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Shift+Enter</kbd>
+            newline
+          </span>
+          <span>·</span>
+          <span>Queue messages while agent works</span>
         </div>
       </div>
     </div>
