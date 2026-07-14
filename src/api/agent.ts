@@ -261,6 +261,17 @@ export class AgentClient {
     return this.req<{ session_id: string; files: AgentFile[] }>(`/api/agent/${sessionId}/files`);
   }
 
+  // -- memory layer (.pied sanity log) ------------------------------------
+
+  /** Get the memory state for a workspace (goal, plan, tasks, log, blackboard). */
+  getMemory(workspaceId: string) {
+    return this.req<{
+      state: { goal?: string; plan?: string; status?: string; pending_tasks?: any[]; completed_tasks?: any[] };
+      recent_log: { ts: number; agent: string; kind: string; data: any }[];
+      blackboard: { ts: number; agent: string; key: string; value: string }[];
+    }>(`/api/memory?workspace_id=${workspaceId}`);
+  }
+
   // -- chat session persistence -------------------------------------------
 
   listChatSessions() {
