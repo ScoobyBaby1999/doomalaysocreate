@@ -930,6 +930,7 @@ export const useChatStore = create<ChatState>()(
         effort: state.effort,
         webSearch: state.webSearch,
         deepResearch: state.deepResearch,
+        mode: state.mode,
         sidebarOpen: state.sidebarOpen,
       }),
     },
