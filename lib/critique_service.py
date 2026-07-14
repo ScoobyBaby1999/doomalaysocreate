@@ -1357,6 +1357,42 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json(500, {"error": f"failed to fetch benchmarks: {str(e)[:200]}"})
             return
+        # Workspace files endpoint — list files in a workspace sandbox
+        if route == "/api/workspace/files":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            from urllib.parse import parse_qs, urlsplit
+            qs = parse_qs(urlsplit(self.path).query)
+            workspace_id = qs.get("workspace_id", [""])[0]
+            if not workspace_id:
+                self._send_json(400, {"error": "workspace_id query parameter is required"})
+                return
+            try:
+                import db
+                from pathlib import Path
+                ws = db.get_workspace(workspace_id)
+                if not ws or not ws.get("sandbox_path"):
+                    self._send_json(404, {"error": "workspace not found"})
+                    return
+                root = Path(ws["sandbox_path"]).resolve()
+                files = []
+                if root.exists():
+                    for p in sorted(root.rglob("*")):
+                        if len(files) >= 500:
+                            break
+                        rel = p.relative_to(root)
+                        # hide dotfiles, .git, .pied, .claude, node_modules
+                        if any(seg.startswith(".") or seg == "node_modules" for seg in rel.parts):
+                            continue
+                        if p.is_file():
+                            st = p.stat()
+                            files.append({"path": str(rel), "size": st.st_size,
+                                          "mtime": int(st.st_mtime)})
+                self._send_json(200, {"workspace_id": workspace_id, "files": files})
+            except Exception as e:
+                self._send_json(500, {"error": str(e)[:200]})
+            return
         if route.startswith("/api/agent/"):
             #   transcript polling + artifact access + SSE stream share the service bearer token.
             #   SSE via EventSource can't set custom headers, so the stream endpoint also
