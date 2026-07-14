@@ -56,18 +56,23 @@ AGENT_SYSTEM_PROMPT = (
     "Artifacts you write to the workspace are listed for the user to download. "
     "The disk is ephemeral — remind the user to download anything important. "
     "Be direct and concise; lead with outcomes.\n\n"
-    "You have these tools available:\n"
-    "- shell: run bash commands (ls, cat, grep, git, python, etc.) — PREFER this over python_repl\n"
+    "You have FULL capabilities — this is a cloud-hosted virtual PC:\n"
+    "- shell: REAL bash execution (ls, cat, grep, find, git, python, pip, npm, make, curl, etc.)\n"
     "- file_read: read file contents\n"
     "- file_write: write/create files\n"
     "- editor: edit existing files (str_replace)\n"
-    "- http_request: fetch URLs (web access)\n"
-    "- python_repl: execute Python code (fallback for complex logic)\n"
+    "- python_repl: full Python kernel (data analysis, scripts, pip install, etc.)\n"
+    "- http_request: fetch URLs (GET/POST/PUT/DELETE — full web access)\n"
+    "- grep: search file contents with regex\n"
+    "- glob: find files by pattern (e.g. **/*.py)\n"
     "- calculator: math calculations\n"
+    "- web_search: search the web (when available)\n"
     "- load_tool: dynamically load more tools at runtime\n"
-    "Use the shell tool for bash operations (grep, find, git, make, etc.). "
+    "PREFER shell for bash operations (grep, find, git, make, etc.). "
     "Use http_request for web fetches. Use file_read/file_write/editor for "
-    "file operations. Only use python_repl when shell isn't sufficient."
+    "file operations. Use python_repl for complex logic or data analysis. "
+    "Use grep/glob for code search. You can git clone repos, install packages, "
+    "run build tools, and do anything a developer terminal can do."
 )
 
 #   open-tier model routing: dynamically built from providers_catalog.json +
@@ -788,20 +793,23 @@ class StrandsAdapter(BaseAdapter):
 
         # the agent works in its session workspace; tools are imported defensively
         # so a renamed/missing tool never blocks startup.
-        # Tool suite (user requested bash/shell/grep/web instead of python_repl):
-        # - shell: bash execution (replaces python_repl as the primary tool)
-        # - file_read: read files
-        # - file_write: write files
-        # - editor: str_replace-based file editing
-        # - http_request: web fetch (replaces python_repl for web access)
-        # - python_repl: still available as a fallback for complex logic
+        # Tool suite — FULL capabilities for a cloud-hosted virtual PC:
+        # - shell: real bash execution (guarded to the session workspace)
+        # - file_read / file_write / editor: filesystem operations
+        # - python_repl: full Python kernel for data analysis, scripts, etc.
+        # - http_request: web fetch (GET/POST/PUT/DELETE)
         # - calculator: math
+        # - grep / glob: code search and file pattern matching
+        # - web_search: web search (if available)
         # - load_tool: meta-tool — agent can load more tools at runtime
         # shell is replaced by _guarded_shell to force workdir per-thread.
         tools = []
         for mod_name in ("file_read", "file_write", "editor",
                          "http_request", "python_repl", "calculator",
-                         "load_tool"):
+                         "load_tool", "glob", "web_search", "memorize",
+                         "journal", "slug", "current_time", "env",
+                         "batch_ensemble", "image_reader", "nova_reel",
+                         "retrieve", "think", "agent_graph"):
             try:
                 import importlib
                 tools.append(importlib.import_module(f"strands_tools.{mod_name}"))
@@ -815,11 +823,20 @@ class StrandsAdapter(BaseAdapter):
                 break
             except Exception:
                 continue
-        # guarded shell: forces execution into this session's workspace
+        # guarded shell: forces execution into this session's workspace.
+        # This is a REAL bash shell — the agent can run any command (git, npm,
+        # pip, python, make, etc.) inside its private sandbox.
         import types as _types
         shell_mod = _types.ModuleType("shell")
         shell_mod.tool = _guarded_shell
         tools.append(shell_mod)
+        # Log which tools loaded so we can verify capabilities
+        loaded = [getattr(t, "TOOL_SPEC", {}).get("name", "?") if hasattr(t, "TOOL_SPEC")
+                  else getattr(t, "__name__", "?") for t in tools]
+        try:
+            log_event("agent_tools_loaded", tools=loaded)
+        except Exception:
+            pass
 
         self.agent = Agent(model=llm, tools=tools, system_prompt=self.system_prompt,
                            callback_handler=None)
@@ -840,11 +857,16 @@ class StrandsAdapter(BaseAdapter):
         _thread_local.workspace = self.workspace
         _thread_local.workspace_id = self.workspace_id
         sess = getattr(self, "_session", None)
+        # Track whether thinking was emitted via the streaming callback.
+        # If so, skip thinking emission in the post-turn walk (which would
+        # duplicate the text). Reset at the start of each turn.
+        self._thinking_streamed = False
         # Build a streaming callback handler: thinking text in real-time,
         # plus mid-turn cost ceiling enforcement for conscious agents.
         def _stream_callback(**kw):
             reasoning = kw.get("reasoningText")
             if reasoning:
+                self._thinking_streamed = True
                 emit({"type": "thinking", "text": reasoning})
             # Cost ceiling check (conscious agents only)
             if sess is not None and getattr(sess, "conscious_id", None):
@@ -890,6 +912,12 @@ class StrandsAdapter(BaseAdapter):
                     emit({"type": "tool_result", "text": _clip("\n".join(parts) or tr),
                           "is_error": tr.get("status") == "error"})
                 elif "reasoningContent" in block:
+                    # Skip if the streaming callback already captured thinking.
+                    # The streaming callback emits fragments in real-time which
+                    # emit() accumulates into one event. Re-emitting the full
+                    # text here would create a duplicate thinking bubble.
+                    if getattr(self, "_thinking_streamed", False):
+                        continue
                     rc = block["reasoningContent"] or {}
                     txt = (rc.get("reasoningText") or {}).get("text") if isinstance(
                         rc.get("reasoningText"), dict) else rc.get("reasoningText")

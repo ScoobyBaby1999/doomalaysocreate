@@ -46,11 +46,13 @@ class CloudflareSync(BaseSync):
 
     def fetch_models(self) -> list[ModelInfo]:
         global _cached_cloudflare_models
-        models = self._fetch_from_docs()
-        source = "docs"
+        # Try API FIRST — it's authoritative when auth is configured.
+        # The docs page format changes frequently and may return empty.
+        models = self._fetch_from_api()
+        source = "api"
         if not models:
-            models = self._fetch_from_api()
-            source = "api"
+            models = self._fetch_from_docs()
+            source = "docs"
         if models:
             _cached_cloudflare_models = models
             log_event("cloudflare_sync_ok", source=source, count=len(models))
