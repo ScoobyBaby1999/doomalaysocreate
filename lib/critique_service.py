@@ -1294,6 +1294,37 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"tier": agent_sessions.agent_tier(),
                                   "models": agent_sessions.agent_models()})
             return
+        # Memory layer endpoint — returns the .pied state for a workspace
+        if route == "/api/memory":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            from urllib.parse import parse_qs, urlsplit
+            qs = parse_qs(urlsplit(self.path).query)
+            workspace_id = qs.get("workspace_id", [""])[0]
+            if not workspace_id:
+                self._send_json(400, {"error": "workspace_id query parameter is required"})
+                return
+            try:
+                import db
+                import memory_layer
+                from pathlib import Path
+                ws = db.get_workspace(workspace_id)
+                if not ws or not ws.get("sandbox_path"):
+                    self._send_json(404, {"error": "workspace not found"})
+                    return
+                ws_path = Path(ws["sandbox_path"])
+                state = memory_layer.read_state(ws_path)
+                recent_log = memory_layer.get_recent_log(ws_path, limit=20)
+                blackboard = memory_layer.read_blackboard(ws_path)
+                self._send_json(200, {
+                    "state": state,
+                    "recent_log": recent_log,
+                    "blackboard": blackboard,
+                })
+            except Exception as e:
+                self._send_json(500, {"error": str(e)[:200]})
+            return
         if route.startswith("/api/agent/"):
             #   transcript polling + artifact access + SSE stream share the service bearer token.
             #   SSE via EventSource can't set custom headers, so the stream endpoint also
