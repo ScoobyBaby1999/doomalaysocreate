@@ -19,3 +19,8 @@ claude-agent-sdk>=0.2
 # and needs 3.12. The [litellm] extra provides the provider-agnostic model.
 strands-agents[litellm]>=1.43
 strands-agents-tools>=0.8
+# strands-agents imports fastapi/uvicorn at module load (for its optional
+# server mode). Without these installed the agent tier crashes at open()
+# with "No module named 'fastapi'". Pin minimal versions.
+fastapi>=0.100
+uvicorn>=0.23

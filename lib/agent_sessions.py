@@ -1041,15 +1041,26 @@ class AgentSession:
         with self.lock:
             if (ev.get("type") == "thinking"
                     and self.events and self.events[-1].get("type") == "thinking"):
+                # Merge: replace the text of the last thinking event (the
+                # streaming callback sends the full accumulated reasoningText
+                # each time, so replace is correct). Keep the same event index
+                # so subscribers can dedup/merge by seq.
                 self.events[-1]["text"] = ev["text"]
                 self.events[-1]["ts"] = time.time()
+                # Send the MERGED event to stream queues (not the raw fragment)
+                # so SSE subscribers see the accumulated text, matching what
+                # snapshot()/poll() returns.
+                stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
+                stream_ev["text"] = ev["text"]  # the full accumulated text
             else:
-                self.events.append({"i": len(self.events), "ts": time.time(), **ev})
+                new_ev = {"i": len(self.events), "ts": time.time(), **ev}
+                self.events.append(new_ev)
+                stream_ev = new_ev
             self.updated = time.time()
             queues = list(self._stream_queues)
         for q in queues:
             try:
-                q.put_nowait(ev)
+                q.put_nowait(stream_ev)
             except (queue.Full, ValueError):
                 try:
                     self._stream_queues.remove(q)
@@ -1066,6 +1077,35 @@ class AgentSession:
                 self._stream_queues.remove(q)
             except ValueError:
                 pass
+
+    def subscribe(self, since: int = 0):
+        """Subscribe to live events for SSE streaming. Returns a queue.Queue
+        that receives every new event as it's emitted. Events with i < since
+        are replayed first (so a late subscriber catches up), then the queue
+        stays open for live events. Call unsubscribe(q) when done.
+
+        This is the method the SSE endpoint looks for via getattr(session,
+        'subscribe', None). Without it, the SSE handler falls back to polling
+        (200ms snapshots) — which is why streaming felt choppy/non-live."""
+        q: queue.Queue = queue.Queue(maxsize=256)
+        # Replay events the subscriber hasn't seen yet.
+        with self.lock:
+            replay = [e for e in self.events if (e.get("i", 0) >= since)]
+        for ev in replay:
+            try:
+                q.put_nowait(ev)
+            except queue.Full:
+                pass  # drop backlog if subscriber is slow
+        self.register_stream_queue(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        """Unsubscribe from live events. Pushes None to signal end-of-stream."""
+        self.unregister_stream_queue(q)
+        try:
+            q.put_nowait(None)
+        except queue.Full:
+            pass
 
     def _set_status(self, state: str, **extra) -> None:
         self.status = state
