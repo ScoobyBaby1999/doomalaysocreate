@@ -3340,12 +3340,12 @@ def main() -> int:
     server.jobs = _jobs  # type: ignore[attr-defined]
 
     log_event("startup", host=host, port=port,
-              providers=[p.name for p in panel.providers],
-              default_panel=panel.default_panel,
+              providers=[p.name for p in _panel.providers],
+              default_panel=_panel.default_panel,
               token_configured=_auth_configured(),
               token_rotation=bool(os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip()))
     print(f"doomalaysocreate model panel listening on {host}:{port}  "
-          f"(providers={[p.name for p in panel.providers]})", flush=True)
+          f"(providers={[p.name for p in _panel.providers]})", flush=True)
     # Graceful shutdown: on SIGTERM (HF Space rebuild/stop), upload DB one last time
     import signal
     signal.signal(signal.SIGTERM, lambda *a: server.shutdown())
