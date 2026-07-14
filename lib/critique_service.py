@@ -201,7 +201,11 @@ class Panel:
 
         #   Auto-sync model lists from all providers with /v1/models endpoints.
         #   Discovers new models dynamically and builds logical_models for routing.
-        self._sync_all_provider_models()
+        #   NOTE: This is deferred to a background thread in main() so boot
+        #   doesn't block on 6+ remote calls. If main() hasn't started the
+        #   thread yet, the panel works with its static catalog until sync
+        #   completes (agent_models re-probes the cache).
+        self._sync_done = False
 
     def judge_ctx(self, who: str) -> int:
         #   a judge's usable context window: for a logical model, the LARGEST among
@@ -3343,20 +3347,44 @@ def main() -> int:
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", os.environ.get("APP_PORT", "7860")))
 
-    # Start the Privatemode proxy before initializing providers so the sync
-    # module can reach localhost:8080/v1/models. No-op if env var is unset.
-    # If the binary is missing (local dev without Docker build), skip gracefully.
-    try:
-        _ensure_privatemode_proxy()
-    except FileNotFoundError:
-        log_event("privatemode_proxy_missing")
+    # initialize SQLite database for GitHub + HF integration (fast, local)
+    db.init_db()
 
-    _panel = Panel()
+    # Start the privatemode proxy in a BACKGROUND thread — its 90s attestation
+    # must NOT block boot (HF's healthcheck times out and the Space gets stuck
+    # at APP_STARTING). The provider sync (in Panel.__init__) runs after.
+    import threading
+    def _bg_privatemode():
+        try:
+            _ensure_privatemode_proxy()
+        except FileNotFoundError:
+            log_event("privatemode_proxy_missing")
+        except Exception as e:
+            log_event("privatemode_proxy_error", error=str(e)[:200])
+    threading.Thread(target=_bg_privatemode, daemon=True, name="privatemode-boot").start()
+
+    # Panel.__init__ calls _sync_all_provider_models() which hits 6+ remote
+    # endpoints. Wrap it so a failure doesn't kill boot — the panel still
+    # works with its static catalog; agent_models() re-probes the sync cache.
+    try:
+        _panel = Panel()
+    except Exception as e:
+        log_event("panel_init_error", error=str(e)[:300])
+        # Fall back to a minimal panel so the server still starts
+        _panel = Panel.__new__(Panel)
+        _panel.providers = []
+        _panel.provider_by_name = {}
+        _panel.slot_by_who = {}
+        _panel.logical_models = {}
+        _panel.ctx_by_who = {}
+        _panel.default_panel = []
+        _panel.default_rubric = "critiquer"
+        _panel.max_parallel = 4
+        _panel.benchmarks = {}
+        _panel.cache = PromptCache()
+
     if not _panel.providers:
         log_event("startup_warning", msg="no providers have API keys - every judge will fail")
-
-    # initialize SQLite database for GitHub + HF integration
-    db.init_db()
 
     server = BoundedThreadingHTTPServer((host, port), Handler, max_workers=MAX_WORKERS)
     _jobs = JobRunner(_panel, judge_timeout_s=JUDGE_TIMEOUT_S)
@@ -3370,6 +3398,22 @@ def main() -> int:
               token_rotation=bool(os.environ.get("CRITIQUE_ROTATION_SECRET", "").strip()))
     print(f"doomalaysocreate model panel listening on {host}:{port}  "
           f"(providers={[p.name for p in _panel.providers]})", flush=True)
+
+    # Background: sync all provider models (6+ remote calls, 5-30s) — non-blocking.
+    # The panel works with its static catalog until sync completes; agent_models()
+    # and _resolve_open_model() re-probe the sync cache so they pick up models
+    # as soon as they're available.
+    def _bg_sync():
+        try:
+            _panel._sync_all_provider_models()
+            _panel._sync_done = True
+            log_event("provider_sync_done",
+                      providers=[p.name for p in _panel.providers],
+                      slots=len(_panel.slot_by_who))
+        except Exception as e:
+            log_event("provider_sync_error", error=str(e)[:200])
+    threading.Thread(target=_bg_sync, daemon=True, name="provider-sync").start()
+
     # Graceful shutdown: on SIGTERM (HF Space rebuild/stop), upload DB one last time
     import signal
     signal.signal(signal.SIGTERM, lambda *a: server.shutdown())
