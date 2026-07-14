@@ -82,13 +82,18 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: Ch
 
   // -- Thinking: collapsible card -----------------------------------------
   if (message.role === "thinking") {
+    const preview = message.content.slice(0, 80).replace(/\n/g, " ");
     return (
       <div className="px-4 py-1 fade-in">
-        <Collapsible label="Thinking" kind="thinking" defaultOpen={!!message.isStreaming}>
+        <Collapsible
+          label={message.isStreaming ? `Thinking… ${preview}${message.content.length > 80 ? "…" : ""}` : "Thinking"}
+          kind="thinking"
+          defaultOpen={!!message.isStreaming}
+        >
           <div className="text-[12.5px] text-muted-foreground leading-relaxed">
             <Markdown text={message.content} />
             {message.isStreaming && (
-              <span className="inline-block w-[6px] h-[12px] ml-0.5 bg-muted-foreground/60 animate-pulse align-middle rounded-sm" />
+              <span className="inline-block w-[6px] h-[12px] ml-0.5 bg-accent/60 animate-pulse align-middle rounded-sm" />
             )}
           </div>
         </Collapsible>
@@ -235,7 +240,7 @@ function Collapsible({
   const labelClass =
     kind === "error" ? "text-red-300" : "text-muted-foreground";
   return (
-    <div className={`rounded-lg border ${borderClass} max-w-2xl`}>
+    <div className={`rounded-lg border ${borderClass} max-w-2xl overflow-hidden`}>
       <button
         onClick={() => setOpen((o) => !o)}
         className={`w-full text-left text-[11px] px-3 py-1.5 font-medium ${labelClass} hover:bg-surface/40 transition-colors flex items-center gap-2`}
@@ -249,14 +254,14 @@ function Collapsible({
           strokeWidth="3"
           strokeLinecap="round"
           strokeLinejoin="round"
-          className={`transition-transform ${open ? "rotate-90" : ""}`}
+          className={`transition-transform duration-150 shrink-0 ${open ? "rotate-90" : ""}`}
         >
           <polyline points="9 18 15 12 9 6" />
         </svg>
-        {label}
+        <span className="truncate flex-1">{label}</span>
       </button>
       {open && (
-        <div className="px-3 pb-3 pt-1 border-t border-border/50">{children}</div>
+        <div className="px-3 pb-3 pt-1 border-t border-border/50 max-h-[400px] overflow-y-auto">{children}</div>
       )}
     </div>
   );

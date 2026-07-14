@@ -58,6 +58,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const mode = useChatStore((s) => s.mode);
   const files = useChatStore((s) => s.files);
   const fileDrawerOpen = useChatStore((s) => s.fileDrawerOpen);
+  const agentSessionId = useChatStore((s) => s._agentSessionId);
   const panelDrawerOpen = useChatStore((s) => s.panelDrawerOpen);
   const panelInvocations = useChatStore((s) => s.panelInvocations);
   const sidebarOpen = useChatStore((s) => s.sidebarOpen);
@@ -626,9 +627,16 @@ export function AgentChat({ settings }: { settings: Settings }) {
         open={fileDrawerOpen}
         onClose={() => setFileDrawerOpen(false)}
         files={files}
-        sessionId={null}
+        sessionId={agentSessionId}
         settings={settings}
-        onRefresh={() => {}}
+        onRefresh={async () => {
+          if (agentSessionId) {
+            try {
+              const f = await clientRef.current.files(agentSessionId);
+              useChatStore.setState({ files: f.files });
+            } catch { /* ignore */ }
+          }
+        }}
       />
 
       <PanelDrawer
