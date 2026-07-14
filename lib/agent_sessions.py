@@ -61,18 +61,27 @@ AGENT_SYSTEM_PROMPT = (
     "- file_read: read file contents\n"
     "- file_write: write/create files\n"
     "- editor: edit existing files (str_replace)\n"
-    "- python_repl: full Python kernel (data analysis, scripts, pip install, etc.)\n"
     "- http_request: fetch URLs (GET/POST/PUT/DELETE — full web access)\n"
     "- grep: search file contents with regex\n"
     "- glob: find files by pattern (e.g. **/*.py)\n"
     "- calculator: math calculations\n"
-    "- web_search: search the web (when available)\n"
-    "- load_tool: dynamically load more tools at runtime\n"
-    "PREFER shell for bash operations (grep, find, git, make, etc.). "
-    "Use http_request for web fetches. Use file_read/file_write/editor for "
-    "file operations. Use python_repl for complex logic or data analysis. "
-    "Use grep/glob for code search. You can git clone repos, install packages, "
-    "run build tools, and do anything a developer terminal can do."
+    "- agent_panel: invoke the multi-model judge panel for critiques\n"
+    "- load_tool: dynamically load more tools at runtime\n\n"
+    "CRITICAL: ALWAYS use the `shell` tool for ANY command-line operation. "
+    "The `shell` tool gives you a REAL bash shell with full output capture. "
+    "NEVER use python_repl to run subprocess or os.system — use `shell` directly.\n\n"
+    "Examples of using shell:\n"
+    '- shell(command="ls -la") — list files\n'
+    '- shell(command="git status") — check git state\n'
+    '- shell(command="echo hello world") — print text\n'
+    '- shell(command="python3 -c \'print(1+1)\'") — run Python\n'
+    '- shell(command="grep -r \'pattern\' .") — search files\n'
+    '- shell(command="git clone https://github.com/user/repo") — clone a repo\n\n'
+    "Use file_read/file_write/editor for file operations. "
+    "Use http_request for web fetches. "
+    "Use grep/glob for code search. "
+    "You can git clone repos, install packages, run build tools, and do "
+    "anything a developer terminal can do. Lead with the outcome, not the process."
 )
 
 #   open-tier model routing: dynamically built from providers_catalog.json +
@@ -508,9 +517,10 @@ def _glm_call_http(messages: list[dict], model: str, timeout: float) -> str:
 def _summarize_tool_input(name: str, tool_input: dict) -> str:
     if not isinstance(tool_input, dict):
         return _clip(tool_input, 200)
-    if name.lower() == "bash" and "command" in tool_input:
+    # Handle both "shell" and "bash" tool names
+    if name.lower() in ("shell", "bash") and "command" in tool_input:
         return str(tool_input["command"])[:200]
-    for key in ("file_path", "path", "pattern", "url", "query"):
+    for key in ("file_path", "path", "pattern", "url", "query", "prompt"):
         if key in tool_input:
             return str(tool_input[key])[:200]
     return _clip(tool_input, 200)
@@ -694,31 +704,65 @@ def _route_network_git(cmd: str, workspace_id: str) -> dict:
 
 
 def _guarded_shell(**kwargs):
-    """Wrap the Strands shell tool: force workspace dir + intercept git commands.
+    """Execute a bash command in the session workspace with FULL output capture.
 
-    1. Overrides ``workdir`` with the session workspace from thread-local storage.
-    2. Network git operations (push/pull/fetch) are routed through the backend
-       git functions (``push_to_remote`` / ``fetch_from_remote``) so the GitHub
-       token never lands in ``.git/config`` and pushes are audit-logged.
+    This is a REAL bash shell — the agent can run any command (git, npm, pip,
+    python3, make, curl, etc.). Output (stdout + stderr) is captured and
+    returned in the Strands tool result format.
+
+    Network git operations (push/pull/fetch) are routed through the backend
+    git functions so the GitHub token never lands in .git/config.
     """
-    from strands_tools import shell as _shell
-
-    kwargs["workdir"] = str(getattr(_thread_local, "workspace", Path.cwd()))
+    import subprocess
 
     cmd = kwargs.get("command", "")
-    if isinstance(cmd, str) and cmd.strip():
-        stripped = cmd.strip()
-        workspace_id = getattr(_thread_local, "workspace_id", None)
-        if workspace_id and (
-            stripped.startswith("git push")
-            or stripped.startswith("git pull")
-            or stripped.startswith("git fetch")
-        ):
-            is_force = stripped.startswith("git push") and (
-                "-f " in stripped or "--force" in stripped)
-            if not is_force:
-                return _route_network_git(stripped, workspace_id)
-    return _shell.tool(**kwargs)
+    if not isinstance(cmd, str) or not cmd.strip():
+        return {"status": "error",
+                "content": [{"text": "command (non-empty string) is required"}]}
+
+    workdir = str(getattr(_thread_local, "workspace", Path.cwd()))
+    stripped = cmd.strip()
+
+    # Intercept network git operations (push/pull/fetch) for security
+    workspace_id = getattr(_thread_local, "workspace_id", None)
+    if workspace_id and (
+        stripped.startswith("git push")
+        or stripped.startswith("git pull")
+        or stripped.startswith("git fetch")
+    ):
+        is_force = stripped.startswith("git push") and (
+            "-f " in stripped or "--force" in stripped)
+        if not is_force:
+            return _route_network_git(stripped, workspace_id)
+
+    # Execute the command directly via subprocess for reliable output capture
+    try:
+        result = subprocess.run(
+            stripped,
+            shell=True,
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 min max per command
+        )
+        output = result.stdout
+        if result.stderr:
+            output = (output + "\n" if output else "") + result.stderr
+        if not output.strip():
+            output = "(no output)"
+        status = "success" if result.returncode == 0 else "error"
+        if result.returncode != 0:
+            output = f"Exit code: {result.returncode}\n{output}"
+        return {
+            "status": status,
+            "content": [{"text": output[:50000]}],  # cap at 50k chars
+        }
+    except subprocess.TimeoutExpired:
+        return {"status": "error",
+                "content": [{"text": f"Command timed out after 300s: {stripped[:200]}"}]}
+    except Exception as exc:
+        return {"status": "error",
+                "content": [{"text": f"Shell error: {exc}"}]}
 
 
 class StrandsAdapter(BaseAdapter):
@@ -795,29 +839,56 @@ class StrandsAdapter(BaseAdapter):
 
         # the agent works in its session workspace; tools are imported defensively
         # so a renamed/missing tool never blocks startup.
-        # Tool suite — FULL capabilities for a cloud-hosted virtual PC:
-        # - shell: real bash execution (guarded to the session workspace)
-        # - file_read / file_write / editor: filesystem operations
-        # - python_repl: full Python kernel for data analysis, scripts, etc.
-        # - http_request: web fetch (GET/POST/PUT/DELETE)
-        # - calculator: math
-        # - grep / glob: code search and file pattern matching
-        # - web_search: web search (if available)
-        # - load_tool: meta-tool — agent can load more tools at runtime
-        # shell is replaced by _guarded_shell to force workdir per-thread.
+        # Tool suite — FULL capabilities for a cloud-hosted virtual PC.
+        # shell is FIRST (highest priority) and has a proper TOOL_SPEC so
+        # Strands registers it correctly + the LLM knows how to use it.
+        # python_repl is REMOVED — it has output capture issues in this
+        # environment and the shell tool can run python3 anyway.
+        import types as _types
         tools = []
-        for mod_name in ("file_read", "file_write", "editor",
-                         "http_request", "python_repl", "calculator",
-                         "load_tool", "glob", "web_search", "memorize",
-                         "journal", "slug", "current_time", "env",
-                         "batch_ensemble", "image_reader", "nova_reel",
-                         "retrieve", "think", "agent_graph"):
+
+        # 1. shell (FIRST — primary tool for all command-line operations)
+        shell_mod = _types.ModuleType("shell")
+        shell_mod.tool = _guarded_shell
+        shell_mod.TOOL_SPEC = {
+            "name": "shell",
+            "description": (
+                "Execute a bash command in the workspace sandbox. Returns "
+                "stdout + stderr. Use this for ALL command-line operations: "
+                "ls, cat, grep, find, git, python3, pip, npm, make, curl, etc. "
+                "This is a REAL bash shell with full output capture."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The bash command to execute",
+                    },
+                },
+                "required": ["command"],
+            },
+        }
+        tools.append(shell_mod)
+
+        # 2. File operations
+        for mod_name in ("file_read", "file_write", "editor"):
             try:
                 import importlib
                 tools.append(importlib.import_module(f"strands_tools.{mod_name}"))
             except Exception:
                 continue
-        # Try to import the grep tool (may be named differently across versions)
+
+        # 3. Web + search
+        for mod_name in ("http_request", "calculator", "load_tool", "glob",
+                         "web_search", "memorize", "journal", "slug",
+                         "current_time", "env", "retrieve", "think"):
+            try:
+                import importlib
+                tools.append(importlib.import_module(f"strands_tools.{mod_name}"))
+            except Exception:
+                continue
+        # grep (may be named differently across versions)
         for grep_mod in ("grep", "search_files", "grep_code"):
             try:
                 import importlib
@@ -825,13 +896,6 @@ class StrandsAdapter(BaseAdapter):
                 break
             except Exception:
                 continue
-        # guarded shell: forces execution into this session's workspace.
-        # This is a REAL bash shell — the agent can run any command (git, npm,
-        # pip, python, make, etc.) inside its private sandbox.
-        import types as _types
-        shell_mod = _types.ModuleType("shell")
-        shell_mod.tool = _guarded_shell
-        tools.append(shell_mod)
 
         # Register the agent_panel tool so the agent can invoke the judge
         # panel directly from chat. This wraps the conscious_tools._agent_panel
