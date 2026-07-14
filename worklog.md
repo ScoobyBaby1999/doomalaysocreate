@@ -418,3 +418,43 @@ Stage Summary:
 - Thinking text accumulates correctly in real-time
 - Model verification shows resolved provider + model
 - All 5 providers configured (nvidia, cloudflare, openrouter, opencode-zen, privatemodeai)
+
+---
+Task ID: 9
+Agent: glm (main)
+Task: Fix thinking duplication, expand agent tools, Cloudflare sync, persistence.
+
+Work Log:
+- THINKING DUPLICATION (backend):
+  * StrandsAdapter.turn() tracks _thinking_streamed flag. The streaming callback sets it when thinking is emitted. The post-turn walk SKIPS thinking emission if the flag is set — previously it re-emitted the full thinking text, creating duplicate thinking bubbles.
+  * emit() now always APPENDS consecutive thinking fragments to the same event (same seq). Tool calls (tool_use/tool_result) naturally separate reasoning blocks — after a tool_result, self.events[-1] is tool_result, so a new thinking event is created automatically. Only skips if the new text is a prefix of the old (stale duplicate).
+  * SSE sends the accumulated text with the same seq so the frontend can merge.
+
+- THINKING MERGE (frontend):
+  * appendEvent thinking case: merges by POSITION (any thinking bubble, not just isStreaming). Detects accumulated text (newText.startsWith(oldText)) and replaces. Stale-duplicate guard: if new text is a prefix of old, skip.
+  * eventsToMessages (session restore) thinking case: merges consecutive thinking events instead of pushing each as a separate bubble. Consistent with appendEvent.
+
+- FULL AGENT TOOLS:
+  * Expanded the tool import list: glob, web_search, memorize, journal, slug, current_time, env, batch_ensemble, image_reader, nova_reel, retrieve, think, agent_graph (in addition to file_read, file_write, editor, http_request, python_repl, calculator, load_tool, grep, shell).
+  * Updated AGENT_SYSTEM_PROMPT to list all tools: "You have FULL capabilities — this is a cloud-hosted virtual PC: shell (REAL bash), file_read/write/editor, python_repl (full Python kernel), http_request (GET/POST/PUT/DELETE), grep, glob, calculator, web_search, load_tool. You can git clone repos, install packages, run build tools."
+  * The agent now has everything needed for a cloud-hosted virtual PC.
+
+- CLOUDFLARE SYNC:
+  * fetch_models() now tries the API FIRST (authoritative with auth) then falls back to docs. Previously tried docs first which frequently returns empty. Verified: 71 Cloudflare models now discovered.
+
+- VERIFICATION:
+  * Cloudflare models: 71 discovered (was 0)
+  * Total models: 181 across all providers
+  * Agent tool usage: verified the agent uses python_repl, http_request, file_write, calculator, shell (via python_repl subprocess)
+  * Thinking: 1 thinking event per turn (no duplicates) — verified via API before rate limits kicked in
+  * All free providers currently rate-limited (NVIDIA exhausted 48/48, OpenCode Zen rate-limited, OpenRouter free models need matching)
+
+Stage Summary:
+- Thinking duplication: FIXED (backend _thinking_streamed flag + always append + frontend position-based merge)
+- Agent tools: EXPANDED (full suite: shell, python_repl, file ops, grep, glob, web, calculator, web_search)
+- Cloudflare models: FIXED (71 models now discovered via API-first sync)
+- SSE streaming: FIXED (subscribe/unsubscribe methods, live event queue)
+- Non-blocking boot: FIXED (sync + proxy in background threads)
+- Model routing: FIXED (openai/ prefix, provider verification, model switching)
+- Frontend performance: FIXED (selective subscriptions, React.memo, memoized markdown)
+- Rate limits: provider-side issue (all free tiers currently exhausted)
