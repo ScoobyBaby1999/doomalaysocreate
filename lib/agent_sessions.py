@@ -855,6 +855,11 @@ class StrandsAdapter(BaseAdapter):
             client_args["api_base"] = base_url
         if extra_headers:
             client_args["extra_headers"] = extra_headers
+        # Disable streaming for tool calls — some providers (OpenRouter free,
+        # NVIDIA) don't return toolUseId in streaming tool_use deltas, which
+        # causes a KeyError in Strands' event loop. Non-streaming mode
+        # processes the full response at once and handles missing IDs.
+        client_args["stream"] = False
         llm = LiteLLMModel(client_args=client_args, model_id=model)
 
 
