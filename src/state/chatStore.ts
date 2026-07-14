@@ -113,11 +113,21 @@ export interface ChatState {
   // Derived
   cost: number | null;
   currentModel: string | null;
+  /** The model the backend actually resolved + is running (for verification). */
+  resolvedModel: string | null;
+  /** The provider serving the current/last agent turn (for verification). */
+  resolvedProvider: string | null;
+  /** The model the user requested (may differ from resolvedModel if the
+   *  backend fell back). Shown in the UI so the user can spot mismatches. */
+  requestedModel: string | null;
   workspaceId: string | null;
 
   // Internal: current agent session ID (for Stop and SSE)
   _agentSessionId: string | null;
   _streamController: AbortController | null;
+  /** Highest event seq we've seen for the current agent session. Used as the
+   *  SSE cursor for the next turn so we don't replay the whole transcript. */
+  _lastEventSeq: number;
 
   // Actions
   setInputText: (text: string) => void;
@@ -338,15 +348,25 @@ export function eventsToMessages(events: AgentEvent[]): ChatMessage[] {
   return messages;
 }
 
-/** Append a single new event to the existing message list (immutable). */
+/** Append a single new event to the existing message list (immutable).
+ *  DEDUP: every event type checks by seq before appending, so a replayed
+ *  event (e.g. from a since=0 re-poll) never creates a duplicate message.
+ *  Delta events (assistant_delta, thinking_delta) merge into the last streaming
+ *  message of the matching role; they don't use seq dedup because multiple
+ *  deltas share the growing message. */
 function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
-  // The simplest correct merge: re-derive messages from existing events + the
-  // new one. The existing messages were derived from a contiguous event
-  // stream, so we just need their underlying events back... but we don't have
-  // those. Instead, do an efficient targeted update.
   const ts = (ev.ts || Date.now() / 1000) * 1000;
   const seq = ev.i ?? existing.length;
   const out = existing.slice();
+
+  // Universal seq dedup for non-delta events. Prevents duplicated
+  // assistant/thinking/tool/status/panel messages when the SSE cursor resets
+  // or the backend replays events.
+  if (ev.type !== "assistant_delta" && ev.type !== "thinking_delta") {
+    if (out.some((m) => m.seq === seq && m.role !== "user")) {
+      return out; // already have this event
+    }
+  }
 
   switch (ev.type) {
     case "user": {
@@ -373,6 +393,14 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
       return out;
     }
     case "assistant": {
+      // A non-delta assistant event is a complete message. If there's a
+      // streaming assistant message at the end, finalize it with this content.
+      for (let i = out.length - 1; i >= 0; i--) {
+        if (out[i].role === "assistant" && out[i].isStreaming) {
+          out[i] = { ...out[i], content: ev.text || out[i].content, isStreaming: false, seq };
+          return out;
+        }
+      }
       out.push({
         id: genMsgId(),
         role: "assistant",
@@ -402,10 +430,20 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
       return out;
     }
     case "thinking": {
+      // A non-delta thinking event. Set isStreaming=true so thinking_delta
+      // events can merge into it. If there's already a streaming thinking,
+      // finalize it first (the non-delta event starts a new thinking block).
+      for (let i = out.length - 1; i >= 0; i--) {
+        if (out[i].role === "thinking" && out[i].isStreaming) {
+          out[i] = { ...out[i], isStreaming: false };
+          break;
+        }
+      }
       out.push({
         id: genMsgId(),
         role: "thinking",
         content: ev.text || "",
+        isStreaming: true,
         timestamp: ts,
         seq,
       });
@@ -495,16 +533,19 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
   }
 }
 
-/** Mark the last streaming message as done (called when a turn ends). */
+/** Mark ALL streaming messages as done (called when a turn ends).
+ *  Finalizes every isStreaming message, not just the last — fixes the bug
+ *  where a thinking + assistant both streaming left one with a perpetual cursor. */
 function finalizeStreaming(existing: ChatMessage[]): ChatMessage[] {
-  const out = existing.slice();
-  for (let i = out.length - 1; i >= 0; i--) {
-    if (out[i].isStreaming) {
-      out[i] = { ...out[i], isStreaming: false };
-      break;
+  let changed = false;
+  const out = existing.map((m) => {
+    if (m.isStreaming) {
+      changed = true;
+      return { ...m, isStreaming: false };
     }
-  }
-  return out;
+    return m;
+  });
+  return changed ? out : existing;
 }
 
 // ---------------------------------------------------------------------------
@@ -547,10 +588,14 @@ export const useChatStore = create<ChatState>()(
       sidebarOpen: false,
       cost: null,
       currentModel: null,
+      resolvedModel: null,
+      resolvedProvider: null,
+      requestedModel: null,
       workspaceId: null,
 
       _agentSessionId: null,
       _streamController: null,
+      _lastEventSeq: 0,
 
       // -- Simple setters --
       setInputText: (text) => set({ inputText: text }),
@@ -573,16 +618,19 @@ export const useChatStore = create<ChatState>()(
       // -- Load sessions --
       loadSessions: async (client) => {
         set({ isLoadingSessions: true, sessionError: null });
+        // Always restore activeSessionId from localStorage first — even if the
+        // network call fails, the user should keep their active session so
+        // they can retry or send a new message without losing context.
+        let storedActiveId: string | null = null;
+        try {
+          storedActiveId = localStorage.getItem(ACTIVE_SESSION_KEY);
+        } catch {
+          /* ignore */
+        }
         try {
           const { sessions } = await client.listChatSessions();
           // Restore active session if it still exists.
-          let activeId = get().activeSessionId;
-          try {
-            const stored = localStorage.getItem(ACTIVE_SESSION_KEY);
-            if (stored && !activeId) activeId = stored;
-          } catch {
-            /* ignore */
-          }
+          let activeId = get().activeSessionId || storedActiveId;
           if (activeId && !sessions.find((s) => s.id === activeId)) {
             activeId = null;
             try {
@@ -602,9 +650,14 @@ export const useChatStore = create<ChatState>()(
             await get().switchSession(client, activeId);
           }
         } catch (e) {
+          // Network failure — still restore the active session id from
+          // localStorage so the user isn't dropped to an empty chat. They
+          // can retry; the next successful loadSessions will reconcile.
           set({
             sessionError: e instanceof Error ? e.message : "Failed to load sessions",
             isLoadingSessions: false,
+            activeSessionId: storedActiveId,
+            sessions: [],
           });
         }
       },
@@ -626,11 +679,16 @@ export const useChatStore = create<ChatState>()(
             isStreaming: false,
             error: null,
             cost: null,
+            currentModel: model || null,
+            resolvedModel: null,
+            resolvedProvider: null,
+            requestedModel: null,
             panelInvocations: [],
             files: [],
             queue: [],
             _agentSessionId: null,
             _streamController: null,
+            _lastEventSeq: 0,
           }));
           try {
             localStorage.setItem(ACTIVE_SESSION_KEY, cs.id);
@@ -661,15 +719,23 @@ export const useChatStore = create<ChatState>()(
           status: "idle",
           isBusy: false,
           isStreaming: false,
+          currentModel: null,
+          resolvedModel: null,
+          resolvedProvider: null,
+          requestedModel: null,
           panelInvocations: [],
           queue: [],
           _agentSessionId: null,
           _streamController: null,
+          _lastEventSeq: 0,
         });
         try {
           const evData = await client.getChatEvents(sessionId);
           const messages = eventsToMessages(evData.events);
-          set({ messages, isLoadingMessages: false });
+          // Set the cursor to the end of the loaded events so the next turn
+          // only requests new events (no full transcript replay).
+          const maxSeq = evData.events.reduce((mx, ev) => Math.max(mx, (ev.i ?? 0) + 1), 0);
+          set({ messages, isLoadingMessages: false, _lastEventSeq: maxSeq });
           try {
             localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
           } catch {
@@ -860,12 +926,19 @@ async function _runTurn(
     error: null,
     status: "running",
     inputText: "",
+    requestedModel: model || null,
   }));
 
   // Buffer events for batch persistence at turn end.
   let bufferedEvents: AgentEvent[] = [];
-  let since = 0;
+  // Use the stored cursor so we don't replay the whole transcript every turn.
+  // The cursor resets to 0 only when a new agent session is created.
+  let since = get()._lastEventSeq || 0;
   let agentSid: string | null = null;
+  let controller: AbortController | null = null;
+  // Keep a separate ref the finally-block can read (TS narrows the let to
+  // never inside the Promise closure otherwise).
+  const controllerRef: { current: AbortController | null } = { current: null };
 
   try {
     const start: AgentStart = await client.send(
@@ -876,8 +949,24 @@ async function _runTurn(
       sessionId,
     );
     agentSid = start.session_id;
-    since = 0;
-    set({ _agentSessionId: agentSid });
+
+    // MODEL VERIFICATION: store what the backend actually resolved + is running.
+    // The backend returns: model (requested), resolved_model, resolved_provider.
+    // If resolved_model differs from what we requested, the UI shows a warning.
+    const startAny = start as AgentStart & { resolved_model?: string; resolved_provider?: string; requested_model?: string };
+    set({
+      _agentSessionId: agentSid,
+      currentModel: start.model,
+      requestedModel: startAny.requested_model || model || null,
+      resolvedModel: startAny.resolved_model || null,
+      resolvedProvider: startAny.resolved_provider || null,
+    });
+
+    // If this is a new agent session (not reused), reset the cursor so we
+    // get the full transcript from seq 0. If reused, keep the cursor.
+    // We detect reuse by checking if _lastEventSeq > 0 AND the session_id
+    // matches the previous one. Simplest: always start from the stored cursor.
+    // The backend's queue-based SSE will only send events with i >= since.
 
     // Open SSE stream for live events. If SSE fails, fall back to polling.
     await new Promise<void>((resolve) => {
@@ -893,7 +982,7 @@ async function _runTurn(
       const handleEvent = (ev: AgentEvent) => {
         bufferedEvents.push(ev);
         since = Math.max(since, (ev.i ?? 0) + 1);
-        set((s) => ({ messages: appendEvent(s.messages, ev) }));
+        set((s) => ({ messages: appendEvent(s.messages, ev), _lastEventSeq: since }));
 
         // Update status from status events.
         if (ev.type === "status") {
@@ -910,7 +999,7 @@ async function _runTurn(
         }
       };
 
-      const controller = client.stream(
+      controller = client.stream(
         agentSid!,
         since,
         handleEvent,
@@ -943,6 +1032,7 @@ async function _runTurn(
             .catch(() => finish());
         },
       );
+      controllerRef.current = controller;
       set({ _streamController: controller });
     });
 
@@ -984,6 +1074,13 @@ async function _runTurn(
       _streamController: null,
     });
     return;
+  } finally {
+    // ALWAYS abort the SSE stream when the turn ends — prevents trailing
+    // events from the previous turn leaking into the next turn.
+    const ctrl = controllerRef.current;
+    if (ctrl) {
+      try { ctrl.abort(); } catch { /* already aborted */ }
+    }
   }
 
   // Drain the queue: send the next message if any.

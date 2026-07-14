@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, memo } from "react";
 import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
 import type { ChatMessage } from "../state/chatStore";
@@ -36,7 +36,7 @@ interface ChatMessageBubbleProps {
   message: ChatMessage;
 }
 
-export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
+export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
   // -- User message: right-aligned bubble with pending indicator ----------
   if (message.role === "user") {
     return (
@@ -84,7 +84,7 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
   if (message.role === "thinking") {
     return (
       <div className="px-4 py-1">
-        <Collapsible label="Thinking" kind="thinking">
+        <Collapsible label="Thinking" kind="thinking" defaultOpen={!!message.isStreaming}>
           <div className="text-[12.5px] text-muted-foreground leading-relaxed">
             <Markdown text={message.content} />
             {message.isStreaming && (
@@ -193,7 +193,7 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
   }
 
   return null;
-}
+});
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -218,12 +218,14 @@ function Collapsible({
   label,
   children,
   kind,
+  defaultOpen,
 }: {
   label: string;
   children: React.ReactNode;
   kind?: "thinking" | "result" | "error";
+  defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(kind === "error");
+  const [open, setOpen] = useState(kind === "error" || !!defaultOpen);
   const borderClass =
     kind === "error"
       ? "border-red-500/30"

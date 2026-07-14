@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 import type { Settings } from "../api/panel";
 import { AgentClient } from "../api/agent";
 import { useChatStore } from "../state/chatStore";
@@ -40,44 +40,48 @@ export function AgentChat({ settings }: { settings: Settings }) {
   // either form (see _handle_agent_post).
   const effectiveModelId = selectedSlotId || selectedModelId;
 
-  // Chat store
-  const store = useChatStore();
-  const {
-    sessions,
-    activeSessionId,
-    messages,
-    isBusy,
-    isStreaming,
-    status,
-    inputText,
-    error,
-    effort,
-    webSearch,
-    deepResearch,
-    files,
-    fileDrawerOpen,
-    panelDrawerOpen,
-    panelInvocations,
-    sidebarOpen,
-    cost,
-    queue,
-    isLoadingMessages,
-    setInputText,
-    setEffort,
-    toggleWebSearch,
-    toggleDeepResearch,
-    setSidebarOpen,
-    setFileDrawerOpen,
-    setPanelDrawerOpen,
-    loadSessions,
-    createSession,
-    switchSession,
-    deleteSession,
-    renameSession,
-    sendMessage,
-    stopGeneration,
-    dequeueMessage,
-  } = store;
+  // Chat store — use SELECTIVE subscriptions so typing in the input doesn't
+  // re-render the whole message list. Each useChatStore((s) => ...) only
+  // re-renders when that specific slice changes.
+  const sessions = useChatStore((s) => s.sessions);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const messages = useChatStore((s) => s.messages);
+  const isBusy = useChatStore((s) => s.isBusy);
+  const isStreaming = useChatStore((s) => s.isStreaming);
+  const status = useChatStore((s) => s.status);
+  const inputText = useChatStore((s) => s.inputText);
+  const error = useChatStore((s) => s.error);
+  const effort = useChatStore((s) => s.effort);
+  const webSearch = useChatStore((s) => s.webSearch);
+  const deepResearch = useChatStore((s) => s.deepResearch);
+  const files = useChatStore((s) => s.files);
+  const fileDrawerOpen = useChatStore((s) => s.fileDrawerOpen);
+  const panelDrawerOpen = useChatStore((s) => s.panelDrawerOpen);
+  const panelInvocations = useChatStore((s) => s.panelInvocations);
+  const sidebarOpen = useChatStore((s) => s.sidebarOpen);
+  const cost = useChatStore((s) => s.cost);
+  const queue = useChatStore((s) => s.queue);
+  const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
+  // Model verification fields
+  const resolvedModel = useChatStore((s) => s.resolvedModel);
+  const resolvedProvider = useChatStore((s) => s.resolvedProvider);
+  const requestedModel = useChatStore((s) => s.requestedModel);
+  // Actions (stable references from zustand — don't cause re-renders)
+  const setInputText = useChatStore((s) => s.setInputText);
+  const setEffort = useChatStore((s) => s.setEffort);
+  const toggleWebSearch = useChatStore((s) => s.toggleWebSearch);
+  const toggleDeepResearch = useChatStore((s) => s.toggleDeepResearch);
+  const setSidebarOpen = useChatStore((s) => s.setSidebarOpen);
+  const setFileDrawerOpen = useChatStore((s) => s.setFileDrawerOpen);
+  const setPanelDrawerOpen = useChatStore((s) => s.setPanelDrawerOpen);
+  const loadSessions = useChatStore((s) => s.loadSessions);
+  const createSession = useChatStore((s) => s.createSession);
+  const switchSession = useChatStore((s) => s.switchSession);
+  const deleteSession = useChatStore((s) => s.deleteSession);
+  const renameSession = useChatStore((s) => s.renameSession);
+  const sendMessage = useChatStore((s) => s.sendMessage);
+  const stopGeneration = useChatStore((s) => s.stopGeneration);
+  const dequeueMessage = useChatStore((s) => s.dequeueMessage);
 
   // Refs
   const clientRef = useRef(new AgentClient(settings));
@@ -86,8 +90,10 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const lastUserMsgRef = useRef("");
   const stickToBottomRef = useRef(true);
 
-  // Keep client fresh when settings change
-  clientRef.current = new AgentClient(settings);
+  // Keep client fresh when settings change — useMemo so it only rebuilds
+  // when settings actually change, NOT on every render.
+  const client = useMemo(() => new AgentClient(settings), [settings]);
+  clientRef.current = client;
 
   // Auto-scroll behavior: only stick to bottom if the user is already there.
   const handleScroll = useCallback(() => {
@@ -207,6 +213,24 @@ export function AgentChat({ settings }: { settings: Settings }) {
             <polyline points="6 9 12 15 18 9" />
           </svg>
         </button>
+
+        {/* Model verification badge — shows what the backend ACTUALLY resolved.
+            If resolvedModel differs from requestedModel, show a warning so the
+            user knows the model they picked isn't the one running. */}
+        {resolvedModel && (
+          <div className="flex flex-col items-end gap-0.5 ml-1" title={`Verified: ${resolvedProvider || "?"} → ${resolvedModel}`}>
+            <span className="text-[9px] text-emerald-400/80 font-mono tabular-nums flex items-center gap-0.5">
+              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              {resolvedProvider || "unknown"}
+            </span>
+            {requestedModel && resolvedModel &&
+             requestedModel.split("/").pop()?.toLowerCase() !== resolvedModel.split("/").pop()?.toLowerCase() && (
+              <span className="text-[8px] text-amber-400/90 font-mono" title={`Requested ${requestedModel} but backend resolved to ${resolvedModel}`}>
+                ⚠ redirected
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Cost indicator */}
         {cost != null && cost > 0 && (

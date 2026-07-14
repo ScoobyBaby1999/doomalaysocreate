@@ -60,6 +60,9 @@ export interface AgentSnapshot {
   session_id: string;
   tier: "claude" | "open" | "mock";
   model: string | null;
+  resolved_model?: string | null;
+  resolved_provider?: string | null;
+  resolved_api_base?: string | null;
   status: AgentStatus;
   events: AgentEvent[];
   next: number;
@@ -72,6 +75,12 @@ export interface AgentStart {
   status: AgentStatus;
   workspace_id?: string;
   chat_session_id?: string;
+  /** The model the user requested (before backend resolution). */
+  requested_model?: string;
+  /** The canonical litellm model string the backend actually runs. */
+  resolved_model?: string;
+  /** The provider serving this agent turn (e.g. "nvidia", "privatemodeai"). */
+  resolved_provider?: string;
 }
 
 export interface AgentFile {
