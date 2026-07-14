@@ -1297,6 +1297,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"tier": agent_sessions.agent_tier(),
                                   "models": agent_sessions.agent_models()})
             return
+        # Agent tools endpoint — lists all available agent tools
+        if route == "/api/agent/tools":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            tools = [
+                {"name": "shell", "description": "Execute bash commands (ls, cat, grep, git, python3, pip, npm, make, curl, etc.)"},
+                {"name": "file_read", "description": "Read file contents"},
+                {"name": "file_write", "description": "Write/create files"},
+                {"name": "editor", "description": "Edit existing files (str_replace)"},
+                {"name": "http_request", "description": "Fetch URLs (GET/POST/PUT/DELETE — full web access)"},
+                {"name": "grep", "description": "Search file contents with regex"},
+                {"name": "glob", "description": "Find files by pattern (e.g. **/*.py)"},
+                {"name": "calculator", "description": "Math calculations"},
+                {"name": "agent_panel", "description": "Invoke the multi-model judge panel for critiques"},
+                {"name": "memory", "description": "Read/write the workspace memory layer (.pied sanity log)"},
+                {"name": "delegate", "description": "Spawn a sub-agent for a sub-task (multi-agent orchestration)"},
+                {"name": "load_tool", "description": "Dynamically load more tools at runtime"},
+                {"name": "web_search", "description": "Search the web (when available)"},
+            ]
+            self._send_json(200, {"tools": tools, "count": len(tools)})
+            return
         # Memory layer endpoint — returns the .pied state for a workspace
         if route == "/api/memory":
             if not self._auth_ok():
