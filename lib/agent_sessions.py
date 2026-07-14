@@ -1069,35 +1069,24 @@ class AgentSession:
         with self.lock:
             if (ev.get("type") == "thinking"
                     and self.events and self.events[-1].get("type") == "thinking"):
+                # Always APPEND to the last thinking event. The Strands callback
+                # sends reasoning fragments (one per token or chunk). Tool calls
+                # (tool_use/tool_result) naturally separate reasoning blocks —
+                # after a tool_result, self.events[-1] is tool_result (not
+                # thinking), so a new thinking event is created automatically.
+                # This means consecutive thinking events are ALWAYS continuations
+                # of the same reasoning block, so appending is correct.
                 old_text = (self.events[-1].get("text", "") or "")
                 new_text = (ev.get("text", "") or "")
-                # Smart merge: the Strands callback can send either fragments
-                # (one per token) or full accumulated text. Detect which:
-                # - If new_text starts with old_text → accumulated mode → REPLACE
-                # - If old_text starts with new_text → stale/duplicate → SKIP
-                # - If new_text is a short fragment → APPEND (token streaming)
-                # - Otherwise → new reasoning block → create NEW event (fall through)
-                if new_text and old_text and new_text.startswith(old_text) and len(new_text) > len(old_text):
-                    # Accumulated text growing — replace
-                    self.events[-1]["text"] = new_text
-                    self.events[-1]["ts"] = time.time()
-                    stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
-                    stream_ev["text"] = new_text
-                elif old_text and new_text and old_text.startswith(new_text):
-                    # Stale — skip (the new text is a prefix of what we already have)
+                # Skip stale duplicates (new text is a prefix of old)
+                if old_text and new_text and old_text.startswith(new_text) and len(new_text) < len(old_text):
                     stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
                     stream_ev["text"] = old_text
-                elif len(new_text) <= 20 and not new_text.endswith((".", "!", "?", "\n")):
-                    # Short fragment (token streaming) — append
+                else:
                     self.events[-1]["text"] = old_text + new_text
                     self.events[-1]["ts"] = time.time()
                     stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
                     stream_ev["text"] = self.events[-1]["text"]
-                else:
-                    # New reasoning block — create a new event
-                    new_ev = {"i": len(self.events), "ts": time.time(), **ev}
-                    self.events.append(new_ev)
-                    stream_ev = new_ev
             else:
                 new_ev = {"i": len(self.events), "ts": time.time(), **ev}
                 self.events.append(new_ev)
