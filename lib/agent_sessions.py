@@ -67,6 +67,7 @@ AGENT_SYSTEM_PROMPT = (
     "- calculator: math calculations\n"
     "- agent_panel: invoke the multi-model judge panel for critiques\n"
     "- memory: read/write the workspace memory layer (.pied sanity log)\n"
+    "- delegate: spawn a sub-agent for a sub-task (multi-agent orchestration)\n"
     "- load_tool: dynamically load more tools at runtime\n\n"
     "CRITICAL: ALWAYS use the `shell` tool for ANY command-line operation. "
     "The `shell` tool gives you a REAL bash shell with full output capture. "
@@ -937,6 +938,78 @@ class StrandsAdapter(BaseAdapter):
                     return f"Unknown action: {action}. Use: read, write, log, update_goal, update_plan, add_task, complete_task"
 
             tools.append(memory)
+        except Exception:
+            pass
+
+        # 5. delegate tool — spawn a sub-agent for a sub-task (multi-agent orchestration)
+        # The orchestrator can delegate work to sub-agents, each running in the same
+        # workspace but with their own agent session. The memory layer (.pied) serves
+        # as the shared state — sub-agents read the goal/plan and write findings.
+        try:
+            _ws = self.workspace
+            _model = self.model
+            @strands_tool_decorator(name="delegate", description=(
+                "Delegate a sub-task to a sub-agent. The sub-agent runs in the same "
+                "workspace with its own session. Use for parallel work, code review, "
+                "or breaking complex tasks into smaller pieces. The sub-agent can "
+                "use all tools (shell, file ops, memory, etc.). Results are written "
+                "to the memory layer."
+            ))
+            def delegate(task: str, model: str = "") -> str:
+                """Spawn a sub-agent for a sub-task.
+                task: the task description (be specific)
+                model: optional model override (defaults to the same model)
+                """
+                import memory_layer
+                # Log the delegation
+                sub_id = uuid.uuid4().hex[:8]
+                memory_layer.log_event(_ws, "orchestrator", "delegate", {
+                    "sub_agent": sub_id, "task": task[:200]
+                })
+                # Create a sub-agent session
+                try:
+                    sub_model = model.strip() if model.strip() else _model
+                    sub_session = get_or_create(
+                        model=sub_model,
+                        workspace_path=_ws,
+                        workspace_id=getattr(_thread_local, "workspace_id", None),
+                        chat_session_id=None,  # sub-agents don't persist to chat
+                    )
+                    # Submit the task
+                    sub_session.submit(
+                        f"You are a sub-agent (id: {sub_id}). Your task: {task}\n\n"
+                        f"Read the memory layer first (memory(action='read')) to understand "
+                        f"the current goal and plan. After completing your task, write your "
+                        f"findings to the memory layer (memory(action='write', section='findings', "
+                        f"key='{sub_id}', value='your findings')). Then report your result."
+                    )
+                    # Wait for the sub-agent to finish (with timeout)
+                    import time as _time
+                    deadline = _time.time() + 120  # 2 min timeout
+                    while _time.time() < deadline:
+                        if sub_session.status in ("idle", "error"):
+                            break
+                        _time.sleep(2)
+                    # Collect the result
+                    if sub_session.status == "error":
+                        return f"Sub-agent {sub_id} failed. Check memory layer for details."
+                    # Get the last assistant message
+                    msgs = getattr(sub_session.adapter, "agent", None)
+                    if msgs and hasattr(msgs, "messages"):
+                        for m in reversed(msgs.messages):
+                            if m.get("role") == "assistant":
+                                for block in (m.get("content") or []):
+                                    if "text" in block and block["text"].strip():
+                                        memory_layer.log_event(_ws, sub_id, "sub_agent_complete", {
+                                            "task": task[:200], "result_preview": block["text"][:200]
+                                        })
+                                        return f"Sub-agent {sub_id} completed:\n{block['text'][:5000]}"
+                    memory_layer.log_event(_ws, sub_id, "sub_agent_complete", {"task": task[:200]})
+                    return f"Sub-agent {sub_id} completed (no text output). Check memory layer."
+                except Exception as e:
+                    return f"Failed to spawn sub-agent: {e}"
+
+            tools.append(delegate)
         except Exception:
             pass
 
