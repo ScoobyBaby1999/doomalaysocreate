@@ -1,0 +1,210 @@
+// Doomalaysocreate — multi-tenant chatbot SaaS schema.
+// Multi-tenancy: logical isolation via spaceId/userId on every row.
+// Provider keys are USER-scoped (each user brings their own), encrypted at rest.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions      Session[]
+  ownedSpaces   Space[]       @relation("SpaceOwner")
+  memberships   SpaceMember[]
+  providerKeys  ProviderKey[]
+  conversations Conversation[]
+  panelJobs     PanelJob[]
+  metrics       Metric[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+}
+
+model Space {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String?
+  ownerId     String
+  isPublic    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner        User          @relation("SpaceOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members      SpaceMember[]
+  conversations Conversation[]
+  panelJobs    PanelJob[]
+  metrics      Metric[]
+  templates    Template[]
+
+  @@index([ownerId])
+}
+
+model SpaceMember {
+  id      String   @id @default(cuid())
+  spaceId String
+  userId  String
+  role    String   @default("member") // owner | admin | member
+  joinedAt DateTime @default(now())
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([spaceId, userId])
+  @@index([userId])
+}
+
+model ProviderKey {
+  id           String   @id @default(cuid())
+  userId       String
+  provider     String // nvidia | openrouter | groq | github-models | cloudflare | opencode-zen | cerebras | google | fireworks | sambanova | zai
+  label        String
+  encryptedKey String   // AES-256-GCM ciphertext (iv:authTag:ct)
+  // optional companion fields some providers need (account id etc.)
+  encryptedExtra String? // JSON map, encrypted
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider, label])
+  @@index([userId, provider])
+}
+
+model Conversation {
+  id        String   @id @default(cuid())
+  spaceId   String
+  userId    String
+  title     String   @default("New Chat")
+  model     String?
+  provider  String?
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  space    Space     @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@index([spaceId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  role           String   // user | assistant | system
+  content        String
+  model          String?
+  provider       String?
+  tokensIn       Int?
+  tokensOut      Int?
+  latencyMs      Int?
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+}
+
+model PanelJob {
+  id          String   @id @default(cuid())
+  spaceId     String
+  userId      String
+  status      String   @default("running") // running | complete | error
+  role        String   @default("critiquer") // critiquer|verifier|generator|transformer|parser|planner|custom
+  input       String
+  system      String?
+  panel       String   // JSON array of model slots
+  effort      String   @default("med") // low|med|high|max
+  merge       String   @default("dedupe") // dedupe|vote|concat|none
+  merged      String?
+  meta        String?  // JSON {judgesOk,judgesTotal,judgesSettled,complete,elapsedS}
+  template    String?  // template name if from /api/templates/run
+  error       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  space  Space        @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  judges PanelJudge[]
+
+  @@index([spaceId, userId])
+  @@index([userId])
+  @@index([status])
+}
+
+model PanelJudge {
+  id        String   @id @default(cuid())
+  jobId     String
+  model     String   // logical name or provider/model slot
+  status    String   @default("pending") // pending|running|done|error
+  output    String?
+  error     String?
+  routedTo  String?
+  ok        Boolean?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  job PanelJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+}
+
+model Metric {
+  id         String   @id @default(cuid())
+  spaceId    String
+  userId     String
+  provider   String
+  model      String
+  role       String
+  effort     String?
+  latencyMs  Int
+  tokensIn   Int      @default(0)
+  tokensOut  Int      @default(0)
+  ok         Boolean  @default(true)
+  code       String?  // success | 429 | 5xx | timeout | error
+  createdAt  DateTime @default(now())
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([spaceId, userId])
+  @@index([userId, provider])
+  @@index([provider, model])
+}
+
+model Template {
+  id          String   @id @default(cuid())
+  spaceId     String
+  name        String
+  description String?
+  stages      String   // JSON array of stage defs
+  builtin     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+
+  @@index([spaceId])
+}
