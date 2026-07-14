@@ -80,6 +80,10 @@ AGENT_SYSTEM_PROMPT = (
     "Use file_read/file_write/editor for file operations. "
     "Use http_request for web fetches. "
     "Use grep/glob for code search. "
+    "Use memory to read/write the workspace memory layer (.pied sanity log) — "
+    "read it at the start of each task to know the current goal, plan, and "
+    "recent events. Write decisions and findings to the blackboard so other "
+    "agents can see them. "
     "You can git clone repos, install packages, run build tools, and do "
     "anything a developer terminal can do. Lead with the outcome, not the process."
 )
@@ -670,6 +674,16 @@ class StrandsAdapter(BaseAdapter):
         self.resolved_model: str | None = None
         self.resolved_provider: str | None = None
         self.resolved_api_base: str | None = None
+        # Initialize the memory layer (.pied sanity log)
+        try:
+            import memory_layer
+            memory_layer.init_memory(workspace)
+            # Inject memory context into the system prompt so the agent
+            # knows the current goal, plan, recent events, and tasks.
+            memory_ctx = memory_layer.get_context_for_agent(workspace)
+            self.system_prompt = self.system_prompt + "\n\n" + memory_ctx
+        except Exception:
+            pass
 
     def open(self) -> None:
         import os as _os
@@ -876,6 +890,52 @@ class StrandsAdapter(BaseAdapter):
                     return str(result)
 
                 tools.append(agent_panel)
+        except Exception:
+            pass
+
+        # 4. memory tool — read/write the .pied sanity log
+        try:
+            _ws = self.workspace
+            @strands_tool_decorator(name="memory", description=(
+                "Read or write the workspace memory layer (.pied sanity log). "
+                "Use 'read' to get current state, goal, plan, and recent events. "
+                "Use 'write' to post a decision, finding, or update the goal/plan. "
+                "Use 'log' to append to the event log. "
+                "Actions: read, write, log, update_goal, update_plan, add_task, complete_task."
+            ))
+            def memory(action: str, section: str = "", key: str = "", value: str = "", task: str = "") -> str:
+                """Access the workspace memory layer.
+                action: read|write|log|update_goal|update_plan|add_task|complete_task
+                section: blackboard section (for write)
+                key: blackboard key (for write)
+                value: the value to write
+                task: the task text (for add_task/complete_task)
+                """
+                import memory_layer
+                if action == "read":
+                    return memory_layer.get_context_for_agent(_ws, max_chars=8000)
+                elif action == "write":
+                    memory_layer.post_blackboard(_ws, section, key, value, "agent")
+                    return f"Posted to blackboard [{section}/{key}]"
+                elif action == "log":
+                    memory_layer.log_event(_ws, "agent", "manual_log", {"message": value})
+                    return "Logged"
+                elif action == "update_goal":
+                    memory_layer.update_goal(_ws, value)
+                    return f"Goal updated: {value}"
+                elif action == "update_plan":
+                    memory_layer.update_plan(_ws, value)
+                    return f"Plan updated: {value}"
+                elif action == "add_task":
+                    memory_layer.add_task(_ws, task, "agent")
+                    return f"Task added: {task}"
+                elif action == "complete_task":
+                    memory_layer.complete_task(_ws, task, "agent")
+                    return f"Task completed: {task}"
+                else:
+                    return f"Unknown action: {action}. Use: read, write, log, update_goal, update_plan, add_task, complete_task"
+
+            tools.append(memory)
         except Exception:
             pass
 
