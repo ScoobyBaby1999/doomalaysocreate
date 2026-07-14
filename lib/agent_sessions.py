@@ -1000,8 +1000,82 @@ class StrandsAdapter(BaseAdapter):
         except Exception:
             pass
 
-        self.agent = Agent(model=llm, tools=tools, system_prompt=self.system_prompt,
-                           callback_handler=None)
+        # ─── Strands full-capability configuration ───────────────────────
+        # 1. Conversation Management — SlidingWindowConversationManager
+        #    Manages the context window automatically: when it gets too large,
+        #    older messages are trimmed (preserving tool-use/tool-result pairs).
+        #    This prevents context overflow errors and keeps the agent responsive
+        #    in long conversations.
+        conv_manager = None
+        try:
+            from strands.agent.conversation_manager import SlidingWindowConversationManager
+            conv_manager = SlidingWindowConversationManager(window_size=40)
+        except Exception:
+            pass
+
+        # 2. Session Management — FileSessionManager
+        #    Persists the full conversation to disk so it survives Space restarts.
+        #    Each agent session gets its own directory under the workspace.
+        #    On restart, the agent can rehydrate from the saved messages.
+        session_mgr = None
+        try:
+            from strands.session import FileSessionManager
+            sess = self._session_ref()
+            session_id = sess.chat_session_id or sess.id if sess else None
+            sessions_dir = str(self.workspace / ".sessions")
+            (self.workspace / ".sessions").mkdir(parents=True, exist_ok=True)
+            session_mgr = FileSessionManager(
+                session_id=session_id,
+                sessions_dir=sessions_dir,
+            )
+        except Exception:
+            pass
+
+        # 3. Hooks — log tool calls and errors for debugging + audit trail
+        agent_hooks = []
+        try:
+            from strands.hooks import (
+                BeforeToolCallEvent, AfterToolCallEvent,
+                BeforeModelCallEvent, AfterModelCallEvent,
+            )
+
+            def _log_tool_call(event: BeforeToolCallEvent):
+                """Log every tool call for the audit trail."""
+                try:
+                    tool_name = event.tool_name
+                    log_event("agent_tool_call", tool=tool_name,
+                              agent=getattr(self._session_ref(), "id", None))
+                except Exception:
+                    pass
+
+            def _log_tool_result(event: AfterToolCallEvent):
+                """Log tool results (success/failure) for debugging."""
+                try:
+                    log_event("agent_tool_result",
+                              tool=event.tool_name,
+                              ok=event.response is not None)
+                except Exception:
+                    pass
+
+            agent_hooks = [_log_tool_call, _log_tool_result]
+        except Exception:
+            pass
+
+        # 4. Build the Agent with all features enabled
+        agent_kwargs = dict(
+            model=llm,
+            tools=tools,
+            system_prompt=self.system_prompt,
+            callback_handler=None,
+        )
+        if conv_manager:
+            agent_kwargs["conversation_manager"] = conv_manager
+        if session_mgr:
+            agent_kwargs["session_manager"] = session_mgr
+        if agent_hooks:
+            agent_kwargs["hooks"] = agent_hooks
+
+        self.agent = Agent(**agent_kwargs)
         self._msg_cursor = 0
         # Register conscious tools for inspection (the panel tool is already
         # registered above as a Strands tool).
