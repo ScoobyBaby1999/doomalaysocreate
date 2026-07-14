@@ -1041,17 +1041,18 @@ class AgentSession:
         with self.lock:
             if (ev.get("type") == "thinking"
                     and self.events and self.events[-1].get("type") == "thinking"):
-                # Merge: replace the text of the last thinking event (the
-                # streaming callback sends the full accumulated reasoningText
-                # each time, so replace is correct). Keep the same event index
-                # so subscribers can dedup/merge by seq.
-                self.events[-1]["text"] = ev["text"]
+                # Merge: APPEND the fragment to the last thinking event's text.
+                # The Strands streaming callback sends reasoning fragments
+                # (one per token), not the full accumulated text. So we append
+                # to build up the complete thinking text, matching what the
+                # post-turn walk produces. Keep the same event index so
+                # subscribers can dedup/merge by seq.
+                self.events[-1]["text"] = (self.events[-1].get("text", "") or "") + (ev.get("text", "") or "")
                 self.events[-1]["ts"] = time.time()
-                # Send the MERGED event to stream queues (not the raw fragment)
-                # so SSE subscribers see the accumulated text, matching what
-                # snapshot()/poll() returns.
+                # Send the MERGED (accumulated) event to stream queues so SSE
+                # subscribers see the growing text, matching snapshot()/poll().
                 stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
-                stream_ev["text"] = ev["text"]  # the full accumulated text
+                stream_ev["text"] = self.events[-1]["text"]  # the accumulated text
             else:
                 new_ev = {"i": len(self.events), "ts": time.time(), **ev}
                 self.events.append(new_ev)
