@@ -14,24 +14,23 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Z.ai Code Scaffold - AI-Powered Development",
-  description: "Modern Next.js scaffold optimized for AI-powered development with Z.ai. Built with TypeScript, Tailwind CSS, and shadcn/ui.",
-  keywords: ["Z.ai", "Next.js", "TypeScript", "Tailwind CSS", "shadcn/ui", "AI development", "React"],
-  authors: [{ name: "Z.ai Team" }],
+  title: "doomalaysocreate — Multi-Model AI Panel",
+  description: "Fan your prompt out to a diverse panel of frontier LLMs across providers. Merge their uncorrelated opinions. Bring your own keys.",
+  keywords: ["AI panel", "judge panel", "LLM", "multi-model", "critique", "frontier models", "bring your own keys"],
+  authors: [{ name: "doomalaysocreate" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
   openGraph: {
-    title: "Z.ai Code Scaffold",
-    description: "AI-powered development with modern React stack",
-    url: "https://chat.z.ai",
-    siteName: "Z.ai",
+    title: "doomalaysocreate — Multi-Model AI Panel",
+    description: "One panel. Every frontier model. Millions of spaces.",
+    siteName: "doomalaysocreate",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Z.ai Code Scaffold",
-    description: "AI-powered development with modern React stack",
+    title: "doomalaysocreate",
+    description: "Multi-model judge panel with bring-your-own-keys.",
   },
 };
 

@@ -70,6 +70,10 @@ export const api = {
   createConversation: (data: { spaceId: string; title?: string; model?: string; provider?: string }) =>
     jfetch<{ conversation: ConversationDTO }>('/api/conversations', { method: 'POST', body: JSON.stringify(data) }),
   getMessages: (id: string) => jfetch<{ messages: MessageDTO[] }>(`/api/conversations/${id}/messages`),
+  renameConversation: (id: string, title: string) =>
+    jfetch<{ conversation: ConversationDTO }>(`/api/conversations/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
+  deleteConversation: (id: string) =>
+    jfetch<{ ok: boolean }>(`/api/conversations/${id}`, { method: 'DELETE' }),
 
   runPanel: (data: Any) =>
     jfetch<{ jobId: string; status: string; judges: Any[] }>('/api/panel', { method: 'POST', body: JSON.stringify({ ...data, async: true }) }),
