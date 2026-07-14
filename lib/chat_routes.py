@@ -130,13 +130,18 @@ def list_chat_sessions(user_id: str | None = None, limit: int = 100) -> list[dic
     _ensure_schema_once()
     db = _dbmod._db()
     if user_id:
+        # SECURITY (C8): Only return sessions owned by this user.
+        # Previously: "WHERE user_id = ? OR user_id IS NULL" exposed ALL
+        # anonymous sessions to every authenticated user.
         rows = db.execute(
-            "SELECT * FROM chat_sessions WHERE user_id = ? OR user_id IS NULL "
+            "SELECT * FROM chat_sessions WHERE user_id = ? "
             "ORDER BY updated_at DESC LIMIT ?",
             (user_id, limit)).fetchall()
     else:
+        # Anonymous: only return anonymous sessions (no user_id)
         rows = db.execute(
-            "SELECT * FROM chat_sessions ORDER BY updated_at DESC LIMIT ?",
+            "SELECT * FROM chat_sessions WHERE user_id IS NULL "
+            "ORDER BY updated_at DESC LIMIT ?",
             (limit,)).fetchall()
     return [dict(r) for r in rows]
 

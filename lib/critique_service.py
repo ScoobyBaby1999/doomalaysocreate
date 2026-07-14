@@ -1363,7 +1363,9 @@ class Handler(BaseHTTPRequestHandler):
             if data is None:
                 self._send_json(404, {"error": "grant token not found or expired"})
             else:
-                self._send_json(200, data)
+                # SECURITY (C6): Strip server-side tokens before sending
+                safe = {k: v for k, v in data.items() if not k.startswith("_")}
+                self._send_json(200, safe)
             return
         if route.startswith("/api/auth/hf/grants/"):
             token = route[len("/api/auth/hf/grants/"):]
@@ -1371,7 +1373,9 @@ class Handler(BaseHTTPRequestHandler):
             if data is None:
                 self._send_json(404, {"error": "grant token not found or expired"})
             else:
-                self._send_json(200, data)
+                # SECURITY (C6): Strip server-side tokens before sending
+                safe = {k: v for k, v in data.items() if not k.startswith("_")}
+                self._send_json(200, safe)
             return
         # --- GitHub integration routes -------------------------------------------
         if route == "/api/auth/github/login":
@@ -1582,7 +1586,12 @@ class Handler(BaseHTTPRequestHandler):
             "space_repo": target_repo,
             "rotation_secret": rotation_secret,
             "username": username,
-            "oauth_token": user_token,
+            # SECURITY (C6): oauth_token is NOT included in the result returned
+            # to the browser. The frontend only needs rotation_secret + space_url.
+            # The oauth_token is used server-side only (for setting secrets on
+            # the user's duplicated Space). It was previously exposed via the
+            # /oauth/result/<token> endpoint which is unauthenticated.
+            "_oauth_token": user_token,  # server-side only, stripped before sending
             "existing": existing,
         }
         provision_token = _store_provision_result(result)
@@ -1594,7 +1603,9 @@ class Handler(BaseHTTPRequestHandler):
         if result is None:
             self._send_json(404, {"error": "provision token not found or expired (max 5 min)"})
             return
-        self._send_json(200, result)
+        # SECURITY (C6): Strip the server-side oauth_token before sending to browser
+        safe_result = {k: v for k, v in result.items() if not k.startswith("_")}
+        self._send_json(200, safe_result)
 
     # -- agent orchestrator routes ------------------------------------------
 
