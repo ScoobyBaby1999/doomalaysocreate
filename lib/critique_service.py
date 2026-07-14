@@ -1586,10 +1586,23 @@ class Handler(BaseHTTPRequestHandler):
                 if m["model"] == model or m["model"].split("/")[-1] == model or m["model"].endswith("/" + model):
                     resolved = m["model"]
                     break
-            # If not found, try resolving a logical model ID (e.g. "glm-5.1")
-            # via the panel's logical_models mapping. This bridges the model
-            # picker's condensed view (which uses logical IDs) to the agent's
-            # physical slot IDs.
+            # If not found, try agent_sessions._resolve_open_model which searches
+            # the full open-models list (built from providers_catalog + synced
+            # models) and returns the correct litellm format (openai/<model_id>)
+            # with the matching base_url. This handles logical IDs, partial
+            # names, and provider/model strings from the panel's logical_models.
+            if not resolved:
+                try:
+                    pair = agent_sessions._resolve_open_model(model)
+                    if pair:
+                        resolved = pair[0]  # litellm_model (already openai/...)
+                except Exception:
+                    pass
+            # Last resort: resolve a logical model ID (e.g. "glm-5.1") via the
+            # panel's logical_models mapping, then re-resolve the physical
+            # provider/model through _resolve_open_model to get the litellm
+            # format. NEVER pass provider/model directly to LiteLLM — it needs
+            # the openai/ prefix for custom OpenAI-compatible endpoints.
             if not resolved and "/" not in model:
                 try:
                     panel_obj: Panel = self.server.panel  # type: ignore[attr-defined]
@@ -1599,8 +1612,22 @@ class Handler(BaseHTTPRequestHandler):
                             provider = cand.get("provider", "")
                             model_id = cand.get("model", "")
                             if provider and model_id:
-                                resolved = f"{provider}/{model_id}"
-                                break
+                                # Try to resolve provider/model through the
+                                # open-models list to get the correct litellm
+                                # prefix + base_url.
+                                pair = agent_sessions._resolve_open_model(
+                                    f"{provider}/{model_id}")
+                                if pair:
+                                    resolved = pair[0]
+                                    break
+                                # Fallback: if the provider/model isn't in the
+                                # open list (e.g. a provider with no key), try
+                                # just the model_id — _resolve_open_model will
+                                # match it by suffix against any provider.
+                                pair = agent_sessions._resolve_open_model(model_id)
+                                if pair:
+                                    resolved = pair[0]
+                                    break
                 except Exception:
                     pass
             # If we resolved, use it; otherwise let the backend try with what
