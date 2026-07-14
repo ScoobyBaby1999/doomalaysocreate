@@ -217,7 +217,8 @@ export function AgentChat({ settings }: { settings: Settings }) {
   );
 
   // Settings panel
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  
+  const [activePopover, setActivePopover] = useState<"effort" | "web" | "deep" | "mode" | null>(null);
 
   const running = isBusy && (status === "running" || status === "starting");
   const queueCount = queue.length;
@@ -535,85 +536,171 @@ export function AgentChat({ settings }: { settings: Settings }) {
 
       {/* Input area */}
       <div className="border-t border-border bg-surface/30 pt-2 pb-3 px-3 shrink-0">
-        {/* Quick settings */}
-        {settingsOpen && (
-          <div className="flex items-center gap-1.5 px-1 pb-2 overflow-x-auto">
-            <span className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mr-1 shrink-0">Effort</span>
-            {(["low", "med", "high", "max"] as const).map((e) => (
-              <button
-                key={e}
-                onClick={() => setEffort(e)}
-                className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 ${
-                  effort === e
-                    ? "border-accent text-accent bg-accent/10"
-                    : "border-border text-muted-foreground hover:border-accent/50"
-                }`}
-              >
-                {e}
-              </button>
-            ))}
-            <div className="w-px h-4 bg-border mx-1 shrink-0" />
+        {/* Input row with compact icon settings */}
+        <div className="flex items-end gap-1.5 max-w-3xl mx-auto">
+
+          {/* Effort icon + dropdown */}
+          <div className="relative shrink-0 mb-0.5">
             <button
-              onClick={toggleWebSearch}
-              className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 flex items-center gap-1 ${
-                webSearch
-                  ? "border-accent text-accent bg-accent/10"
-                  : "border-border text-muted-foreground hover:border-accent/50"
+              onClick={() => { setActivePopover(activePopover === "effort" ? null : "effort"); }}
+              className={`p-2 rounded-lg transition-colors ${
+                activePopover === "effort"
+                  ? "text-accent bg-accent/10"
+                  : "text-muted-foreground hover:text-foreground hover:bg-surface2"
               }`}
+              title={`Effort: ${effort}`}
             >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+              </svg>
+            </button>
+            {activePopover === "effort" && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setActivePopover(null)} />
+                <div className="absolute bottom-full left-0 mb-1 z-50 w-44 rounded-lg border border-border bg-surface shadow-xl p-1.5">
+                  <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Effort Level</div>
+                  {(["low", "med", "high", "max"] as const).map((e) => (
+                    <button
+                      key={e}
+                      onClick={() => { setEffort(e); setActivePopover(null); }}
+                      className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+                        effort === e ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="capitalize">{e}</span>
+                        <span className="text-[9px] opacity-60">
+                          {e === "low" ? "1 judge" : e === "med" ? "3 judges" : e === "high" ? "5 judges" : "all judges"}
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Web search icon + dropdown */}
+          <div className="relative shrink-0 mb-0.5">
+            <button
+              onClick={() => { setActivePopover(activePopover === "web" ? null : "web"); }}
+              className={`p-2 rounded-lg transition-colors ${
+                webSearch || activePopover === "web"
+                  ? "text-accent bg-accent/10"
+                  : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+              }`}
+              title="Web search"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
               </svg>
-              Web
             </button>
+            {activePopover === "web" && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setActivePopover(null)} />
+                <div className="absolute bottom-full left-0 mb-1 z-50 w-52 rounded-lg border border-border bg-surface shadow-xl p-1.5">
+                  <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Web Search</div>
+                  <button
+                    onClick={() => { toggleWebSearch(); setActivePopover(null); }}
+                    className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+                      webSearch ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-surface2"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span>Enable web search</span>
+                      <span className={`size-1.5 rounded-full ${webSearch ? "bg-accent" : "bg-muted-foreground/30"}`} />
+                    </div>
+                    <div className="text-[9px] opacity-60 mt-0.5">Agent can search the web during its turn</div>
+                  </button>
+                  <div className="text-[9px] text-muted-foreground/50 px-2 py-1 mt-1 border-t border-border/50">
+                    Template: breadth-first topic discovery → batched sub-agent search
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Deep research icon + dropdown */}
+          <div className="relative shrink-0 mb-0.5">
             <button
-              onClick={toggleDeepResearch}
-              className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 flex items-center gap-1 ${
-                deepResearch
-                  ? "border-accent text-accent bg-accent/10"
-                  : "border-border text-muted-foreground hover:border-accent/50"
+              onClick={() => { setActivePopover(activePopover === "deep" ? null : "deep"); }}
+              className={`p-2 rounded-lg transition-colors ${
+                deepResearch || activePopover === "deep"
+                  ? "text-accent bg-accent/10"
+                  : "text-muted-foreground hover:text-foreground hover:bg-surface2"
               }`}
+              title="Deep research"
             >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z" /><circle cx="12" cy="10" r="3" />
               </svg>
-              Deep
             </button>
-            <div className="w-px h-4 bg-border mx-1 shrink-0" />
-            <span className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mr-1 shrink-0">Mode</span>
-            {(["auto", "build", "plan"] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => setMode(m)}
-                className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 capitalize ${
-                  mode === m
-                    ? "border-accent text-accent bg-accent/10"
-                    : "border-border text-muted-foreground hover:border-accent/50"
-                }`}
-                title={m === "auto" ? "Execute autonomously" : m === "build" ? "Step-by-step with confirmation" : "Plan first, then execute"}
-              >
-                {m}
-              </button>
-            ))}
+            {activePopover === "deep" && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setActivePopover(null)} />
+                <div className="absolute bottom-full left-0 mb-1 z-50 w-52 rounded-lg border border-border bg-surface shadow-xl p-1.5">
+                  <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Deep Research</div>
+                  <button
+                    onClick={() => { toggleDeepResearch(); setActivePopover(null); }}
+                    className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+                      deepResearch ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-surface2"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span>Enable deep research</span>
+                      <span className={`size-1.5 rounded-full ${deepResearch ? "bg-accent" : "bg-muted-foreground/30"}`} />
+                    </div>
+                    <div className="text-[9px] opacity-60 mt-0.5">Extended reasoning + web ReAct loop</div>
+                  </button>
+                  <div className="text-[9px] text-muted-foreground/50 px-2 py-1 mt-1 border-t border-border/50">
+                    Uses more tokens + longer timeouts for thorough analysis
+                  </div>
+                </div>
+              </>
+            )}
           </div>
-        )}
 
-        {/* Input row */}
-        <div className="flex items-end gap-2 max-w-3xl mx-auto">
-          <button
-            onClick={() => setSettingsOpen((p) => !p)}
-            className={`p-2 rounded-lg transition-colors shrink-0 mb-0.5 ${
-              settingsOpen
-                ? "text-accent bg-accent/10"
-                : "text-muted-foreground hover:text-foreground hover:bg-surface2"
-            }`}
-            title="Settings"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
-          </button>
+          {/* Mode icon + dropdown */}
+          <div className="relative shrink-0 mb-0.5">
+            <button
+              onClick={() => { setActivePopover(activePopover === "mode" ? null : "mode"); }}
+              className={`p-2 rounded-lg transition-colors ${
+                activePopover === "mode"
+                  ? "text-accent bg-accent/10"
+                  : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+              }`}
+              title={`Mode: ${mode}`}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 9h6v6H9z" />
+              </svg>
+            </button>
+            {activePopover === "mode" && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setActivePopover(null)} />
+                <div className="absolute bottom-full left-0 mb-1 z-50 w-48 rounded-lg border border-border bg-surface shadow-xl p-1.5">
+                  <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Execution Mode</div>
+                  {(["auto", "build", "plan"] as const).map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => { setMode(m); setActivePopover(null); }}
+                      className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+                        mode === m ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="capitalize">{m}</span>
+                        {mode === m && <span className="text-[9px]">●</span>}
+                      </div>
+                      <div className="text-[9px] opacity-60 mt-0.5">
+                        {m === "auto" ? "Execute autonomously" : m === "build" ? "Step-by-step with confirmation" : "Plan first, wait for approval"}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
 
           <textarea
             ref={inputRef}
