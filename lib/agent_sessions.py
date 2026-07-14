@@ -876,7 +876,7 @@ class StrandsAdapter(BaseAdapter):
                 "ls, cat, grep, find, git, python3, pip, npm, make, curl, etc. "
                 "This is a REAL bash shell with full output capture."
             ),
-            "input_schema": {
+            "inputSchema": {
                 "type": "object",
                 "properties": {
                     "command": {
@@ -943,7 +943,7 @@ class StrandsAdapter(BaseAdapter):
                         "and returns merged results. Use for code review, plan "
                         "critique, or getting multiple expert opinions."
                     ),
-                    "input_schema": {
+                    "inputSchema": {
                         "type": "object",
                         "properties": {
                             "prompt": {"type": "string", "description": "The critique prompt"},
