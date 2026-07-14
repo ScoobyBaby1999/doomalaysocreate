@@ -1053,35 +1053,11 @@ class StrandsAdapter(BaseAdapter):
         except Exception:
             pass
 
-        # 3. Hooks — log tool calls and errors for debugging + audit trail
+        # 3. Hooks — disabled for now (requires proper typed event callbacks
+        #    that Strands can infer from type hints). The conversation manager
+        #    and session manager are more critical. TODO: add hooks with
+        #    @hook_provider decorator or explicit event_type annotations.
         agent_hooks = []
-        try:
-            from strands.hooks import (
-                BeforeToolCallEvent, AfterToolCallEvent,
-                BeforeModelCallEvent, AfterModelCallEvent,
-            )
-
-            def _log_tool_call(event: BeforeToolCallEvent):
-                """Log every tool call for the audit trail."""
-                try:
-                    tool_name = event.tool_name
-                    log_event("agent_tool_call", tool=tool_name,
-                              agent=getattr(self._session_ref(), "id", None))
-                except Exception:
-                    pass
-
-            def _log_tool_result(event: AfterToolCallEvent):
-                """Log tool results (success/failure) for debugging."""
-                try:
-                    log_event("agent_tool_result",
-                              tool=event.tool_name,
-                              ok=event.response is not None)
-                except Exception:
-                    pass
-
-            agent_hooks = [_log_tool_call, _log_tool_result]
-        except Exception:
-            pass
 
         # 4. Build the Agent with all features enabled
         agent_kwargs = dict(
