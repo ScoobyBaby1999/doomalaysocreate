@@ -389,3 +389,32 @@ Stage Summary:
 - Model routing: every model now routes through the correct provider with the correct litellm name schema (openai/<model_id> + api_base). Verified with NVIDIA DeepSeek V4 Flash.
 - Model verification: the UI now shows which provider/model actually served each request, with a warning if the backend redirected.
 - The kimi-k2.6 401 was a stale Cloudflare token — set the new one. Will resolve on next restart.
+
+---
+Task ID: 8
+Agent: glm (main)
+Task: Fix Space boot hang + missing deps + thinking streaming — get everything working.
+
+Work Log:
+- DIAGNOSED: Space stuck at APP_STARTING because main() blocked on _ensure_privatemode_proxy() (90s attestation) + Panel.__init__._sync_all_provider_models() (6+ remote calls) before binding the HTTP server. HF's healthcheck timed out.
+- FIX 1 (non-blocking boot): privatemode proxy runs in daemon thread; Panel.__init__ defers sync (_sync_done=False); main() starts background sync thread after server is listening. /health reachable in seconds. (commit a412acc)
+- FIX 2 (fastapi): added fastapi+uvicorn to requirements.txt — strands-agents imports fastapi at module load. (commit from previous)
+- FIX 3 (orjson): added orjson to requirements.txt — litellm imports it for JSON serialization. (commit b291d0b)
+- FIX 4 (SSE streaming): AgentSession.subscribe()/unsubscribe() methods added — the SSE endpoint was falling back to 200ms polling because subscribe() didn't exist. Now SSE streams live events via queue. (commit from previous)
+- FIX 5 (thinking streaming): emit() now APPENDS thinking fragments (was replacing with the fragment, so only the last fragment survived). SSE sends the ACCUMULATED text. Frontend's appendEvent detects accumulated text and replaces — one growing thinking bubble. (commit c2aacb6)
+- TOKEN: set CRITIQUE_TOKEN (static mode) to bypass /data/rotation_secret file conflict.
+
+VERIFICATION (live HF Space):
+- Space stage: RUNNING, /health: status=ok, agent=open, 5 providers live
+- big-pickle agent: POST /api/agent → 202, resolved_model=openai/big-pickle, resolved_provider=big-pickle (opencode-zen)
+- SSE stream: thinking events stream live with ACCUMULATED text (175 chars, growing), then assistant response, then status idle
+- Full transcript: [USER] "What is 3+3?" → [THINKING] "The user wants... 3+3=6" → [ASSISTANT] "3+3=6. Step-by-step: 1. Start with 3..." → [STATUS] idle
+- Web app loads, model selector works, chat sends messages
+
+Stage Summary:
+- Space is RUNNING and stable (non-blocking boot)
+- Agent chat works end-to-end with real LLM (big-pickle via opencode-zen)
+- SSE streaming works (live events, not polling)
+- Thinking text accumulates correctly in real-time
+- Model verification shows resolved provider + model
+- All 5 providers configured (nvidia, cloudflare, openrouter, opencode-zen, privatemodeai)
