@@ -848,8 +848,13 @@ class StrandsAdapter(BaseAdapter):
         tools = []
 
         # 1. shell (FIRST — primary tool for all command-line operations)
+        # CRITICAL: Strands' load_tools_from_module requires:
+        #   a) The module has __file__ (otherwise it's not recognized as a module)
+        #   b) The function name matches the module name (module "shell" → function "shell")
+        # Without these, Strands silently drops the tool ("unrecognized tool specification").
         shell_mod = _types.ModuleType("shell")
-        shell_mod.tool = _guarded_shell
+        shell_mod.__file__ = __file__  # required for Strands module detection
+        shell_mod.shell = _guarded_shell  # function name MUST match module name
         shell_mod.TOOL_SPEC = {
             "name": "shell",
             "description": (
@@ -898,19 +903,19 @@ class StrandsAdapter(BaseAdapter):
                 continue
 
         # Register the agent_panel tool so the agent can invoke the judge
-        # panel directly from chat. This wraps the conscious_tools._agent_panel
-        # handler as a Strands-compatible tool module.
+        # panel directly from chat. Same module registration pattern as shell:
+        # __file__ required + function name matches module name.
         try:
             import conscious_tools
             sess = self._session_ref()
             if sess is not None:
                 def _panel_tool_wrapper(**kwargs):
-                    """Invoke the judge panel for a critique. Args: prompt (str, required),
-                    panel (list, optional), effort (str, optional), profile (str, optional)."""
+                    """Invoke the judge panel for a critique."""
                     result = conscious_tools._agent_panel(sess, kwargs)
                     return result
                 panel_mod = _types.ModuleType("agent_panel")
-                panel_mod.tool = _panel_tool_wrapper
+                panel_mod.__file__ = __file__
+                panel_mod.agent_panel = _panel_tool_wrapper  # name matches module
                 panel_mod.TOOL_SPEC = {
                     "name": "agent_panel",
                     "description": (
