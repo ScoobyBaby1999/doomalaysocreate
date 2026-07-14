@@ -361,8 +361,11 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
 
   // Universal seq dedup for non-delta events. Prevents duplicated
   // assistant/thinking/tool/status/panel messages when the SSE cursor resets
-  // or the backend replays events.
-  if (ev.type !== "assistant_delta" && ev.type !== "thinking_delta") {
+  // or the backend replays events. EXCEPTION: thinking events use the SAME
+  // seq for merged updates (the backend replaces the text of the last
+  // thinking event and re-emits it with the same i). So thinking events
+  // bypass dedup and always go through the merge logic in the switch.
+  if (ev.type !== "assistant_delta" && ev.type !== "thinking_delta" && ev.type !== "thinking") {
     if (out.some((m) => m.seq === seq && m.role !== "user")) {
       return out; // already have this event
     }
@@ -430,15 +433,36 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
       return out;
     }
     case "thinking": {
-      // A non-delta thinking event. Set isStreaming=true so thinking_delta
-      // events can merge into it. If there's already a streaming thinking,
-      // finalize it first (the non-delta event starts a new thinking block).
+      // The backend emits multiple "thinking" events as reasoning streams in.
+      // The backend's emit() REPLACES the text of the last thinking event
+      // (so snapshot/poll returns the latest full text). But the SSE stream
+      // sends each raw thinking event. We MERGE consecutive thinking events
+      // into the same bubble (matching the backend's stored behavior) so the
+      // UI shows one growing thinking block, not many fragments.
       for (let i = out.length - 1; i >= 0; i--) {
         if (out[i].role === "thinking" && out[i].isStreaming) {
-          out[i] = { ...out[i], isStreaming: false };
+          // Merge: replace the text (backend sends the full accumulated text
+          // in each thinking event via the streaming callback's reasoningText,
+          // OR sends a fragment via the post-turn walk). If the new text is
+          // longer, it's the accumulated version — replace. If shorter, it's
+          // a fragment — append. This handles both emit patterns.
+          const newText = ev.text || "";
+          const oldText = out[i].content;
+          if (newText.length >= oldText.length && newText.startsWith(oldText)) {
+            // Accumulated version — replace.
+            out[i] = { ...out[i], content: newText, seq, timestamp: ts };
+          } else {
+            // Fragment — append.
+            out[i] = { ...out[i], content: oldText + newText, seq, timestamp: ts };
+          }
+          return out;
+        }
+        // If we hit a non-thinking message, stop scanning — start a new bubble.
+        if (out[i].role === "assistant" || out[i].role === "user" || out[i].role === "tool") {
           break;
         }
       }
+      // No existing streaming thinking — start a new one.
       out.push({
         id: genMsgId(),
         role: "thinking",
