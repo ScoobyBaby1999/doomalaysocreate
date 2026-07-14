@@ -1326,6 +1326,36 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json(500, {"error": str(e)[:200]})
             return
+        # Benchmarks endpoint — live model data from OpenRouter (pricing, context, caps)
+        if route == "/api/benchmarks":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            try:
+                import urllib.request
+                # Fetch live model data from OpenRouter's public API
+                req = urllib.request.Request(
+                    "https://openrouter.ai/api/v1/models",
+                    headers={"Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode())
+                models = []
+                for m in data.get("data", []):
+                    pricing = m.get("pricing", {})
+                    models.append({
+                        "id": m.get("id", ""),
+                        "name": m.get("name", ""),
+                        "context_length": m.get("context_length", 0),
+                        "prompt_price": pricing.get("prompt", "0"),
+                        "completion_price": pricing.get("completion", "0"),
+                        "is_free": pricing.get("prompt") == "0" and pricing.get("completion") == "0",
+                        "description": (m.get("description", "") or "")[:200],
+                        "architecture": m.get("architecture", {}),
+                    })
+                self._send_json(200, {"models": models, "count": len(models)})
+            except Exception as e:
+                self._send_json(500, {"error": f"failed to fetch benchmarks: {str(e)[:200]}"})
+            return
         if route.startswith("/api/agent/"):
             #   transcript polling + artifact access + SSE stream share the service bearer token.
             #   SSE via EventSource can't set custom headers, so the stream endpoint also
