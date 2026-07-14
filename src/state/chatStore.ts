@@ -112,6 +112,8 @@ export interface ChatState {
 
   // Derived
   cost: number | null;
+  /** Token usage from the last agent turn (cost transparency). */
+  lastUsage: { input_tokens: number; output_tokens: number; total_tokens: number } | null;
   currentModel: string | null;
   /** The model the backend actually resolved + is running (for verification). */
   resolvedModel: string | null;
@@ -627,6 +629,7 @@ export const useChatStore = create<ChatState>()(
 
       sidebarOpen: false,
       cost: null,
+      lastUsage: null,
       currentModel: null,
       resolvedModel: null,
       resolvedProvider: null,
@@ -719,6 +722,7 @@ export const useChatStore = create<ChatState>()(
             isStreaming: false,
             error: null,
             cost: null,
+      lastUsage: null,
             currentModel: model || null,
             resolvedModel: null,
             resolvedProvider: null,
@@ -760,6 +764,7 @@ export const useChatStore = create<ChatState>()(
           isBusy: false,
           isStreaming: false,
           cost: null,
+      lastUsage: null,
           files: [],
           currentModel: null,
           resolvedModel: null,
@@ -1033,10 +1038,13 @@ async function _runTurn(
 
         // Update status from status events.
         if (ev.type === "status") {
-          const st = ev as { state: AgentStatus; cost_usd?: number | null };
+          const st = ev as { state: AgentStatus; cost_usd?: number | null; usage?: { input_tokens: number; output_tokens: number; total_tokens: number } };
           set({ status: st.state });
           if (typeof st.cost_usd === "number") {
             set({ cost: st.cost_usd });
+          }
+          if (st.usage) {
+            set({ lastUsage: st.usage });
           }
           if (st.state === "idle" || st.state === "error") {
             set((s) => ({ messages: finalizeStreaming(s.messages) }));

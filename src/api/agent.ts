@@ -25,6 +25,7 @@ export type AgentEvent =
       state: "starting" | "idle" | "running" | "error";
       detail?: string;
       cost_usd?: number | null;
+      usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
     }
   | {
       i: number;
