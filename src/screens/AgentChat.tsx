@@ -614,6 +614,13 @@ export function AgentChat({ settings }: { settings: Settings }) {
             )}
           </button>
         </div>
+
+        {/* Keyboard shortcut hint */}
+        <div className="flex items-center justify-center gap-3 mt-1 text-[9px] text-muted-foreground/40">
+          <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Enter</kbd> to send</span>
+          <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Shift+Enter</kbd> for newline</span>
+          {isBusy && <span className="text-amber-400/60">Queue mode active</span>}
+        </div>
       </div>
 
       {/* Overlays */}

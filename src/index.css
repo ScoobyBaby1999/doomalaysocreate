@@ -224,3 +224,54 @@ button[class*="bg-accent"]:hover {
 @keyframes tooltip-fade {
   to { opacity: 1; }
 }
+
+/* Keyboard shortcut styling */
+kbd {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 9px;
+  line-height: 1;
+  color: rgba(230, 233, 238, 0.5);
+}
+
+/* Better empty state */
+.empty-state-icon {
+  filter: drop-shadow(0 0 12px rgba(91, 140, 255, 0.15));
+}
+
+/* Improved message spacing */
+.message-container > * + * {
+  margin-top: 2px;
+}
+
+/* Better textarea resize behavior */
+textarea {
+  resize: none;
+  -webkit-appearance: none;
+  border-radius: 12px;
+}
+
+/* Improved scrollbar for code blocks */
+.md pre::-webkit-scrollbar {
+  height: 4px;
+}
+.md pre::-webkit-scrollbar-thumb {
+  background: #363f4a;
+  border-radius: 2px;
+}
+
+/* Subtle pulse for the status pill */
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.status-pulse { animation: status-pulse 1.5s ease-in-out infinite; }
+
+/* Better focus visible */
+*:focus-visible {
+  outline: 2px solid rgba(91, 140, 255, 0.5);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Prevent layout shift on lazy-loaded content */
+img { max-width: 100%; height: auto; }
