@@ -202,25 +202,71 @@ export async function streamChat(
       const sdkMessages = opts.system
         ? [{ role: 'assistant' as const, content: opts.system }, ...messages]
         : messages
-      const stream = await z.chat.completions.create({
+      const result = await z.chat.completions.create({
         // @ts-expect-error SDK accepts standard OpenAI messages shape
         messages: sdkMessages,
         model,
         stream: true,
         thinking: { type: 'disabled' },
       } as Record<string, unknown>)
-      let acc = ''
-      // OpenAI-compatible streaming iterators
-      for await (const chunk of stream as AsyncIterable<{
-        choices?: { delta?: { content?: string } }[]
-      }>) {
-        const delta = chunk.choices?.[0]?.delta?.content
-        if (delta) {
-          acc += delta
-          cb.onDelta(delta)
+
+      // The SDK returns a raw ReadableStream when stream:true and the response
+      // content-type is text/event-stream or text/plain. Otherwise it returns
+      // a parsed JSON object (non-streaming fallback).
+      if (result && typeof (result as ReadableStream<Uint8Array>).getReader === 'function') {
+        let acc = ''
+        const reader = (result as ReadableStream<Uint8Array>).getReader()
+        const decoder = new TextDecoder()
+        let buf = ''
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop() || ''
+          for (const line of lines) {
+            const t = line.trim()
+            if (!t || t.startsWith(':')) continue
+            if (t.startsWith('data:')) {
+              const data = t.slice(5).trim()
+              if (data === '[DONE]') continue
+              try {
+                const obj = JSON.parse(data) as { choices?: { delta?: { content?: string }; message?: { content?: string } }[] }
+                const delta = obj.choices?.[0]?.delta?.content || obj.choices?.[0]?.message?.content
+                if (delta) {
+                  acc += delta
+                  cb.onDelta(delta)
+                }
+              } catch {
+                /* skip partial */
+              }
+            }
+          }
         }
+        // flush any trailing buffer
+        if (buf.trim().startsWith('data:')) {
+          const data = buf.trim().slice(5).trim()
+          if (data && data !== '[DONE]') {
+            try {
+              const obj = JSON.parse(data) as { choices?: { delta?: { content?: string } }[] }
+              const delta = obj.choices?.[0]?.delta?.content
+              if (delta) { acc += delta; cb.onDelta(delta) }
+            } catch { /* skip */ }
+          }
+        }
+        cb.onDone({ tokensOut: Math.ceil(acc.length / 4), latencyMs: Date.now() - start })
+        return
       }
-      cb.onDone({ tokensOut: Math.ceil(acc.length / 4), latencyMs: Date.now() - start })
+
+      // Non-streaming JSON fallback (SDK returned a parsed object)
+      const completion = result as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } }
+      const content = completion.choices?.[0]?.message?.content ?? ''
+      if (content) cb.onDelta(content)
+      cb.onDone({
+        tokensIn: completion.usage?.prompt_tokens,
+        tokensOut: completion.usage?.completion_tokens ?? Math.ceil(content.length / 4),
+        latencyMs: Date.now() - start,
+      })
       return
     }
 

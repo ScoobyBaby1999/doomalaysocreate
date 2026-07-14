@@ -36,7 +36,13 @@ export function AppShell() {
   // load spaces once authed
   useEffect(() => {
     if (session && session !== 'loading') {
-      api.listSpaces().then((r) => setSpaces(r.spaces)).catch(() => {})
+      api.listSpaces().then((r) => {
+        setSpaces(r.spaces)
+        // auto-select the first space if none selected
+        if (r.spaces.length > 0) {
+          useApp.getState().setSpace(r.spaces[0])
+        }
+      }).catch(() => {})
     }
   }, [session, setSpaces])
 

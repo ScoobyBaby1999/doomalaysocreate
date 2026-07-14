@@ -32,7 +32,6 @@ async function jfetch<T>(url: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any
 
 export const api = {

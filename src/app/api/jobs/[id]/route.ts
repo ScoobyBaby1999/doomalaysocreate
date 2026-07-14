@@ -67,7 +67,7 @@ export async function GET(
       judges,
       createdAt: job.createdAt.toISOString(),
     }
-    return Response.json(dto)
+    return Response.json({ job: dto })
   } catch (e) {
     return errorResponse(e)
   }
