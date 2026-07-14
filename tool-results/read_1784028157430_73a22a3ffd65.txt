@@ -1,0 +1,583 @@
+     1→/**
+     2→ * ConsciousScreen — mobile-first multi-agent constellation UI.
+     3→ *
+     4→ * Agents are circles on an auto-layouted canvas. The orchestrator sits at
+     5→ * center-top; sub-agents radiate below. Lines connect each agent to the
+     6→ * orchestrator and pulse when agents communicate. Tapping a circle opens a
+     7→ * bottom sheet with the agent's chat / invoke interface. A floating "+" adds
+     8→ * an agent. A drawer icon opens the output list.
+     9→ *
+    10→ * Design goals:
+    11→ * - Mobile-first: touch targets ≥56px, bottom sheet (native pattern), no drag
+    12→ * - Minimal clicks: 1 tap to open agent, 1 tap to invoke, 1 tap to add agent
+    13→ * - Visual communication: lines pulse on drawer events / proposals / merges
+    14→ * - Works on any screen size: radial layout auto-scales
+    15→ * - No external icon dependency — all icons are inline SVG
+    16→ */
+    17→import { useCallback, useEffect, useMemo, useState } from "react";
+    18→import { ConsciousClient, ApiError } from "../api/conscious";
+    19→import type { Settings } from "../api/panel";
+    20→import type { Agent, DrawerEntry, Conscious, Proposal } from "../api/conscious";
+    21→import type { Workspace } from "../api/github";
+    22→import { useModelStore } from "../lib/model-store";
+    23→
+    24→// ---------------------------------------------------------------------------
+    25→// inline SVG icons (no dependency)
+    26→// ---------------------------------------------------------------------------
+    27→
+    28→const Icon = {
+    29→  Brain: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    30→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    31→      <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+    32→      <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+    33→    </svg>
+    34→  ),
+    35→  Plus: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    36→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    37→      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    38→    </svg>
+    39→  ),
+    40→  X: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    41→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    42→      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+    43→    </svg>
+    44→  ),
+    45→  Send: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    46→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    47→      <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+    48→    </svg>
+    49→  ),
+    50→  Merge: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    51→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    52→      <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>
+    53→    </svg>
+    54→  ),
+    55→  Inbox: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    56→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    57→      <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+    58→    </svg>
+    59→  ),
+    60→  Folder: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    61→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    62→      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+    63→    </svg>
+    64→  ),
+    65→  Activity: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    66→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    67→      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+    68→    </svg>
+    69→  ),
+    70→  Loader: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    71→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin">
+    72→      <line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/>
+    73→      <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/>
+    74→      <line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/>
+    75→      <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/>
+    76→    </svg>
+    77→  ),
+    78→  CheckCircle: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    79→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    80→      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+    81→    </svg>
+    82→  ),
+    83→  AlertCircle: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    84→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    85→      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+    86→    </svg>
+    87→  ),
+    88→  Clock: ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+    89→    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    90→      <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+    91→    </svg>
+    92→  ),
+    93→};
+    94→
+    95→// ---------------------------------------------------------------------------
+    96→// layout — radial auto-positioning (no drag needed)
+    97→// ---------------------------------------------------------------------------
+    98→
+    99→interface NodePos { x: number; y: number; }
+   100→
+   101→function layoutAgents(agents: Agent[]): Record<string, NodePos> {
+   102→  const orch = agents.find((a) => a.isOrchestrator === 1);
+   103→  const subs = agents.filter((a) => a.isOrchestrator !== 1);
+   104→  const pos: Record<string, NodePos> = {};
+   105→
+   106→  if (orch) {
+   107→    pos[orch.id] = { x: 50, y: 18 }; // center-top, percentage
+   108→  }
+   109→
+   110→  const radius = Math.min(35, Math.max(22, subs.length * 8));
+   111→  subs.forEach((a, i) => {
+   112→    const angle = (i / Math.max(subs.length, 1)) * Math.PI - Math.PI / 2;
+   113→    pos[a.id] = {
+   114→      x: 50 + Math.sin(angle) * radius,
+   115→      y: 18 + Math.cos(angle) * radius * 1.3 + 10,
+   116→    };
+   117→  });
+   118→
+   119→  return pos;
+   120→}
+   121→
+   122→// ---------------------------------------------------------------------------
+   123→// status helpers
+   124→// ---------------------------------------------------------------------------
+   125→
+   126→const STATUS_COLORS: Record<string, string> = {
+   127→  idle: "#8b95a3", running: "#5b8cff", waiting: "#f59e0b",
+   128→  done: "#10b981", failed: "#ef4444", pending: "#f59e0b",
+   129→  claimed: "#5b8cff", in_progress: "#5b8cff",
+   130→};
+   131→
+   132→function StatusIcon({ status, size, color }: { status: string; size: number; color: string }) {
+   133→  if (status === "running") return <Icon.Loader size={size} color={color} />;
+   134→  if (status === "done") return <Icon.CheckCircle size={size} color={color} />;
+   135→  if (status === "failed") return <Icon.AlertCircle size={size} color={color} />;
+   136→  return <Icon.Clock size={size} color={color} />;
+   137→}
+   138→
+   139→// ---------------------------------------------------------------------------
+   140→// main screen
+   141→// ---------------------------------------------------------------------------
+   142→
+   143→export function ConsciousScreen({ settings, workspaceId }: {
+   144→  settings: Settings; workspaceId?: string;
+   145→}) {
+   146→  const client = useMemo(() => new ConsciousClient(settings), [settings]);
+   147→
+   148→  const selectedModelId = useModelStore((s) => s.selectedModelId);
+   149→  const openOverlay = useModelStore((s) => s.openOverlay);
+   150→
+   151→  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+   152→  const [selectedWsId, setSelectedWsId] = useState<string | null>(null);
+   153→  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+   154→
+   155→  const [conscious, setConscious] = useState<Conscious | null>(null);
+   156→  const [agents, setAgents] = useState<Agent[]>([]);
+   157→  const [drawer, setDrawer] = useState<DrawerEntry[]>([]);
+   158→  const [proposals, setProposals] = useState<Proposal[]>([]);
+   159→  const [loading, setLoading] = useState(false);
+   160→  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+   161→  const [pulseLines, setPulseLines] = useState<Record<string, number>>({});
+   162→  const [showDrawer, setShowDrawer] = useState(false);
+   163→  const [error, setError] = useState<string | null>(null);
+   164→  const [creating, setCreating] = useState(false);
+   165→
+   166→  const wsId = selectedWsId || workspaceId || "demo-workspace";
+   167→
+   168→  const init = useCallback(async () => {
+   169→    setLoading(true); setError(null);
+   170→    try {
+   171→      const list = await client.listConscious(wsId);
+   172→      if (list.conscious.length > 0) {
+   173→        const c = list.conscious[0];
+   174→        const detail = await client.getConscious(c.id);
+   175→        setConscious(detail.conscious); setAgents(detail.agents);
+   176→        await refreshData(c.id);
+   177→      } else { await createConscious(); }
+   178→    } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
+   179→    finally { setLoading(false); }
+   180→  }, [client, wsId]);
+   181→
+   182→  useEffect(() => {
+   183→    client.listWorkspaces().then((r) => {
+   184→      setWorkspaces(r.workspaces);
+   185→      if (!selectedWsId && r.workspaces.length > 0) {
+   186→        setSelectedWsId(r.workspaces[0].id);
+   187→      }
+   188→    }).catch(() => {});
+   189→  }, [client]);
+   190→
+   191→  useEffect(() => { init(); }, [init]);
+   192→
+   193→  const createConscious = async () => {
+   194→    setCreating(true);
+   195→    try {
+   196→      const r = await client.createConscious({
+   197→        workspace_id: wsId, title: "Conscious Workspace",
+   198→        goal: "Multi-agent collaboration",
+   199→      });
+   200→      setConscious(r.conscious); setAgents(r.agents);
+   201→    } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
+   202→    finally { setCreating(false); }
+   203→  };
+   204→
+   205→  const refreshData = async (cid: string) => {
+   206→    try {
+   207→      const [d, p] = await Promise.all([
+   208→        client.listDrawer(cid, { limit: 20 }),
+   209→        client.listProposals(cid, "pending"),
+   210→      ]);
+   211→      setDrawer(d.entries); setProposals(p.proposals);
+   212→    } catch {}
+   213→  };
+   214→
+   215→  const addAgent = async () => {
+   216→    if (!conscious) return;
+   217→    try {
+   218→      const model = selectedModelId || "open";
+   219→      const tier: "claude" | "open" = selectedModelId?.toLowerCase().includes("claude") ? "claude" : "open";
+   220→      const r = await client.spawnAgent(conscious.id, {
+   221→        role: "ai-engineer", model, tier,
+   222→      });
+   223→      setAgents((prev) => [...prev, r.agent]);
+   224→      const orch = agents.find((a) => a.isOrchestrator === 1);
+   225→      if (orch) setPulseLines((prev) => ({ ...prev, [`${orch.id}-${r.agent.id}`]: Date.now() }));
+   226→    } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
+   227→  };
+   228→
+   229→  const invokeAgent = async (agent: Agent, task: string) => {
+   230→    if (!conscious) return;
+   231→    const orch = agents.find((a) => a.isOrchestrator === 1);
+   232→    if (!orch) return;
+   233→    try {
+   234→      setPulseLines((prev) => ({ ...prev, [`${orch.id}-${agent.id}`]: Date.now() }));
+   235→      const r = await client.invokeAgent(conscious.id, {
+   236→        from_agent_id: orch.id, to_agent_id: agent.id, kind: "invoke", task,
+   237→      });
+   238→      setPulseLines((prev) => ({ ...prev, [`${agent.id}-${orch.id}`]: Date.now() }));
+   239→      await refreshData(conscious.id);
+   240→      return r;
+   241→    } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
+   242→  };
+   243→
+   244→  const mergeAgent = async (agent: Agent) => {
+   245→    if (!conscious) return;
+   246→    const orch = agents.find((a) => a.isOrchestrator === 1);
+   247→    if (!orch) return;
+   248→    try {
+   249→      await client.mergeAgentBranch(conscious.id, agent.id, orch.id);
+   250→      await refreshData(conscious.id);
+   251→    } catch (e) { setError(e instanceof ApiError ? e.message : String(e)); }
+   252→  };
+   253→
+   254→  const positions = layoutAgents(agents);
+   255→  const orch = agents.find((a) => a.isOrchestrator === 1);
+   256→  const subs = agents.filter((a) => a.isOrchestrator !== 1);
+   257→
+   258→  return (
+   259→    <div className="flex flex-col h-full bg-bg overflow-hidden relative">
+   260→      {/* header */}
+   261→      <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-surface">
+   262→        <div className="flex items-center gap-2 min-w-0">
+   263→          <div className="w-8 h-8 rounded-lg bg-accent/20 flex items-center justify-center shrink-0">
+   264→            <Icon.Brain size={16} color="#5b8cff" />
+   265→          </div>
+   266→          <div className="relative min-w-0">
+   267→            <div className="flex items-center gap-1">
+   268→              <button onClick={() => setWorkspaceOpen(!workspaceOpen)}
+   269→                className="flex items-center gap-1 text-sm font-semibold text-text truncate max-w-[160px] hover:text-accent transition-colors">
+   270→                <span className="truncate">{(workspaces.find((w) => w.id === selectedWsId)?.title) || selectedWsId || "Select workspace"}</span>
+   271→                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" className={`transition-transform ${workspaceOpen ? "rotate-180" : ""}`}>
+   272→                  <polyline points="6 9 12 15 18 9"/>
+   273→                </svg>
+   274→              </button>
+   275→            </div>
+   276→            <div className="text-[10px] text-muted truncate">{agents.length} agent{agents.length !== 1 ? "s" : ""}</div>
+   277→            {workspaceOpen && (
+   278→              <>
+   279→                <div className="fixed inset-0 z-30" onClick={() => setWorkspaceOpen(false)} />
+   280→                <div className="absolute top-full left-0 mt-1 w-56 bg-surface2 border border-border rounded-xl shadow-xl z-40 max-h-60 overflow-y-auto">
+   281→                  {workspaces.length === 0 ? (
+   282→                    <div className="px-3 py-3 text-xs text-muted text-center">No workspaces found</div>
+   283→                  ) : workspaces.map((w) => (
+   284→                    <button key={w.id} onClick={() => { setSelectedWsId(w.id); setWorkspaceOpen(false); }}
+   285→                      className={`w-full text-left px-3 py-2.5 text-xs flex items-center gap-2 hover:bg-surface transition-colors ${w.id === selectedWsId ? "text-accent bg-accent/10" : "text-text"}`}>
+   286→                      <Icon.Folder size={12} color={w.id === selectedWsId ? "#5b8cff" : "#8b95a3"} />
+   287→                      <span className="truncate">{w.title}</span>
+   288→                    </button>
+   289→                  ))}
+   290→                </div>
+   291→              </>
+   292→            )}
+   293→          </div>
+   294→        </div>
+   295→        <button onClick={openOverlay}
+   296→          className="w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
+   297→          title="Select model"
+   298→          style={{ marginRight: 4 }}>
+   299→          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+   300→            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
+   301→          </svg>
+   302→        </button>
+   303→        <button onClick={() => setShowDrawer(true)}
+   304→          className="w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
+   305→          title="View outputs">
+   306→          <Icon.Inbox size={16} />
+   307→          {drawer.length > 0 && (
+   308→            <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-accent text-[9px] text-white flex items-center justify-center">{drawer.length}</span>
+   309→          )}
+   310→        </button>
+   311→      </div>
+   312→
+   313→      {/* error bar */}
+   314→      {error && (
+   315→        <div className="px-4 py-2 bg-rose-500/10 border-b border-rose-500/30 text-rose-300 text-xs flex items-center justify-between">
+   316→          <span className="truncate">{error}</span>
+   317→          <button onClick={() => setError(null)} className="shrink-0 ml-2"><Icon.X size={12} /></button>
+   318→        </div>
+   319→      )}
+   320→
+   321→      {/* constellation canvas */}
+   322→      <div className="flex-1 relative overflow-hidden">
+   323→        {loading || creating ? (
+   324→          <div className="absolute inset-0 flex items-center justify-center">
+   325→            <Icon.Loader size={24} color="#5b8cff" />
+   326→          </div>
+   327→        ) : (
+   328→          <>
+   329→            <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ zIndex: 1 }}>
+   330→              {orch && subs.map((sub) => {
+   331→                const op = positions[orch.id]; const sp = positions[sub.id];
+   332→                if (!op || !sp) return null;
+   333→                const key = `${orch.id}-${sub.id}`;
+   334→                const pulseTime = pulseLines[key];
+   335→                const pulsing = pulseTime && Date.now() - pulseTime < 3000;
+   336→                return (
+   337→                  <line key={key} x1={`${op.x}%`} y1={`${op.y}%`} x2={`${sp.x}%`} y2={`${sp.y}%`}
+   338→                    stroke={pulsing ? "#5b8cff" : "#262d36"} strokeWidth={pulsing ? 2 : 1}
+   339→                    className={pulsing ? "animate-pulse" : ""}
+   340→                    style={{ transition: "stroke 0.3s, stroke-width 0.3s" }} />
+   341→                );
+   342→              })}
+   343→            </svg>
+   344→
+   345→            <div className="absolute inset-0" style={{ zIndex: 2 }}>
+   346→              {agents.map((agent) => {
+   347→                const pos = positions[agent.id]; if (!pos) return null;
+   348→                return (
+   349→                  <AgentNode key={agent.id} agent={agent} pos={pos}
+   350→                    drawerCount={drawer.filter((d) => d.toAgentId === agent.id).length}
+   351→                    pendingProps={proposals.filter((p) => p.proposerAgentId === agent.id && p.status === "pending").length}
+   352→                    onTap={() => setSelectedAgent(agent)} />
+   353→                );
+   354→              })}
+   355→            </div>
+   356→
+   357→            {agents.length <= 1 && (
+   358→              <div className="absolute bottom-24 left-1/2 -translate-x-1/2 text-center text-muted text-xs px-8">
+   359→                Tap <span className="text-accent font-medium">+</span> to add an agent.
+   360→                Each agent works in its own git worktree.
+   361→              </div>
+   362→            )}
+   363→          </>
+   364→        )}
+   365→
+   366→        <button onClick={addAgent} disabled={!conscious || loading}
+   367→          className="absolute bottom-6 right-6 w-14 h-14 rounded-full bg-accent text-white flex items-center justify-center shadow-lg shadow-accent/30 hover:scale-105 active:scale-95 transition-transform disabled:opacity-50"
+   368→          style={{ zIndex: 10 }} title="Add agent">
+   369→          <Icon.Plus size={24} color="white" />
+   370→        </button>
+   371→      </div>
+   372→
+   373→      {selectedAgent && conscious && (
+   374→        <AgentSheet agent={selectedAgent}
+   375→          drawer={drawer.filter((d) => d.toAgentId === selectedAgent.id)}
+   376→          onClose={() => setSelectedAgent(null)}
+   377→          onInvoke={(task) => invokeAgent(selectedAgent, task)}
+   378→          onMerge={() => mergeAgent(selectedAgent)} />
+   379→      )}
+   380→
+   381→      {showDrawer && (
+   382→        <DrawerPanel entries={drawer} agents={agents} onClose={() => setShowDrawer(false)} />
+   383→      )}
+   384→    </div>
+   385→  );
+   386→}
+   387→
+   388→// ---------------------------------------------------------------------------
+   389→// AgentNode
+   390→// ---------------------------------------------------------------------------
+   391→
+   392→function AgentNode({ agent, pos, drawerCount, pendingProps, onTap }: {
+   393→  agent: Agent; pos: NodePos; drawerCount: number; pendingProps: number; onTap: () => void;
+   394→}) {
+   395→  const isOrch = agent.isOrchestrator === 1;
+   396→  const color = STATUS_COLORS[agent.status] || "#8b95a3";
+   397→  const size = isOrch ? 72 : 56;
+   398→
+   399→  return (
+   400→    <button onClick={onTap}
+   401→      className="absolute flex flex-col items-center gap-1 group"
+   402→      style={{ left: `${pos.x}%`, top: `${pos.y}%`, transform: "translate(-50%, -50%)", zIndex: 3 }}>
+   403→      <div className="rounded-full flex items-center justify-center border-2 transition-all group-hover:scale-110 group-active:scale-95"
+   404→        style={{ width: size, height: size, borderColor: color,
+   405→          background: isOrch ? "rgba(91,140,255,0.15)" : "rgba(20,24,29,0.9)",
+   406→          boxShadow: agent.status === "running" ? `0 0 12px ${color}40` : "none" }}>
+   407→        {isOrch ? <Icon.Brain size={28} color={color} /> : <StatusIcon status={agent.status} size={22} color={color} />}
+   408→        {drawerCount > 0 && (
+   409→          <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-emerald-500 text-[10px] text-white flex items-center justify-center font-bold">{drawerCount}</span>
+   410→        )}
+   411→        {pendingProps > 0 && (
+   412→          <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-amber-500 text-[10px] text-white flex items-center justify-center font-bold">{pendingProps}</span>
+   413→        )}
+   414→      </div>
+   415→      <div className="text-center max-w-[80px]">
+   416→        <div className="text-[10px] font-medium text-text truncate">{agent.role}</div>
+   417→        <div className="text-[9px] text-muted truncate">{agent.model.split(" ")[0]}</div>
+   418→      </div>
+   419→    </button>
+   420→  );
+   421→}
+   422→
+   423→// ---------------------------------------------------------------------------
+   424→// AgentSheet — bottom sheet
+   425→// ---------------------------------------------------------------------------
+   426→
+   427→function AgentSheet({ agent, drawer, onClose, onInvoke, onMerge }: {
+   428→  agent: Agent; drawer: DrawerEntry[];
+   429→  onClose: () => void; onInvoke: (task: string) => Promise<unknown>; onMerge: () => Promise<void>;
+   430→}) {
+   431→  const [task, setTask] = useState("");
+   432→  const [busy, setBusy] = useState(false);
+   433→  const [merged, setMerged] = useState(false);
+   434→  const isOrch = agent.isOrchestrator === 1;
+   435→  const color = STATUS_COLORS[agent.status] || "#8b95a3";
+   436→
+   437→  const handleInvoke = async () => {
+   438→    if (!task.trim()) return;
+   439→    setBusy(true);
+   440→    try { await onInvoke(task); setTask(""); } finally { setBusy(false); }
+   441→  };
+   442→
+   443→  const handleMerge = async () => {
+   444→    setBusy(true);
+   445→    try { await onMerge(); setMerged(true); } finally { setBusy(false); }
+   446→  };
+   447→
+   448→  return (
+   449→    <>
+   450→      <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
+   451→      <div className="fixed bottom-0 left-0 right-0 bg-surface rounded-t-2xl border-t border-border z-50 flex flex-col"
+   452→        style={{ maxHeight: "85vh", paddingBottom: "env(safe-area-inset-bottom)" }}>
+   453→        <div className="flex justify-center pt-2 pb-1"><div className="w-10 h-1 rounded-full bg-border" /></div>
+   454→
+   455→        <div className="flex items-center justify-between px-4 py-2 border-b border-border">
+   456→          <div className="flex items-center gap-2">
+   457→            <div className="w-8 h-8 rounded-full flex items-center justify-center border-2"
+   458→              style={{ borderColor: color, background: isOrch ? "rgba(91,140,255,0.15)" : "rgba(20,24,29,0.9)" }}>
+   459→              {isOrch ? <Icon.Brain size={16} color={color} /> : <Icon.Activity size={16} color={color} />}
+   460→            </div>
+   461→            <div>
+   462→              <div className="text-sm font-semibold text-text">{agent.role} {isOrch && <span className="text-[10px] text-accent">(orchestrator)</span>}</div>
+   463→              <div className="text-[10px] text-muted">{agent.model} · {agent.tier} · {agent.status}</div>
+   464→            </div>
+   465→          </div>
+   466→          <button onClick={onClose} className="w-8 h-8 rounded-lg bg-surface2 flex items-center justify-center text-muted"><Icon.X size={16} /></button>
+   467→        </div>
+   468→
+   469→        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+   470→          {agent.worktreePath && (
+   471→            <div className="text-[10px] text-muted bg-surface2 rounded-lg p-2">
+   472→              <div>branch: <code className="text-text">{agent.branch}</code></div>
+   473→              <div>worktree: <span className="text-text/70 truncate">{agent.worktreePath.split("/").slice(-2).join("/")}</span></div>
+   474→            </div>
+   475→          )}
+   476→
+   477→          {!isOrch && (
+   478→            <div className="space-y-2">
+   479→              <div className="text-xs font-medium text-text">Give this agent a task:</div>
+   480→              <textarea value={task} onChange={(e) => setTask(e.target.value)}
+   481→                placeholder="e.g. Write a Python function that checks if a number is prime"
+   482→                rows={2}
+   483→                className="w-full rounded-xl bg-surface2 border border-border focus:border-accent text-sm text-text p-3 resize-none outline-none"
+   484→                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleInvoke(); } }} />
+   485→              <div className="flex gap-2">
+   486→                <button onClick={handleInvoke} disabled={busy || !task.trim()}
+   487→                  className="flex-1 h-10 rounded-xl bg-accent text-white flex items-center justify-center gap-2 text-sm font-medium disabled:opacity-50">
+   488→                  {busy ? <Icon.Loader size={16} color="white" /> : <Icon.Send size={16} color="white" />}
+   489→                  {busy ? "Working…" : "Invoke"}
+   490→                </button>
+   491→                <button onClick={handleMerge} disabled={busy || merged || drawer.length === 0}
+   492→                  className="h-10 px-4 rounded-xl bg-surface2 border border-border text-text flex items-center justify-center gap-1 text-sm disabled:opacity-50">
+   493→                  <Icon.Merge size={16} /> Merge
+   494→                </button>
+   495→              </div>
+   496→            </div>
+   497→          )}
+   498→
+   499→          {drawer.length > 0 && (
+   500→            <div className="space-y-2">
+   501→              <div className="text-xs font-medium text-text">Outputs ({drawer.length}):</div>
+   502→              {drawer.slice().reverse().map((d) => (
+   503→                <div key={d.id} className="rounded-lg bg-surface2 border border-border p-3">
+   504→                  <div className="flex items-center justify-between mb-1">
+   505→                    <span className="text-[10px] font-medium text-accent">{d.kind}</span>
+   506→                    <span className="text-[10px] px-2 py-0.5 rounded-full"
+   507→                      style={{ background: `${STATUS_COLORS[d.status] || "#8b95a3"}20`, color: STATUS_COLORS[d.status] || "#8b95a3" }}>{d.status}</span>
+   508→                  </div>
+   509→                  <div className="text-xs text-text/80 mb-1">{d.task}</div>
+   510→                  {d.result && (
+   511→                    <pre className="text-[11px] text-muted whitespace-pre-wrap max-h-32 overflow-y-auto mt-1 font-mono">
+   512→                      {d.result.slice(0, 500)}{d.result.length > 500 ? "…" : ""}
+   513→                    </pre>
+   514→                  )}
+   515→                </div>
+   516→              ))}
+   517→            </div>
+   518→          )}
+   519→
+   520→          {drawer.length === 0 && !isOrch && (
+   521→            <div className="text-center text-muted text-xs py-4">No outputs yet. Invoke this agent with a task to see results here.</div>
+   522→          )}
+   523→          {isOrch && (
+   524→            <div className="text-center text-muted text-xs py-4">The orchestrator manages the brain. Use other agents to do work, then merge their branches here.</div>
+   525→          )}
+   526→        </div>
+   527→      </div>
+   528→    </>
+   529→  );
+   530→}
+   531→
+   532→// ---------------------------------------------------------------------------
+   533→// DrawerPanel
+   534→// ---------------------------------------------------------------------------
+   535→
+   536→function DrawerPanel({ entries, agents, onClose }: {
+   537→  entries: DrawerEntry[]; agents: Agent[]; onClose: () => void;
+   538→}) {
+   539→  return (
+   540→    <>
+   541→      <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
+   542→      <div className="fixed top-0 right-0 bottom-0 w-full max-w-sm bg-surface border-l border-border z-50 flex flex-col">
+   543→        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+   544→          <div className="flex items-center gap-2">
+   545→            <Icon.Folder size={16} color="#5b8cff" />
+   546→            <span className="text-sm font-semibold text-text">All Outputs</span>
+   547→            <span className="text-[10px] text-muted">({entries.length})</span>
+   548→          </div>
+   549→          <button onClick={onClose} className="w-8 h-8 rounded-lg bg-surface2 flex items-center justify-center text-muted"><Icon.X size={16} /></button>
+   550→        </div>
+   551→        <div className="flex-1 overflow-y-auto p-3 space-y-2">
+   552→          {entries.length === 0 ? (
+   553→            <div className="text-center text-muted text-sm py-8">No outputs yet.</div>
+   554→          ) : (
+   555→            entries.slice().reverse().map((d) => {
+   556→              const fromAgent = agents.find((a) => a.id === d.fromAgentId);
+   557→              const toAgent = agents.find((a) => a.id === d.toAgentId);
+   558→              return (
+   559→                <div key={d.id} className="rounded-lg bg-surface2 border border-border p-3">
+   560→                  <div className="flex items-center justify-between mb-1">
+   561→                    <span className="text-[10px] text-accent font-medium">{d.kind}</span>
+   562→                    <span className="text-[10px] text-muted">{fromAgent?.role || "?"} → {toAgent?.role || "?"}</span>
+   563→                  </div>
+   564→                  <div className="text-xs text-text/80 mb-1">{d.task}</div>
+   565→                  <div className="flex items-center gap-2 mt-1">
+   566→                    <span className="text-[10px] px-2 py-0.5 rounded-full"
+   567→                      style={{ background: `${STATUS_COLORS[d.status] || "#8b95a3"}20`, color: STATUS_COLORS[d.status] || "#8b95a3" }}>{d.status}</span>
+   568→                  </div>
+   569→                  {d.result && (
+   570→                    <pre className="text-[10px] text-muted whitespace-pre-wrap max-h-24 overflow-y-auto mt-2 font-mono">
+   571→                      {d.result.slice(0, 300)}{d.result.length > 300 ? "…" : ""}
+   572→                    </pre>
+   573→                  )}
+   574→                </div>
+   575→              );
+   576→            })
+   577→          )}
+   578→        </div>
+   579→      </div>
+   580→    </>
+   581→  );
+   582→}
+   583→

@@ -1,0 +1,1363 @@
+     1→"""Agentic orchestrator sessions — the "agent" tab's backend.
+     2→
+     3→Two tiers behind one adapter interface, auto-selected from the env *and* from
+     4→which SDK is actually installed:
+     5→
+     6→  * "claude" — the official Claude Agent SDK (``claude-agent-sdk`` pip package,
+     7→    which bundles the Claude Code CLI inside the wheel — no Node needed).
+     8→    Active when ANTHROPIC_API_KEY is set and the SDK is importable.
+     9→  * "open"   — the Strands Agents SDK (``strands-agents`` + ``strands-agents-tools``,
+    10→    AWS, Apache-2.0): native swarm/graph multi-agent + a deep built-in tool suite
+    11→    (shell, file edit, python, http), provider-agnostic via LiteLLM so one adapter
+    12→    drives every OpenAI-compatible model (Kimi, GLM, MiniMax, DeepSeek, Groq, …).
+    13→    Active when a provider key is set and the SDK is importable. (Chosen over
+    14→    OpenHands, which has an unresolvable opentelemetry/lmnr dependency conflict in
+    15→    its current 1.28.x line and is Python-3.12-only.)
+    16→
+    17→Sessions mirror the service's existing job pattern: POST starts/continues a
+    18→session, the client polls for an append-only event transcript. One daemon
+    19→worker thread per session; tool execution happens in-process/subprocess —
+    20→the user's own Space container IS the sandbox (bearer-gated, single-tenant).
+    21→
+    22→stdlib-only at import time; SDK imports are deferred into the adapters so the
+    23→service still runs when neither SDK is installed (tier reports as None).
+    24→"""
+    25→from __future__ import annotations
+    26→
+    27→import asyncio
+    28→import importlib.util
+    29→import json
+    30→import os
+    31→import queue
+    32→import shutil
+    33→import threading
+    34→import time
+    35→import uuid
+    36→from pathlib import Path
+    37→
+    38→AGENT_ROOT = Path(os.environ.get("AGENT_ROOT", "/tmp/agent"))
+    39→SESSION_TTL_S = int(os.environ.get("AGENT_SESSION_TTL_S", "7200"))   # 2h idle
+    40→MAX_SESSIONS = int(os.environ.get("AGENT_MAX_SESSIONS", "8"))        # RAM bound
+    41→MAX_EVENT_CHARS = int(os.environ.get("AGENT_MAX_EVENT_CHARS", "4000"))
+    42→MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", "50"))
+    43→
+    44→#   per-thread workspace tracking for concurrent agent sessions.  replaces the
+    45→#   process-wide os.chdir() pattern which broke concurrent sessions (session B's
+    46→#   cwd overwrite caused session A's shell commands to run in the wrong dir).
+    47→_thread_local = threading.local()
+    48→
+    49→HERE = Path(__file__).resolve().parent
+    50→SKILLS_SRC = HERE / "agent_skills"   # seeded into each workspace's .claude/skills
+    51→
+    52→AGENT_SYSTEM_PROMPT = (
+    53→    "You are doomalaysocreate's agent — an agentic orchestrator running inside the user's "
+    54→    "own private Space container. Your workspace directory is your sandbox: "
+    55→    "create files, run shell commands, pack/unpack zips and repos there. "
+    56→    "Artifacts you write to the workspace are listed for the user to download. "
+    57→    "The disk is ephemeral — remind the user to download anything important. "
+    58→    "Be direct and concise; lead with outcomes.\n\n"
+    59→    "You have FULL capabilities — this is a cloud-hosted virtual PC:\n"
+    60→    "- shell: REAL bash execution (ls, cat, grep, find, git, python, pip, npm, make, curl, etc.)\n"
+    61→    "- file_read: read file contents\n"
+    62→    "- file_write: write/create files\n"
+    63→    "- editor: edit existing files (str_replace)\n"
+    64→    "- python_repl: full Python kernel (data analysis, scripts, pip install, etc.)\n"
+    65→    "- http_request: fetch URLs (GET/POST/PUT/DELETE — full web access)\n"
+    66→    "- grep: search file contents with regex\n"
+    67→    "- glob: find files by pattern (e.g. **/*.py)\n"
+    68→    "- calculator: math calculations\n"
+    69→    "- web_search: search the web (when available)\n"
+    70→    "- load_tool: dynamically load more tools at runtime\n"
+    71→    "PREFER shell for bash operations (grep, find, git, make, etc.). "
+    72→    "Use http_request for web fetches. Use file_read/file_write/editor for "
+    73→    "file operations. Use python_repl for complex logic or data analysis. "
+    74→    "Use grep/glob for code search. You can git clone repos, install packages, "
+    75→    "run build tools, and do anything a developer terminal can do."
+    76→)
+    77→
+    78→#   open-tier model routing: dynamically built from providers_catalog.json +
+    79→#   synced models from each provider's /v1/models endpoint.
+    80→#   Each entry is (env key, provider label, litellm model string, base_url or None).
+    81→#   Order = priority for auto-pick (first present env var wins). The model
+    82→#   picker surfaces EVERY entry whose key is set, not just the first.
+    83→#   Overridable via AGENT_OPEN_MODEL / AGENT_OPEN_BASE_URL / AGENT_OPEN_KEY_ENV.
+    84→
+    85→# Providers in our catalog → fetch models + base_url dynamically.
+    86→_PROVIDER_AGENT_MAP: dict[str, tuple[str, str]] = {
+    87→    "nvidia": ("NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1"),
+    88→    "opencode-zen": ("OPENCODE_ZEN_API_KEY", "https://opencode.ai/zen/v1"),
+    89→    "opencode-go": ("OPENCODE_GO_API_KEY", "https://opencode.ai/zen/go/v1"),
+    90→    "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
+    91→    "cloudflare": ("CF_API_TOKEN", "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1"),
+    92→    "github-models": ("GITHUB_TOKEN", "https://models.github.ai/inference"),
+    93→}
+    94→
+    95→_open_models_cache: list[tuple[str, str, str, str | None]] | None = None
+    96→
+    97→
+    98→def _build_open_models() -> list[tuple[str, str, str, str | None]]:
+    99→    """Build open model entries from providers_catalog.json dynamically.
+   100→
+   101→    Each configured provider contributes ALL its models (env-var-gated), so
+   102→    every model from NVIDIA, Cloudflare, PrivateMode AI etc. is available in
+   103→    the agent without hardcoding model names.
+   104→    """
+   105→    global _open_models_cache
+   106→    # Re-probe if the cache is empty — the panel sync may not have completed
+   107→    # on the first call (cache poisoning fix). A non-empty cache is still
+   108→    # trusted (the catalog + synced models don't change at runtime).
+   109→    if _open_models_cache is not None and len(_open_models_cache) > 0:
+   110→        return _open_models_cache
+   111→
+   112→    entries: list[tuple[str, str, str, str | None]] = []
+   113→    catalog_path = HERE / "providers_catalog.json"
+   114→    try:
+   115→        with open(catalog_path, encoding="utf-8") as f:
+   116→            data = json.load(f)
+   117→    except (OSError, json.JSONDecodeError):
+   118→        _open_models_cache = entries
+   119→        return entries
+   120→
+   121→    for prov in data.get("providers", []):
+   122→        name = prov["name"]
+   123→        env_var = prov.get("env_var", "")
+   124→        if isinstance(env_var, list):
+   125→            env_var = env_var[0] if env_var else ""
+   126→        if not env_var:
+   127→            continue
+   128→
+   129→        # Resolve {VAR} placeholders in base_url from the environment.
+   130→        base_url = prov.get("base_url", "")
+   131→        for var in prov.get("requires", []):
+   132→            base_url = base_url.replace("{" + var + "}", os.environ.get(var, "").strip())
+   133→        # LiteLLM appends /chat/completions for openai/ models, so strip it.
+   134→        if base_url.endswith("/chat/completions"):
+   135→            base_url = base_url[:-len("/chat/completions")]
+   136→
+   137→        for model_id in prov.get("models", []):
+   138→            litellm_model = f"openai/{model_id}"
+   139→            label = f"{model_id} ({prov.get('displayName', name)})"
+   140→            entries.append((env_var, label, litellm_model, base_url or None))
+   141→
+   142→    # Also include dynamically synced models from providers with sync_config.
+   143→    # The panel syncs models from live /v1/models endpoints at boot; those are
+   144→    # cached in provider_sync._panel_sync_cache.  Providers whose env var is set
+   145→    # contribute ALL their synced models so the agent picker shows everything
+   146→    # the panel can route to, not just the static catalog.
+   147→    from provider_sync import get_panel_sync_cache
+   148→    sync_cache = get_panel_sync_cache()
+   149→    if sync_cache:
+   150→        seen: set[str] = set(m.split("/")[-1] for _, _, m, _ in entries)
+   151→        for prov in data.get("providers", []):
+   152→            name = prov["name"]
+   153→            sync_config = prov.get("sync_config")
+   154→            if not sync_config or not sync_config.get("enabled"):
+   155→                continue
+   156→            senv = prov.get("env_var", "")
+   157→            if isinstance(senv, list):
+   158→                senv = senv[0] if senv else ""
+   159→            if not senv or not os.environ.get(senv, "").strip():
+   160→                continue
+   161→            synced = sync_cache.get(name, [])
+   162→            if not synced:
+   163→                continue
+   164→            sbase = prov.get("base_url", "")
+   165→            for var in prov.get("requires", []):
+   166→                sbase = sbase.replace("{" + var + "}", os.environ.get(var, "").strip())
+   167→            if sbase.endswith("/chat/completions"):
+   168→                sbase = sbase[:-len("/chat/completions")]
+   169→            for mid in synced:
+   170→                last = mid.split("/")[-1]
+   171→                if last not in seen:
+   172→                    seen.add(last)
+   173→                    entries.append((senv, f"{mid} ({prov.get('displayName', name)})",
+   174→                                    f"openai/{mid}", sbase or None))
+   175→
+   176→    _open_models_cache = entries
+   177→    return entries
+   178→
+   179→
+   180→def _resolve_open_model(user_model: str) -> tuple[str, str | None, str | None, str | None] | None:
+   181→    """Match a user-provided model name to a litellm model string + base_url +
+   182→    env_var + provider name from the dynamic open-models list.
+   183→
+   184→    Handles all input formats:
+   185→    - Canonical litellm: ``openai/kimi-k2.6`` (exact match)
+   186→    - Panel provider/model: ``privatemodeai/kimi-k2.6`` (match by last segment)
+   187→    - Logical/bare name: ``kimi-k2.6`` (match by last segment)
+   188→    - Partial: ``deepseek-v4-flash`` (match by last segment)
+   189→
+   190→    Prefers an exact full match, then falls back to last-segment matching.
+   191→    When the same model name exists on multiple providers, the first one in
+   192→    catalog order wins (same as _build_open_models dedup). To route to a
+   193→    specific provider, pass ``provider/model`` — the provider prefix is
+   194→    matched against the env_var's provider name.
+   195→
+   196→    Returns ``(litellm_model, base_url, env_var, provider_name)`` or ``None``.
+   197→    """
+   198→    if not user_model:
+   199→        return None
+   200→    user_last = user_model.split("/")[-1]
+   201→    # Also extract a provider hint if the user passed "provider/model"
+   202→    user_provider = user_model.split("/")[0] if "/" in user_model else ""
+   203→    models = _build_open_models()
+   204→    # Pass 1: exact full match (canonical litellm string)
+   205→    for _env, _label, model, base in models:
+   206→        if model == user_model:
+   207→            return (model, base, _env, _label)
+   208→    # Pass 2: match by provider hint + last segment (e.g. "privatemodeai/kimi-k2.6")
+   209→    if user_provider:
+   210→        for env, label, model, base in models:
+   211→            model_last = model.split("/")[-1]
+   212→            # label looks like "kimi-k2.6 (PrivateMode AI)" — extract provider
+   213→            label_provider = ""
+   214→            if "(" in label and ")" in label:
+   215→                label_provider = label[ label.index("(") + 1 : label.rindex(")") ].strip().lower()
+   216→            # env var maps to provider: PRIVATEMODEAI_API_KEY -> privatemodeai
+   217→            env_provider = env.lower().replace("_api_key", "").replace("_token", "").replace("_api_token", "")
+   218→            if (model_last == user_last and
+   219→                (user_provider.lower() in env_provider or
+   220→                 user_provider.lower() in label_provider.lower())):
+   221→                return (model, base, env, label)
+   222→    # Pass 3: last-segment match (bare logical names, partial names)
+   223→    for env, label, model, base in models:
+   224→        if model.split("/")[-1] == user_last:
+   225→            return (model, base, env, label)
+   226→    return None
+   227→
+   228→
+   229→def _installed(module: str) -> bool:
+   230→    """True if a module is importable, without importing it (cheap)."""
+   231→    try:
+   232→        return importlib.util.find_spec(module) is not None
+   233→    except (ImportError, ValueError):
+   234→        return False
+   235→
+   236→
+   237→def _pick_open_llm() -> tuple[str, str, str | None] | None:
+   238→    """(env_key, model, base_url) for the default open model, or None if no key set."""
+   239→    key_env = os.environ.get("AGENT_OPEN_KEY_ENV", "").strip()
+   240→    if key_env and os.environ.get(key_env, "").strip():
+   241→        return (key_env,
+   242→                os.environ.get("AGENT_OPEN_MODEL", "groq/llama-3.3-70b-versatile"),
+   243→                os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or None)
+   244→    for env_key, _label, model, base_url in _build_open_models():
+   245→        if os.environ.get(env_key, "").strip():
+   246→            model = os.environ.get("AGENT_OPEN_MODEL", "").strip() or model
+   247→            base_url = os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or base_url
+   248→            return (env_key, model, base_url)
+   249→    return None
+   250→
+   251→
+   252→def _open_sdk_installed() -> bool:
+   253→    """True if the open-tier agent SDK (Strands) is importable."""
+   254→    return _installed("strands")
+   255→
+   256→
+   257→_CLAUDE_MODELS = [
+   258→    ("claude-opus-4-8", "Claude Opus 4.8"),
+   259→    ("claude-opus-4-7", "Claude Opus 4.7"),
+   260→    ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+   261→    ("claude-haiku-4-5", "Claude Haiku 4.5"),
+   262→]
+   263→
+   264→
+   265→def agent_models() -> list[dict]:
+   266→    """Every model the agent can actually run right now, for the picker UI.
+   267→    Only lists a model when BOTH its key and its tier's SDK are present.
+   268→    """
+   269→    out: list[dict] = []
+   270→    default_model = os.environ.get("AGENT_MODEL", "")
+   271→    if os.environ.get("ANTHROPIC_API_KEY", "").strip() and _installed("claude_agent_sdk"):
+   272→        for model, label in _CLAUDE_MODELS:
+   273→            out.append({"tier": "claude", "provider": "Anthropic", "model": model,
+   274→                        "label": label, "default": model == default_model})
+   275→    if _open_sdk_installed():
+   276→        seen: set[str] = set()
+   277→        for env_key, label, model, _base in _build_open_models():
+   278→            if os.environ.get(env_key, "").strip() and model not in seen:
+   279→                seen.add(model)
+   280→                out.append({"tier": "open", "provider": label, "model": model,
+   281→                            "label": label, "default": False})
+   282→    if out and not any(m["default"] for m in out):
+   283→        out[0]["default"] = True
+   284→    return out
+   285→
+   286→
+   287→def _model_key_env(model: str) -> str | None:
+   288→    """Env var name for the API key of a chosen open model."""
+   289→    model_last = model.split("/")[-1]
+   290→    for env_key, _label, m, _base in _build_open_models():
+   291→        if m == model or m.split("/")[-1] == model_last:
+   292→            return env_key
+   293→    return None
+   294→
+   295→def _model_base_url(model: str) -> str | None:
+   296→    """base_url for a chosen open model (matches the dynamic model list)."""
+   297→    model_last = model.split("/")[-1]
+   298→    for _env, _label, m, base in _build_open_models():
+   299→        if m == model or m.split("/")[-1] == model_last:
+   300→            return base
+   301→    return None
+   302→
+   303→
+   304→def agent_tier() -> str | None:
+   305→    """Which agent tier this Space can actually run: "claude" | "open" | "mock".
+   306→
+   307→    Requires BOTH a key and the matching SDK installed for a real tier — so
+   308→    /health never advertises a tier the worker can't start.  Falls back to
+   309→    "mock" when no real tier is available so duplicated Spaces (which start
+   310→    with zero provider keys) still let users dogfood the agent UI instead of
+   311→    hitting a 503.  Once a user adds a provider key via the onboarding wizard,
+   312→    HF restarts the Space and the real tier takes over automatically.
+   313→    Set AGENT_FORCE_TIER=none to disable the mock fallback (old behaviour).
+   314→    """
+   315→    forced = os.environ.get("AGENT_FORCE_TIER", "").strip().lower()
+   316→    if forced in ("claude", "open", "mock"):
+   317→        return forced
+   318→    if os.environ.get("ANTHROPIC_API_KEY", "").strip() and _installed("claude_agent_sdk"):
+   319→        return "claude"
+   320→    if _pick_open_llm() is not None and _open_sdk_installed():
+   321→        return "open"
+   322→    # Auto-fallback: mock tier so the agent UI is always usable on fresh
+   323→    # duplicated Spaces that have no provider keys yet.
+   324→    if forced != "none":
+   325→        return "mock"
+   326→    return None
+   327→
+   328→
+   329→def _clip(text: object, limit: int = MAX_EVENT_CHARS) -> str:
+   330→    s = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, default=str)
+   331→    return s if len(s) <= limit else s[:limit] + f"\n… [truncated {len(s) - limit} chars]"
+   332→
+   333→
+   334→class CapacityError(RuntimeError):
+   335→    """Raised when MAX_SESSIONS concurrent sessions already exist."""
+   336→
+   337→
+   338→# --------------------------------------------------------------------------
+   339→# adapters: one interface, three implementations
+   340→# --------------------------------------------------------------------------
+   341→
+   342→class BaseAdapter:
+   343→    def __init__(self, workspace: Path, workspace_id: str | None = None):
+   344→        self.workspace = workspace
+   345→        self.workspace_id = workspace_id
+   346→
+   347→    def open(self) -> None: ...
+   348→    def turn(self, user_msg: str, emit) -> None:
+   349→        raise NotImplementedError
+   350→    def interrupt(self) -> None:
+   351→        #   stop the in-flight turn, if the SDK supports it. Default: no-op
+   352→        #   (Mock turns are instantaneous).
+   353→        ...
+   354→    def close(self) -> None: ...
+   355→
+   356→
+   357→class MockAdapter(BaseAdapter):
+   358→    """Plumbing test double: echoes and fakes one tool round-trip.
+   359→
+   360→    Only used when AGENT_FORCE_TIER=mock or no real tier is available.
+   361→    """
+   362→
+   363→    def __init__(self, workspace: Path, workspace_id: str | None = None,
+   364→                 system_prompt: str | None = None):
+   365→        super().__init__(workspace, workspace_id)
+   366→
+   367→    def turn(self, user_msg: str, emit) -> None:
+   368→        emit({"type": "tool_use", "name": "Echo", "summary": user_msg[:80]})
+   369→        emit({"type": "tool_result", "tool": "Echo", "text": f"echo: {user_msg}",
+   370→              "is_error": False})
+   371→        emit({"type": "assistant", "text": f"(mock) you said: {user_msg}"})
+   372→
+   373→
+   374→# --------------------------------------------------------------------------
+   375→# ZaiAdapter — FREE GLM 5.2 via multiple providers.
+   376→#
+   377→# Call paths (tried in order — first success wins):
+   378→#   1. PYTHON-NATIVE direct HTTP calls (PREFERRED — no Node, no subprocess):
+   379→#      a. Puter.js OpenAI endpoint  (PUTER_API_TOKEN — free GLM-5.2, no phone)
+   380→#      b. Z.ai public API           (ZAI_API_KEY — real GLM-5.2)
+   381→#      c. NVIDIA NIM                (NVIDIA_API_KEY — free GLM-5.1)
+   382→#      d. OpenRouter                (OPENROUTER_API_KEY — GLM-5.2)
+   383→#      e. SiliconFlow               (SILICONFLOW_API_KEY — GLM models)
+   384→#   2. Node.js subprocess (glm-chat.mjs) — fallback if Python-native fails
+   385→#   3. HTTP bridge at localhost:3030 — last resort
+   386→#
+   387→# The Python-native path is critical: on a Python-only HF Space, Node.js may
+   388→# not be installed and the bridge may not be running. By calling the APIs
+   389→# directly from Python (urllib is stdlib), the ZaiAdapter works with ZERO
+   390→# external dependencies beyond the Python interpreter.
+   391→# --------------------------------------------------------------------------
+   392→GLM_BRIDGE_URL = os.environ.get("GLM_BRIDGE_URL", "http://localhost:3030")
+   393→GLM_BRIDGE_TIMEOUT_S = float(os.environ.get("GLM_BRIDGE_TIMEOUT_S", "120"))
+   394→_GLM_CHAT_SCRIPT = os.environ.get(
+   395→    "GLM_CHAT_SCRIPT",
+   396→    str(Path(__file__).resolve().parent.parent / "mini-services" / "glm-bridge" / "glm-chat.mjs"))
+   397→_GLM_NODE_BIN = os.environ.get("GLM_NODE_BIN", "node")
+   398→
+   399→# --- OpenAI-compatible provider configs (for Python-native calls) ---
+   400→_GLM_PROVIDERS = [
+   401→    # Puter.js — FREE GLM-5.2, user-pays model. No Z.ai account needed.
+   402→    {"name": "puter", "env": "PUTER_API_TOKEN",
+   403→     "url": "https://api.puter.com/puterai/openai/v1/chat/completions",
+   404→     "models": ["glm-5.2", "glm-5.1"], "model_id": lambda m: f"z-ai/{m}"},
+   405→    # Z.ai public API — real GLM-5.2, "Limited-time Free" cached input
+   406→    {"name": "zai", "env": "ZAI_API_KEY",
+   407→     "url": "https://api.z.ai/api/paas/v4/chat/completions",
+   408→     "models": ["glm-5.2", "glm-5.1"], "model_id": lambda m: m},
+   409→    # NVIDIA NIM — free GLM-5.1, 1000 credits, no phone
+   410→    {"name": "nvidia", "env": "NVIDIA_API_KEY",
+   411→     "url": "https://integrate.api.nvidia.com/v1/chat/completions",
+   412→     "models": ["glm-5.1"], "model_id": lambda m: "z-ai/glm-5.1"},
+   413→    # OpenRouter — GLM-5.2, $1 free credit on signup
+   414→    {"name": "openrouter", "env": "OPENROUTER_API_KEY",
+   415→     "url": "https://openrouter.ai/api/v1/chat/completions",
+   416→     "models": ["glm-5.2", "glm-5.1"], "model_id": lambda m: f"z-ai/{m}"},
+   417→    # SiliconFlow — free tier, GitHub login
+   418→    {"name": "siliconflow", "env": "SILICONFLOW_API_KEY",
+   419→     "url": "https://api.siliconflow.cn/v1/chat/completions",
+   420→     "models": ["glm-5.2", "glm-5.1"], "model_id": lambda m: m},
+   421→]
+   422→
+   423→
+   424→def _glm_native_available() -> bool:
+   425→    """True if ANY provider env var is set (Python-native call path is usable)."""
+   426→    return any(os.environ.get(p["env"], "").strip() for p in _GLM_PROVIDERS)
+   427→
+   428→
+   429→def _glm_call_native(messages: list[dict], model: str, timeout: float) -> str:
+   430→    """Call GLM providers directly from Python (urllib — stdlib, no Node needed).
+   431→    Tries each provider whose key is set + whose models include the requested one.
+   432→    Returns the response text, or raises if all providers fail."""
+   433→    import urllib.request
+   434→    import json as _json
+   435→    errors = []
+   436→    for p in _GLM_PROVIDERS:
+   437→        key = os.environ.get(p["env"], "").strip()
+   438→        if not key:
+   439→            continue
+   440→        if model not in p["models"]:
+   441→            continue
+   442→        model_id = p["model_id"](model)
+   443→        body = _json.dumps({"model": model_id, "messages": messages}).encode()
+   444→        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+   445→        if p["name"] == "openrouter":
+   446→            headers["HTTP-Referer"] = "https://scoobybaby1999-doomalaysocreate.hf.space"
+   447→            headers["X-Title"] = "doomalaysocreate conscious agents"
+   448→        req = urllib.request.Request(p["url"], data=body, method="POST", headers=headers)
+   449→        try:
+   450→            with urllib.request.urlopen(req, timeout=timeout) as r:
+   451→                data = _json.loads(r.read().decode())
+   452→            content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+   453→            if content:
+   454→                return content.strip()
+   455→        except Exception as exc:
+   456→            errors.append(f"{p['name']}: {type(exc).__name__}: {str(exc)[:120]}")
+   457→    raise RuntimeError("All GLM providers failed: " + "; ".join(errors))
+   458→
+   459→
+   460→def _glm_subprocess_available() -> bool:
+   461→    """True if the glm-chat.mjs script exists on disk."""
+   462→    return bool(_GLM_CHAT_SCRIPT) and Path(_GLM_CHAT_SCRIPT).is_file()
+   463→
+   464→
+   465→def _glm_http_available() -> bool:
+   466→    """Quick health check — is the GLM HTTP bridge reachable right now?"""
+   467→    import urllib.request
+   468→    try:
+   469→        req = urllib.request.Request(f"{GLM_BRIDGE_URL}/health", method="GET")
+   470→        with urllib.request.urlopen(req, timeout=3) as r:
+   471→            return r.status == 200
+   472→    except Exception:
+   473→        return False
+   474→
+   475→
+   476→def _glm_bridge_available() -> bool:
+   477→    """True if ANY GLM path is usable: native provider key, subprocess, or HTTP bridge."""
+   478→    return _glm_native_available() or _glm_subprocess_available() or _glm_http_available()
+   479→
+   480→
+   481→def _glm_call_subprocess(messages: list[dict], model: str, timeout: float) -> str:
+   482→    """Call glm-chat.mjs via subprocess: pipe messages JSON in, read {content} out."""
+   483→    import subprocess
+   484→    import json as _json
+   485→    payload = _json.dumps({"messages": messages, "model": model})
+   486→    proc = subprocess.run(
+   487→        [_GLM_NODE_BIN, _GLM_CHAT_SCRIPT],
+   488→        input=payload, capture_output=True, text=True, timeout=timeout)
+   489→    # The script always writes JSON to stdout (even on error, so the caller
+   490→    # gets a parseable response). stderr carries diagnostics.
+   491→    try:
+   492→        data = _json.loads(proc.stdout)
+   493→    except Exception:
+   494→        raise RuntimeError(f"glm-chat.mjs returned non-JSON: {proc.stdout[:200]!r} stderr={proc.stderr[:200]!r}")
+   495→    return (data.get("content") or "").strip()
+   496→
+   497→
+   498→def _glm_call_http(messages: list[dict], model: str, timeout: float) -> str:
+   499→    """Call the HTTP bridge at localhost:3030/chat."""
+   500→    import urllib.request
+   501→    import json as _json
+   502→    body = _json.dumps({"messages": messages, "model": model}).encode()
+   503→    req = urllib.request.Request(
+   504→        f"{GLM_BRIDGE_URL}/chat", data=body, method="POST",
+   505→        headers={"Content-Type": "application/json"})
+   506→    with urllib.request.urlopen(req, timeout=timeout) as r:
+   507→        data = _json.loads(r.read().decode())
+   508→    return (data.get("content") or "").strip()
+   509→
+   510→def _summarize_tool_input(name: str, tool_input: dict) -> str:
+   511→    if not isinstance(tool_input, dict):
+   512→        return _clip(tool_input, 200)
+   513→    if name.lower() == "bash" and "command" in tool_input:
+   514→        return str(tool_input["command"])[:200]
+   515→    for key in ("file_path", "path", "pattern", "url", "query"):
+   516→        if key in tool_input:
+   517→            return str(tool_input[key])[:200]
+   518→    return _clip(tool_input, 200)
+   519→
+   520→
+   521→class ClaudeAdapter(BaseAdapter):
+   522→    """Official Claude Agent SDK; the bundled CLI subprocess does the work.
+   523→
+   524→    The SDK is async; each session's worker thread owns a private event loop
+   525→    so the client survives across turns on the same thread.
+   526→    """
+   527→
+   528→    def __init__(self, workspace: Path, model: str | None = None,
+   529→                 workspace_id: str | None = None, system_prompt: str | None = None):
+   530→        super().__init__(workspace, workspace_id)
+   531→        self.model = model or os.environ.get("AGENT_MODEL", "claude-opus-4-8")
+   532→        self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
+   533→        self.loop: asyncio.AbstractEventLoop | None = None
+   534→        self.client = None
+   535→        self._sdk = None
+   536→
+   537→    def open(self) -> None:
+   538→        import claude_agent_sdk as sdk
+   539→        self._sdk = sdk
+   540→        options = sdk.ClaudeAgentOptions(
+   541→            cwd=str(self.workspace),
+   542→            permission_mode="bypassPermissions",   # headless; the Space is the sandbox
+   543→            allow_dangerously_skip_permissions=True,  # required double opt-in for the SDK
+   544→            setting_sources=["project"],           # load <workspace>/.claude/skills
+   545→            model=self.model,
+   546→            system_prompt=self.system_prompt,
+   547→            max_turns=MAX_TURNS,
+   548→        )
+   549→        self.loop = asyncio.new_event_loop()
+   550→        self.client = sdk.ClaudeSDKClient(options=options)
+   551→        self.loop.run_until_complete(self.client.connect())
+   552→        # Tier 3 — register conscious tools on the owning session (Phase 1:
+   553→        # stored for inspection; Phase 2 wires real Claude SDK tool registration).
+   554→        try:
+   555→            import conscious_stubs
+   556→            conscious_stubs.register_conscious_tools(self._session_ref(), self)
+   557→        except Exception:
+   558→            pass
+   559→
+   560→    def _session_ref(self):
+   561→        """Back-reference to the owning AgentSession (set by AgentSession._run)."""
+   562→        return getattr(self, "_session", None)
+   563→
+   564→    def turn(self, user_msg: str, emit) -> None:
+   565→        assert self.loop is not None
+   566→        self.loop.run_until_complete(self._turn(user_msg, emit))
+   567→
+   568→    def interrupt(self) -> None:
+   569→        #   the loop is owned by the worker thread; schedule the SDK's interrupt
+   570→        #   coroutine onto it from the caller's (HTTP handler) thread.
+   571→        if self.loop is None or self.client is None or self.loop.is_closed():
+   572→            return
+   573→        try:
+   574→            asyncio.run_coroutine_threadsafe(self.client.interrupt(), self.loop)
+   575→        except Exception:
+   576→            pass
+   577→
+   578→    async def _turn(self, user_msg: str, emit) -> None:
+   579→        sdk = self._sdk
+   580→        thinking_cls = getattr(sdk, "ThinkingBlock", None)
+   581→        await self.client.query(user_msg)
+   582→        async for msg in self.client.receive_response():
+   583→            # Phase 2 (completed in Phase 5 pass) — mid-turn cost abort.
+   584→            # After each message received, check the conscious cost ceiling.
+   585→            # If over, interrupt the SDK and emit a cost.exceeded event so the
+   586→            # orchestrator's next conscious_context surfaces it. This is the
+   587→            # "hard enforcement mid-turn" from TIER3_PLAN §14 (the deeper SDK
+   588→            # hook that the turn-boundary check was the baseline for).
+   589→            sess = getattr(self, "_session", None)
+   590→            if sess is not None and getattr(sess, "conscious_id", None):
+   591→                if not _cost_turn_ok(sess.conscious_id):
+   592→                    spent, ceiling = _cost_figures(sess.conscious_id)
+   593→                    emit({"type": "status", "state": "idle",
+   594→                          "detail": f"cost ceiling exceeded mid-turn (spent=${spent:.4f}, ceiling=${ceiling:.4f})"})
+   595→                    try:
+   596→                        await self.client.interrupt()
+   597→                    except Exception:
+   598→                        pass
+   599→                    try:
+   600→                        import conscious_db
+   601→                        conscious_db.append_event(
+   602→                            sess.conscious_id, "cost.exceeded",
+   603→                            f"mid-turn abort: spent=${spent:.4f} ceiling=${ceiling:.4f}",
+   604→                            author=getattr(sess, "agent_id", None))
+   605→                    except Exception:
+   606→                        pass
+   607→                    return
+   608→            if isinstance(msg, sdk.AssistantMessage):
+   609→                for block in msg.content:
+   610→                    if isinstance(block, sdk.TextBlock):
+   611→                        emit({"type": "assistant", "text": block.text})
+   612→                    elif thinking_cls is not None and isinstance(block, thinking_cls):
+   613→                        emit({"type": "thinking", "text": _clip(block.thinking)})
+   614→                    elif isinstance(block, sdk.ToolUseBlock):
+   615→                        emit({"type": "tool_use", "name": block.name,
+   616→                              "summary": _summarize_tool_input(block.name, block.input)})
+   617→            elif isinstance(msg, sdk.UserMessage):
+   618→                content = msg.content if isinstance(msg.content, list) else []
+   619→                for block in content:
+   620→                    if isinstance(block, sdk.ToolResultBlock):
+   621→                        emit({"type": "tool_result", "text": _clip(block.content),
+   622→                              "is_error": bool(getattr(block, "is_error", False))})
+   623→            elif isinstance(msg, sdk.ResultMessage):
+   624→                emit({"type": "status", "state": "idle",
+   625→                      "usage": getattr(msg, "usage", None),
+   626→                      "cost_usd": getattr(msg, "total_cost_usd", None)})
+   627→
+   628→    def close(self) -> None:
+   629→        if self.loop is None:
+   630→            return
+   631→        try:
+   632→            if self.client is not None:
+   633→                self.loop.run_until_complete(self.client.disconnect())
+   634→        except Exception:
+   635→            pass
+   636→        finally:
+   637→            self.loop.close()
+   638→
+   639→
+   640→def _parse_git_branch(cmd: str) -> str | None:
+   641→    """Best-effort extract a branch name from a git push/pull/fetch command.
+   642→    Returns None if no explicit branch is named (caller should use the
+   643→    current branch via ``_current_branch``)."""
+   644→    parts = cmd.split()
+   645→    # skip 'git' and the subcommand; ignore flags and the 'origin' keyword
+   646→    candidates = [p for p in parts[2:] if p and not p.startswith("-") and p != "origin"]
+   647→    return candidates[0] if candidates else None
+   648→
+   649→
+   650→def _current_branch(sandbox: str) -> str:
+   651→    """Return the current checked-out branch name, or 'main' as a fallback."""
+   652→    import subprocess
+   653→    r = subprocess.run(["git", "-C", sandbox, "rev-parse", "--abbrev-ref", "HEAD"],
+   654→                       capture_output=True, text=True, timeout=10)
+   655→    return r.stdout.strip() or "main"
+   656→
+   657→
+   658→def _route_network_git(cmd: str, workspace_id: str) -> dict:
+   659→    """Route agent git push/pull/fetch through the backend git functions so
+   660→    the GitHub token is never written to ``.git/config`` and every push is
+   661→    audit-logged.  Returns a Strands-style tool result dict.
+   662→    """
+   663→    import db
+   664→    import github_integration
+   665→    ws = db.get_workspace(workspace_id)
+   666→    if not ws:
+   667→        return {"status": "error",
+   668→                "content": [{"text": f"workspace not found: {workspace_id}"}]}
+   669→    user_id = ws["user_id"]
+   670→    sandbox = ws["sandbox_path"]
+   671→    stripped = cmd.strip()
+   672→    try:
+   673→        if stripped.startswith("git push"):
+   674→            force = ("-f " in stripped) or ("--force" in stripped)
+   675→            branch = _parse_git_branch(stripped) or _current_branch(sandbox)
+   676→            github_integration.push_to_remote(
+   677→                user_id, workspace_id, branch, force=force)
+   678→            return {"status": "success",
+   679→                    "content": [{"text": f"pushed {branch} to origin"}]}
+   680→        if stripped.startswith("git fetch"):
+   681→            branch = _parse_git_branch(stripped) or ""
+   682→            github_integration.fetch_from_remote(user_id, workspace_id, branch)
+   683→            return {"status": "success",
+   684→                    "content": [{"text": "fetched from origin" +
+   685→                                (f" ({branch})" if branch else "")}]}
+   686→        if stripped.startswith("git pull"):
+   687→            branch = _parse_git_branch(stripped) or _current_branch(sandbox)
+   688→            github_integration.fetch_from_remote(user_id, workspace_id, branch)
+   689→            return {"status": "success",
+   690→                    "content": [{"text": f"pulled {branch} from origin"}]}
+   691→    except Exception as exc:  # noqa: BLE001 - surface git errors to the agent
+   692→        return {"status": "error",
+   693→                "content": [{"text": f"git operation failed: {exc}"}]}
+   694→    return {"status": "error",
+   695→            "content": [{"text": f"unsupported git command: {cmd}"}]}
+   696→
+   697→
+   698→def _guarded_shell(**kwargs):
+   699→    """Wrap the Strands shell tool: force workspace dir + intercept git commands.
+   700→
+   701→    1. Overrides ``workdir`` with the session workspace from thread-local storage.
+   702→    2. Network git operations (push/pull/fetch) are routed through the backend
+   703→       git functions (``push_to_remote`` / ``fetch_from_remote``) so the GitHub
+   704→       token never lands in ``.git/config`` and pushes are audit-logged.
+   705→    """
+   706→    from strands_tools import shell as _shell
+   707→
+   708→    kwargs["workdir"] = str(getattr(_thread_local, "workspace", Path.cwd()))
+   709→
+   710→    cmd = kwargs.get("command", "")
+   711→    if isinstance(cmd, str) and cmd.strip():
+   712→        stripped = cmd.strip()
+   713→        workspace_id = getattr(_thread_local, "workspace_id", None)
+   714→        if workspace_id and (
+   715→            stripped.startswith("git push")
+   716→            or stripped.startswith("git pull")
+   717→            or stripped.startswith("git fetch")
+   718→        ):
+   719→            is_force = stripped.startswith("git push") and (
+   720→                "-f " in stripped or "--force" in stripped)
+   721→            if not is_force:
+   722→                return _route_network_git(stripped, workspace_id)
+   723→    return _shell.tool(**kwargs)
+   724→
+   725→
+   726→class StrandsAdapter(BaseAdapter):
+   727→    """Open tier — Strands Agents SDK (AWS, Apache-2.0). Provider-agnostic via
+   728→    LiteLLM, so one adapter drives every OpenAI-compatible model (Kimi, GLM,
+   729→    MiniMax, DeepSeek, Groq, …). Native swarm/graph multi-agent + a deep built-in
+   730→    tool suite (shell, file edit, python, http). Runs synchronously in the worker
+   731→    thread; the structured message log is walked after each turn to build the
+   732→    transcript in order.
+   733→    """
+   734→
+   735→    def __init__(self, workspace: Path, model: str | None = None,
+   736→                 workspace_id: str | None = None, system_prompt: str | None = None):
+   737→        super().__init__(workspace, workspace_id)
+   738→        self.model = model
+   739→        self.agent = None
+   740→        self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
+   741→        # Resolved routing info (set by open(), surfaced in snapshot for verification)
+   742→        self.resolved_model: str | None = None
+   743→        self.resolved_provider: str | None = None
+   744→        self.resolved_api_base: str | None = None
+   745→
+   746→    def open(self) -> None:
+   747→        import os as _os
+   748→        from strands import Agent
+   749→        from strands.models.litellm import LiteLLMModel
+   750→
+   751→        # headless: skip interactive consent prompts (no TTY in the Space container).
+   752→        # must be set before importing strands_tools so their module-level checks see it.
+   753→        _os.environ["BYPASS_TOOL_CONSENT"] = "true"
+   754→
+   755→        if self.model:
+   756→            # CRITICAL: resolve through _resolve_open_model so we get the
+   757→            # canonical litellm model string (openai/<model_id>) + the correct
+   758→            # api_base + env_var for this specific model. Without this, a
+   759→            # panel-format string like "privatemodeai/kimi-k2.6" reaches
+   760→            # LiteLLM directly and throws BadRequestError.
+   761→            pair = _resolve_open_model(self.model)
+   762→            if pair:
+   763→                model, base_url, key_env, provider_label = pair
+   764→            else:
+   765→                # Fallback: use the raw model string + best-effort key/base lookup.
+   766→                # This path may fail in LiteLLM if the string isn't a recognized
+   767→                # litellm format, but we keep it for AGENT_OPEN_* overrides.
+   768→                model = self.model
+   769→                key_env = _model_key_env(model) or _os.environ.get("AGENT_OPEN_KEY_ENV", "")
+   770→                base_url = _model_base_url(model)
+   771→                provider_label = None
+   772→            if not key_env or not _os.environ.get(key_env, "").strip():
+   773→                raise RuntimeError(f"no API key for model {model}")
+   774→        else:
+   775→            picked = _pick_open_llm()
+   776→            if picked is None:
+   777→                raise RuntimeError("no open-tier provider key available")
+   778→            key_env, model, base_url = picked
+   779→            provider_label = None
+   780→
+   781→        # Record resolved routing for verification (snapshot + /api/agent response)
+   782→        self.resolved_model = model
+   783→        self.resolved_api_base = base_url
+   784→        self.resolved_provider = provider_label or key_env
+   785→
+   786→        # client_args pass straight to litellm.completion (api_base = custom
+   787→        # OpenAI-compatible endpoint, e.g. Z.ai for GLM, NVIDIA for Kimi).
+   788→        client_args: dict = {"api_key": _os.environ[key_env]}
+   789→        if base_url:
+   790→            client_args["api_base"] = base_url
+   791→        llm = LiteLLMModel(client_args=client_args, model_id=model)
+   792→
+   793→
+   794→        # the agent works in its session workspace; tools are imported defensively
+   795→        # so a renamed/missing tool never blocks startup.
+   796→        # Tool suite — FULL capabilities for a cloud-hosted virtual PC:
+   797→        # - shell: real bash execution (guarded to the session workspace)
+   798→        # - file_read / file_write / editor: filesystem operations
+   799→        # - python_repl: full Python kernel for data analysis, scripts, etc.
+   800→        # - http_request: web fetch (GET/POST/PUT/DELETE)
+   801→        # - calculator: math
+   802→        # - grep / glob: code search and file pattern matching
+   803→        # - web_search: web search (if available)
+   804→        # - load_tool: meta-tool — agent can load more tools at runtime
+   805→        # shell is replaced by _guarded_shell to force workdir per-thread.
+   806→        tools = []
+   807→        for mod_name in ("file_read", "file_write", "editor",
+   808→                         "http_request", "python_repl", "calculator",
+   809→                         "load_tool", "glob", "web_search", "memorize",
+   810→                         "journal", "slug", "current_time", "env",
+   811→                         "batch_ensemble", "image_reader", "nova_reel",
+   812→                         "retrieve", "think", "agent_graph"):
+   813→            try:
+   814→                import importlib
+   815→                tools.append(importlib.import_module(f"strands_tools.{mod_name}"))
+   816→            except Exception:
+   817→                continue
+   818→        # Try to import the grep tool (may be named differently across versions)
+   819→        for grep_mod in ("grep", "search_files", "grep_code"):
+   820→            try:
+   821→                import importlib
+   822→                tools.append(importlib.import_module(f"strands_tools.{grep_mod}"))
+   823→                break
+   824→            except Exception:
+   825→                continue
+   826→        # guarded shell: forces execution into this session's workspace.
+   827→        # This is a REAL bash shell — the agent can run any command (git, npm,
+   828→        # pip, python, make, etc.) inside its private sandbox.
+   829→        import types as _types
+   830→        shell_mod = _types.ModuleType("shell")
+   831→        shell_mod.tool = _guarded_shell
+   832→        tools.append(shell_mod)
+   833→        # Log which tools loaded so we can verify capabilities
+   834→        loaded = [getattr(t, "TOOL_SPEC", {}).get("name", "?") if hasattr(t, "TOOL_SPEC")
+   835→                  else getattr(t, "__name__", "?") for t in tools]
+   836→        try:
+   837→            log_event("agent_tools_loaded", tools=loaded)
+   838→        except Exception:
+   839→            pass
+   840→
+   841→        self.agent = Agent(model=llm, tools=tools, system_prompt=self.system_prompt,
+   842→                           callback_handler=None)
+   843→        self._msg_cursor = 0
+   844→        # Tier 3 — register conscious tools on the owning session (Phase 1:
+   845→        # stored for inspection; Phase 2 wraps them as strands_tools modules).
+   846→        try:
+   847→            import conscious_stubs
+   848→            conscious_stubs.register_conscious_tools(self._session_ref(), self)
+   849→        except Exception:
+   850→            pass
+   851→
+   852→    def _session_ref(self):
+   853→        """Back-reference to the owning AgentSession (set by AgentSession._run)."""
+   854→        return getattr(self, "_session", None)
+   855→
+   856→    def turn(self, user_msg: str, emit) -> None:
+   857→        _thread_local.workspace = self.workspace
+   858→        _thread_local.workspace_id = self.workspace_id
+   859→        sess = getattr(self, "_session", None)
+   860→        # Track whether thinking was emitted via the streaming callback.
+   861→        # If so, skip thinking emission in the post-turn walk (which would
+   862→        # duplicate the text). Reset at the start of each turn.
+   863→        self._thinking_streamed = False
+   864→        # Build a streaming callback handler: thinking text in real-time,
+   865→        # plus mid-turn cost ceiling enforcement for conscious agents.
+   866→        def _stream_callback(**kw):
+   867→            reasoning = kw.get("reasoningText")
+   868→            if reasoning:
+   869→                self._thinking_streamed = True
+   870→                emit({"type": "thinking", "text": reasoning})
+   871→            # Cost ceiling check (conscious agents only)
+   872→            if sess is not None and getattr(sess, "conscious_id", None):
+   873→                if not _cost_turn_ok(sess.conscious_id):
+   874→                    spent, ceiling = _cost_figures(sess.conscious_id)
+   875→                    emit({"type": "status", "state": "idle",
+   876→                          "detail": f"cost ceiling exceeded mid-turn (spent=${spent:.4f}, ceiling=${ceiling:.4f})"})
+   877→                    canceler = getattr(self.agent, "cancel", None)
+   878→                    if callable(canceler):
+   879→                        try: canceler()
+   880→                        except Exception: pass
+   881→                    try:
+   882→                        import conscious_db
+   883→                        conscious_db.append_event(
+   884→                            sess.conscious_id, "cost.exceeded",
+   885→                            f"mid-turn abort: spent=${spent:.4f} ceiling=${ceiling:.4f}",
+   886→                            author=getattr(sess, "agent_id", None))
+   887→                    except Exception: pass
+   888→        try:
+   889→            self.agent.callback_handler = _stream_callback
+   890→        except Exception:
+   891→            pass
+   892→        try:
+   893→            self.agent(user_msg)
+   894→        finally:
+   895→            pass
+   896→        # Walk newly-appended messages for tool results and final assistant text
+   897→        msgs = getattr(self.agent, "messages", []) or []
+   898→        for m in msgs[self._msg_cursor:]:
+   899→            role = m.get("role")
+   900→            for block in (m.get("content") or []):
+   901→                if "toolUse" in block:
+   902→                    tu = block["toolUse"] or {}
+   903→                    emit({"type": "tool_use", "name": tu.get("name", "tool"),
+   904→                          "summary": _summarize_tool_input(tu.get("name", ""),
+   905→                                                            tu.get("input", {}))})
+   906→                elif "toolResult" in block:
+   907→                    tr = block["toolResult"] or {}
+   908→                    parts = []
+   909→                    for c in (tr.get("content") or []):
+   910→                        if isinstance(c, dict) and "text" in c:
+   911→                            parts.append(c["text"])
+   912→                    emit({"type": "tool_result", "text": _clip("\n".join(parts) or tr),
+   913→                          "is_error": tr.get("status") == "error"})
+   914→                elif "reasoningContent" in block:
+   915→                    # Skip if the streaming callback already captured thinking.
+   916→                    # The streaming callback emits fragments in real-time which
+   917→                    # emit() accumulates into one event. Re-emitting the full
+   918→                    # text here would create a duplicate thinking bubble.
+   919→                    if getattr(self, "_thinking_streamed", False):
+   920→                        continue
+   921→                    rc = block["reasoningContent"] or {}
+   922→                    txt = (rc.get("reasoningText") or {}).get("text") if isinstance(
+   923→                        rc.get("reasoningText"), dict) else rc.get("reasoningText")
+   924→                    if txt:
+   925→                        emit({"type": "thinking", "text": _clip(txt)})
+   926→                elif "text" in block and role == "assistant":
+   927→                    if block["text"].strip():
+   928→                        emit({"type": "assistant", "text": block["text"]})
+   929→        self._msg_cursor = len(msgs)
+   930→
+   931→    def interrupt(self) -> None:
+   932→        canceler = getattr(self.agent, "cancel", None)
+   933→        if callable(canceler):
+   934→            try:
+   935→                canceler()
+   936→            except Exception:
+   937→                pass
+   938→
+   939→    def close(self) -> None:
+   940→        cleanup = getattr(self.agent, "cleanup", None)
+   941→        if callable(cleanup):
+   942→            try:
+   943→                cleanup()
+   944→            except Exception:
+   945→                pass
+   946→
+   947→
+   948→def _make_adapter(tier: str, workspace: Path, model: str | None = None,
+   949→                  workspace_id: str | None = None, system_prompt: str | None = None) -> BaseAdapter:
+   950→    if tier == "claude":
+   951→        return ClaudeAdapter(workspace, model, workspace_id, system_prompt)
+   952→    if tier == "open":
+   953→        return StrandsAdapter(workspace, model, workspace_id, system_prompt)
+   954→    return MockAdapter(workspace, workspace_id, system_prompt)
+   955→
+   956→
+   957→def tier_for_model(model: str | None) -> str | None:
+   958→    """Resolve which tier a chosen model belongs to (None → auto/default).
+   959→
+   960→    Falls back to agent_tier() (which itself falls back to "mock") so an
+   961→    unknown model never hard-fails — the user gets a mock response and a
+   962→    clear path to add a real provider key.
+   963→    """
+   964→    if not model:
+   965→        return agent_tier()
+   966→    if model.startswith("claude"):
+   967→        return "claude" if (os.environ.get("ANTHROPIC_API_KEY", "").strip()
+   968→                            and _installed("claude_agent_sdk")) else agent_tier()
+   969→    if any(m["model"] == model for m in agent_models()):
+   970→        return "open"
+   971→    # Unknown model — fall back to whatever tier is available (mock if nothing
+   972→    # else) instead of returning None (which would raise RuntimeError).
+   973→    return agent_tier()
+   974→
+   975→
+   976→# --------------------------------------------------------------------------
+   977→# sessions
+   978→# --------------------------------------------------------------------------
+   979→
+   980→class AgentSession:
+   981→    def __init__(self, tier: str, model: str | None = None,
+   982→                 workspace_path: Path | None = None, workspace_id: str | None = None,
+   983→                 conscious_id: str | None = None, agent_id: str | None = None,
+   984→                 chat_session_id: str | None = None):
+   985→        self.id = uuid.uuid4().hex[:16]
+   986→        self.chat_session_id = chat_session_id
+   987→        self.persisted_seq = 0
+   988→        self.tier = tier
+   989→        self.model = model
+   990→        self.workspace_id = workspace_id  # links to user's workspace, if any
+   991→        # Tier 3 — Conscious binding. Set when an agent is spawned against a
+   992→        # Conscious. Existing non-Conscious agents have both as None; the
+   993→        # conscious_* tool handlers no-op with an error in that case.
+   994→        self.conscious_id = conscious_id
+   995→        self.agent_id = agent_id
+   996→        # Build a context-rich system prompt when the agent is bound to a
+   997→        # cloned workspace, so the model knows it can run git commands.
+   998→        self.system_prompt = AGENT_SYSTEM_PROMPT
+   999→        if self.workspace_id:
+  1000→            try:
+  1001→                import db
+  1002→                ws = db.get_workspace(self.workspace_id)
+  1003→                if ws and ws.get("source_repo"):
+  1004→                    self.system_prompt = (
+  1005→                        f"{AGENT_SYSTEM_PROMPT}\n\n"
+  1006→                        f"Workspace: {ws['title'] or ws['source_repo']} at {self.workspace}\n"
+  1007→                        f"Git repo: {ws['source_repo']}\n"
+  1008→                        f"Current branch: {ws.get('current_branch', 'main') or 'main'}\n"
+  1009→                        f"You can use git commands: status, log, diff, branch, "
+  1010→                        f"checkout, pull, add, commit, and push.\n"
+  1011→                        f"To save changes: git add + git commit.\n"
+  1012→                        f"To sync with remote: git push (allowed).\n"
+  1013→                    )
+  1014→            except Exception:
+  1015→                pass
+  1016→        # Tier 3 — Conscious binding: extend the system prompt with the
+  1017→        # conscious toolset overview so the model knows the brain exists.
+  1018→        # The actual tool registration happens in each adapter's open(); this
+  1019→        # just primes the prompt. Phase 1 tools are stubs (no real execution).
+  1020→        self.conscious_tools: list = []
+  1021→        if self.conscious_id and self.agent_id:
+  1022→            self.system_prompt = (
+  1023→                f"{self.system_prompt}\n\n"
+  1024→                f"--- Conscious (Tier 3) ---\n"
+  1025→                f"You are bound to conscious {self.conscious_id} as agent {self.agent_id}.\n"
+  1026→                f"The shared brain lives at .brain/ in your workspace. Read it before acting.\n"
+  1027→                f"Tools available: conscious_context, conscious_post (orchestrator-only), "
+  1028→                f"conscious_propose (sub-agents), conscious_commit_proposal, "
+  1029→                f"conscious_reject_proposal, conscious_invoke, conscious_delegate, "
+  1030→                f"conscious_drawer, conscious_message, conscious_claim, conscious_task, "
+  1031→                f"conscious_subscribe. See .brain/skills/conscious/SKILL.md for the full guide.\n"
+  1032→                f"Phase 1 note: invoke/delegate return stubbed results; real worktree-per-agent "
+  1033→                f"execution lands in Phase 2.\n"
+  1034→            )
+  1035→        self.created = time.time()
+  1036→        self.updated = self.created
+  1037→        self.status = "starting"
+  1038→        self.closed = False
+  1039→        self.lock = threading.Lock()
+  1040→        self.events: list[dict] = []
+  1041→        self.inbox: queue.Queue = queue.Queue()
+  1042→        self._stream_queues: list[queue.Queue] = []
+  1043→        self.adapter: BaseAdapter | None = None
+  1044→        self._interrupting = False
+  1045→        # use provided workspace path (user's workspace) or create ephemeral one
+  1046→        if workspace_path is not None:
+  1047→            self.workspace = workspace_path
+  1048→            self.workspace.mkdir(parents=True, exist_ok=True)
+  1049→        else:
+  1050→            self.workspace = AGENT_ROOT / self.id
+  1051→            self.workspace.mkdir(parents=True, exist_ok=True)
+  1052→        self._seed_skills()
+  1053→        self.thread = threading.Thread(target=self._run, daemon=True,
+  1054→                                       name=f"agent-{self.id}")
+  1055→        self.thread.start()
+  1056→
+  1057→    def _seed_skills(self) -> None:
+  1058→        #   ship doomalaysocreate's skill folders into the workspace so the Claude tier
+  1059→        #   picks them up via setting_sources=["project"].
+  1060→        if SKILLS_SRC.is_dir():
+  1061→            dest = self.workspace / ".claude" / "skills"
+  1062→            try:
+  1063→                shutil.copytree(SKILLS_SRC, dest, dirs_exist_ok=True)
+  1064→            except Exception:
+  1065→                pass
+  1066→
+  1067→    # -- transcript ---------------------------------------------------------
+  1068→    def emit(self, ev: dict) -> None:
+  1069→        with self.lock:
+  1070→            if (ev.get("type") == "thinking"
+  1071→                    and self.events and self.events[-1].get("type") == "thinking"):
+  1072→                # Always APPEND to the last thinking event. The Strands callback
+  1073→                # sends reasoning fragments (one per token or chunk). Tool calls
+  1074→                # (tool_use/tool_result) naturally separate reasoning blocks —
+  1075→                # after a tool_result, self.events[-1] is tool_result (not
+  1076→                # thinking), so a new thinking event is created automatically.
+  1077→                # This means consecutive thinking events are ALWAYS continuations
+  1078→                # of the same reasoning block, so appending is correct.
+  1079→                old_text = (self.events[-1].get("text", "") or "")
+  1080→                new_text = (ev.get("text", "") or "")
+  1081→                # Skip stale duplicates (new text is a prefix of old)
+  1082→                if old_text and new_text and old_text.startswith(new_text) and len(new_text) < len(old_text):
+  1083→                    stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
+  1084→                    stream_ev["text"] = old_text
+  1085→                else:
+  1086→                    self.events[-1]["text"] = old_text + new_text
+  1087→                    self.events[-1]["ts"] = time.time()
+  1088→                    stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
+  1089→                    stream_ev["text"] = self.events[-1]["text"]
+  1090→            else:
+  1091→                new_ev = {"i": len(self.events), "ts": time.time(), **ev}
+  1092→                self.events.append(new_ev)
+  1093→                stream_ev = new_ev
+  1094→            self.updated = time.time()
+  1095→            queues = list(self._stream_queues)
+  1096→        for q in queues:
+  1097→            try:
+  1098→                q.put_nowait(stream_ev)
+  1099→            except (queue.Full, ValueError):
+  1100→                try:
+  1101→                    self._stream_queues.remove(q)
+  1102→                except ValueError:
+  1103→                    pass
+  1104→
+  1105→    def register_stream_queue(self, q: queue.Queue) -> None:
+  1106→        with self.lock:
+  1107→            self._stream_queues.append(q)
+  1108→
+  1109→    def unregister_stream_queue(self, q: queue.Queue) -> None:
+  1110→        with self.lock:
+  1111→            try:
+  1112→                self._stream_queues.remove(q)
+  1113→            except ValueError:
+  1114→                pass
+  1115→
+  1116→    def subscribe(self, since: int = 0):
+  1117→        """Subscribe to live events for SSE streaming. Returns a queue.Queue
+  1118→        that receives every new event as it's emitted. Events with i < since
+  1119→        are replayed first (so a late subscriber catches up), then the queue
+  1120→        stays open for live events. Call unsubscribe(q) when done.
+  1121→
+  1122→        This is the method the SSE endpoint looks for via getattr(session,
+  1123→        'subscribe', None). Without it, the SSE handler falls back to polling
+  1124→        (200ms snapshots) — which is why streaming felt choppy/non-live."""
+  1125→        q: queue.Queue = queue.Queue(maxsize=256)
+  1126→        # Replay events the subscriber hasn't seen yet.
+  1127→        with self.lock:
+  1128→            replay = [e for e in self.events if (e.get("i", 0) >= since)]
+  1129→        for ev in replay:
+  1130→            try:
+  1131→                q.put_nowait(ev)
+  1132→            except queue.Full:
+  1133→                pass  # drop backlog if subscriber is slow
+  1134→        self.register_stream_queue(q)
+  1135→        return q
+  1136→
+  1137→    def unsubscribe(self, q: queue.Queue) -> None:
+  1138→        """Unsubscribe from live events. Pushes None to signal end-of-stream."""
+  1139→        self.unregister_stream_queue(q)
+  1140→        try:
+  1141→            q.put_nowait(None)
+  1142→        except queue.Full:
+  1143→            pass
+  1144→
+  1145→    def _set_status(self, state: str, **extra) -> None:
+  1146→        self.status = state
+  1147→        self.emit({"type": "status", "state": state, **extra})
+  1148→
+  1149→    def snapshot(self, since: int = 0) -> dict:
+  1150→        with self.lock:
+  1151→            events = self.events[max(0, since):]
+  1152→            # Include resolved routing info so the frontend can verify which
+  1153→            # model/provider actually served the request (not just what was
+  1154→            # requested). self.adapter is set in _run() after open(); before
+  1155→            # that, resolved_* are None.
+  1156→            adapter = self.adapter
+  1157→            return {"session_id": self.id, "tier": self.tier, "model": self.model,
+  1158→                    "resolved_model": getattr(adapter, "resolved_model", None),
+  1159→                    "resolved_provider": getattr(adapter, "resolved_provider", None),
+  1160→                    "resolved_api_base": getattr(adapter, "resolved_api_base", None),
+  1161→                    "status": self.status, "events": events, "next": len(self.events)}
+  1162→
+  1163→    # -- lifecycle ----------------------------------------------------------
+  1164→    def submit(self, message: str) -> None:
+  1165→        self.updated = time.time()
+  1166→        self.inbox.put(message)
+  1167→
+  1168→    def interrupt(self) -> bool:
+  1169→        #   stop the current turn (called from the HTTP thread). No-op unless running.
+  1170→        if self.status != "running" or self.adapter is None:
+  1171→            return False
+  1172→        self._interrupting = True
+  1173→        try:
+  1174→            self.adapter.interrupt()
+  1175→        except Exception:
+  1176→            pass
+  1177→        return True
+  1178→
+  1179→    def close(self) -> None:
+  1180→        self.closed = True
+  1181→        self.inbox.put(None)
+  1182→
+  1183→    def _run(self) -> None:
+  1184→        adapter = _make_adapter(self.tier, self.workspace, self.model,
+  1185→                                self.workspace_id, self.system_prompt)
+  1186→        self.adapter = adapter
+  1187→        # Tier 3 — give the adapter a back-reference so it can register the
+  1188→        # conscious tool registry on the owning session (conscious_id/agent_id).
+  1189→        adapter._session = self
+  1190→        try:
+  1191→            adapter.open()
+  1192→        except Exception as exc:
+  1193→            self._set_status("error", detail=f"agent init failed: {_clip(str(exc), 300)}")
+  1194→            return
+  1195→        self._set_status("idle")
+  1196→        while not self.closed:
+  1197→            try:
+  1198→                msg = self.inbox.get(timeout=30)
+  1199→            except queue.Empty:
+  1200→                if time.time() - self.updated > SESSION_TTL_S:
+  1201→                    break
+  1202→                continue
+  1203→            if msg is None:
+  1204→                break
+  1205→            self._interrupting = False
+  1206→            self._set_status("running")
+  1207→            self.emit({"type": "user", "text": msg})
+  1208→            # Phase 2 — cost-ceiling turn-boundary check (§14 hard enforcement).
+  1209→            # If over ceiling before the turn even starts, refuse to run and
+  1210→            # emit a cost.exceeded event. Mid-turn abort needs deeper SDK hooks
+  1211→            # (callback handler inspecting each tool result); the turn-boundary
+  1212→            # check is the safe baseline that works in both adapters.
+  1213→            if self.conscious_id and not _cost_turn_ok(self.conscious_id):
+  1214→                spent, ceiling = _cost_figures(self.conscious_id)
+  1215→                self.emit({"type": "status", "state": "idle",
+  1216→                           "detail": f"cost ceiling exceeded (spent=${spent:.4f}, ceiling=${ceiling:.4f})"})
+  1217→                try:
+  1218→                    import conscious_db
+  1219→                    conscious_db.append_event(
+  1220→                        self.conscious_id, "cost.exceeded",
+  1221→                        f"turn refused: spent=${spent:.4f} ceiling=${ceiling:.4f}",
+  1222→                        author=self.agent_id)
+  1223→                except Exception:
+  1224→                    pass
+  1225→                self._set_status("idle", detail="cost ceiling exceeded")
+  1226→                continue
+  1227→            try:
+  1228→                adapter.turn(msg, self.emit)
+  1229→                if self._interrupting:
+  1230→                    self._set_status("idle", detail="interrupted")
+  1231→                else:
+  1232→                    self._set_status("idle")
+  1233→            except Exception as exc:
+  1234→                if self._interrupting:
+  1235→                    self._set_status("idle", detail="interrupted")
+  1236→                else:
+  1237→                    self._set_status("error", detail=_clip(str(exc), 300))
+  1238→            finally:
+  1239→                self._interrupting = False
+  1240→        adapter.close()
+  1241→
+  1242→
+  1243→_sessions: dict[str, AgentSession] = {}
+  1244→_sessions_lock = threading.Lock()
+  1245→
+  1246→
+  1247→def _sweep_locked() -> None:
+  1248→    now = time.time()
+  1249→    expired = [sid for sid, s in _sessions.items()
+  1250→               if now - s.updated > SESSION_TTL_S or s.closed]
+  1251→    for sid in expired:
+  1252→        s = _sessions.pop(sid)
+  1253→        s.close()
+  1254→        shutil.rmtree(s.workspace, ignore_errors=True)
+  1255→
+  1256→
+  1257→def get_session(session_id: str) -> AgentSession | None:
+  1258→    with _sessions_lock:
+  1259→        _sweep_locked()
+  1260→        return _sessions.get(session_id)
+  1261→
+  1262→
+  1263→def _normalize_model_for_compare(model: str | None) -> str | None:
+  1264→    """Normalize a model string for comparison so that equivalent models from
+  1265→    different formats compare equal. E.g. all of these -> "kimi-k2.6":
+  1266→      "kimi-k2.6", "openai/kimi-k2.6", "privatemodeai/kimi-k2.6"
+  1267→    Returns None if model is None/empty.
+  1268→    """
+  1269→    if not model:
+  1270→        return None
+  1271→    m = model.strip()
+  1272→    if not m:
+  1273→        return None
+  1274→    # Strip the litellm "openai/" prefix and any "provider/" prefix
+  1275→    parts = m.split("/")
+  1276→    return parts[-1].lower()
+  1277→
+  1278→
+  1279→def get_or_create(session_id: str | None = None,
+  1280→                  model: str | None = None,
+  1281→                  workspace_id: str | None = None,
+  1282→                  conscious_id: str | None = None,
+  1283→                  agent_id: str | None = None,
+  1284→                  chat_session_id: str | None = None) -> AgentSession:
+  1285→    """Reuse a live session by id, or start a new one (CapacityError if full).
+  1286→    `model` (optional) selects which model/tier drives a NEW session.
+  1287→    `workspace_id` (optional) links the session to a user workspace sandbox.
+  1288→    `conscious_id` + `agent_id` (optional, Tier 3) bind the session to a
+  1289→    Conscious agent row so the conscious_* tools resolve context.
+  1290→    `chat_session_id` (optional) links this agent session to a persistent
+  1291→    chat session for event persistence.
+  1292→    """
+  1293→    tier = tier_for_model(model)
+  1294→    if tier is None:
+  1295→        raise RuntimeError("no agent tier available for the requested model")
+  1296→    with _sessions_lock:
+  1297→        _sweep_locked()
+  1298→        if session_id and session_id in _sessions:
+  1299→            return _sessions[session_id]
+  1300→        # Reuse existing agent session linked to this chat_session_id — BUT
+  1301→        # only if the model hasn't changed. If the user switched models mid-
+  1302→        # conversation, we must create a fresh agent session so the new model
+  1303→        # actually takes effect (the old session's adapter is pinned to the
+  1304→        # old model). The old session is closed to free its resources.
+  1305→        if chat_session_id:
+  1306→            existing = None
+  1307→            for s in _sessions.values():
+  1308→                if s.chat_session_id == chat_session_id:
+  1309→                    existing = s
+  1310→                    break
+  1311→            if existing is not None:
+  1312→                # Normalize both model strings for comparison so
+  1313→                # "kimi-k2.6" and "openai/kimi-k2.6" are treated as the same.
+  1314→                norm_existing = _normalize_model_for_compare(existing.model)
+  1315→                norm_new = _normalize_model_for_compare(model)
+  1316→                if norm_new is None or norm_existing == norm_new:
+  1317→                    return existing
+  1318→                # Model changed — close the old session and fall through to
+  1319→                # create a new one with the new model.
+  1320→                existing.close()
+  1321→                _sessions.pop(existing.id, None)
+  1322→        if len(_sessions) >= MAX_SESSIONS:
+  1323→            raise CapacityError(f"max {MAX_SESSIONS} concurrent agent sessions")
+  1324→        # resolve workspace_id to a filesystem path
+  1325→        workspace_path = None
+  1326→        if workspace_id:
+  1327→            import db
+  1328→            import github_integration
+  1329→            # repair sandbox if missing (Space restart wiped /data/)
+  1330→            github_integration.ensure_workspace_sandbox(workspace_id)
+  1331→            ws = db.get_workspace(workspace_id)
+  1332→            if ws and ws.get("sandbox_path"):
+  1333→                workspace_path = Path(ws["sandbox_path"])
+  1334→        s = AgentSession(tier, model, workspace_path=workspace_path,
+  1335→                         workspace_id=workspace_id,
+  1336→                         conscious_id=conscious_id, agent_id=agent_id,
+  1337→                         chat_session_id=chat_session_id)
+  1338→        _sessions[s.id] = s
+  1339→        return s
+  1340→
+  1341→
+  1342→# ---------------------------------------------------------------------------
+  1343→# Phase 2 — cost-ceiling turn-boundary helpers (§14 hard enforcement)
+  1344→# ---------------------------------------------------------------------------
+  1345→
+  1346→def _cost_figures(conscious_id: str) -> tuple[float, float]:
+  1347→    """Return (spent, ceiling) for a conscious. ceiling=0 means infinite."""
+  1348→    try:
+  1349→        import conscious_db
+  1350→        c = conscious_db.get_conscious(conscious_id) or {}
+  1351→        return (float(c.get("cost_spent_usd", 0) or 0),
+  1352→                float(c.get("cost_ceiling_usd", 0) or 0))
+  1353→    except Exception:
+  1354→        return (0.0, 0.0)
+  1355→
+  1356→
+  1357→def _cost_turn_ok(conscious_id: str) -> bool:
+  1358→    """True if the conscious is under its cost ceiling (or ceiling=0=infinite)."""
+  1359→    spent, ceiling = _cost_figures(conscious_id)
+  1360→    if ceiling <= 0:
+  1361→        return True
+  1362→    return spent < ceiling
+  1363→

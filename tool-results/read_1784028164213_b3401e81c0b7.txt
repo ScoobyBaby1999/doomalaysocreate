@@ -1,0 +1,689 @@
+     1→"""SQLite database for GitHub integration: users, workspaces, push logs, registry.
+     2→
+     3→All state is stored in a single ``doomalaysocreate.db`` file in the service's data directory.
+     4→The schema is created/migrated on first access via ``init_db()``.  Thread-safe:
+     5→SQLite is accessed with ``check_same_thread=False`` and all writes go through a
+     6→serializing ``threading.Lock``.
+     7→
+     8→stdlib-only at import time; ``cryptography`` (for token encryption) is only
+     9→imported when actually encrypting/decrypting tokens.
+    10→"""
+    11→from __future__ import annotations
+    12→
+    13→import json
+    14→import os
+    15→import sqlite3
+    16→import threading
+    17→import time
+    18→import uuid
+    19→from pathlib import Path
+    20→
+    21→DB_PATH = Path(os.environ.get("DOOMALAYSOCREATE_DB_PATH", "/data/doomalaysocreate.db"))
+    22→
+    23→_write_lock = threading.Lock()
+    24→_conn: sqlite3.Connection | None = None
+    25→
+    26→
+    27→def _db() -> sqlite3.Connection:
+    28→    global _conn
+    29→    if _conn is None:
+    30→        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    31→        _conn.row_factory = sqlite3.Row
+    32→        _conn.execute("PRAGMA journal_mode=WAL")
+    33→        _conn.execute("PRAGMA foreign_keys=ON")
+    34→    return _conn
+    35→
+    36→
+    37→def init_db() -> None:
+    38→    """Create tables if they don't exist.  Runs migrations for existing tables."""
+    39→    db = _db()
+    40→    db.executescript(SCHEMA)
+    41→    db.commit()
+    42→    # schema migrations for existing databases
+    43→    _migrate(db)
+    44→
+    45→
+    46→def _migrate(db: sqlite3.Connection) -> None:
+    47→    """Add columns that may not exist in older DBs."""
+    48→    for col in (
+    49→        "hf_refresh_token_encrypted",
+    50→        "hf_token_expires_at",
+    51→    ):
+    52→        try:
+    53→            db.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+    54→        except sqlite3.OperationalError:
+    55→            pass
+    56→    # source_branches is on workspaces, not users
+    57→    try:
+    58→        db.execute("ALTER TABLE workspaces ADD COLUMN source_branches TEXT")
+    59→    except sqlite3.OperationalError:
+    60→        pass
+    61→    # Phase 3 — last_synced_at on conscious (for stale HF Dataset sync detection)
+    62→    try:
+    63→        db.execute("ALTER TABLE conscious ADD COLUMN last_synced_at TEXT")
+    64→    except sqlite3.OperationalError:
+    65→        pass
+    66→    # add 'zai' to conscious_agent tier CHECK constraint
+    67→    try:
+    68→        db.executescript("""
+    69→            PRAGMA foreign_keys=OFF;
+    70→            CREATE TABLE conscious_agent_v2 (
+    71→                id                TEXT PRIMARY KEY,
+    72→                conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+    73→                role              TEXT NOT NULL,
+    74→                model             TEXT NOT NULL,
+    75→                tier              TEXT NOT NULL CHECK (tier IN ('claude','open')),
+    76→                status            TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running','waiting','done','failed')),
+    77→                worktree_path     TEXT,
+    78→                branch            TEXT,
+    79→                parent_agent_id   TEXT,
+    80→                subscribed_events TEXT NOT NULL DEFAULT '[]',
+    81→                is_orchestrator   INTEGER NOT NULL DEFAULT 0,
+    82→                created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    83→                updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    84→            );
+    85→            INSERT INTO conscious_agent_v2 SELECT * FROM conscious_agent;
+    86→            DROP TABLE conscious_agent;
+    87→            ALTER TABLE conscious_agent_v2 RENAME TO conscious_agent;
+    88→            CREATE INDEX IF NOT EXISTS idx_conscious_agent_conscious ON conscious_agent(conscious_id);
+    89→            CREATE INDEX IF NOT EXISTS idx_conscious_agent_orchestrator ON conscious_agent(conscious_id, is_orchestrator);
+    90→            PRAGMA foreign_keys=ON;
+    91→        """)
+    92→    except sqlite3.OperationalError:
+    93→        pass
+    94→    # migrate sandbox_path from /tmp to /data for persist across Space restarts
+    95→    try:
+    96→        new_base = "/data/workspaces/"
+    97→        db.execute(
+    98→            "UPDATE workspaces SET sandbox_path = ? || substr(sandbox_path, 16) "
+    99→            "WHERE sandbox_path LIKE '/tmp/workspace/%'",
+   100→            (new_base,))
+   101→        db.execute(
+   102→            "UPDATE workspaces SET sandbox_path = ? || substr(sandbox_path, 18) "
+   103→            "WHERE sandbox_path LIKE '/tmp/workspaces/%'",
+   104→            (new_base,))
+   105→    except sqlite3.OperationalError:
+   106→        pass
+   107→    db.commit()
+   108→
+   109→
+   110→SCHEMA = """
+   111→CREATE TABLE IF NOT EXISTS users (
+   112→    id              TEXT PRIMARY KEY,
+   113→    github_id       INTEGER UNIQUE,
+   114→    github_username TEXT,
+   115→    github_token_encrypted TEXT,
+   116→    hf_id           TEXT,
+   117→    hf_username     TEXT,
+   118→    hf_token_encrypted TEXT,
+   119→    hf_refresh_token_encrypted TEXT,
+   120→    hf_token_expires_at TEXT,
+   121→    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+   122→    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+   123→);
+   124→
+   125→CREATE TABLE IF NOT EXISTS workspaces (
+   126→    id              TEXT PRIMARY KEY,
+   127→    user_id         TEXT NOT NULL REFERENCES users(id),
+   128→    source_repo     TEXT,
+   129→    source_branch   TEXT,
+   130→    source_branches TEXT,
+   131→    current_branch  TEXT NOT NULL DEFAULT 'main',
+   132→    sandbox_path    TEXT NOT NULL,
+   133→    hf_space_id     TEXT,
+   134→    auto_sync       INTEGER NOT NULL DEFAULT 0,
+   135→    visibility      TEXT NOT NULL DEFAULT 'private'
+   136→                    CHECK (visibility IN ('public', 'private')),
+   137→    title           TEXT NOT NULL,
+   138→    description     TEXT DEFAULT '',
+   139→    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+   140→    last_modified   TEXT NOT NULL DEFAULT (datetime('now'))
+   141→);
+   142→
+   143→CREATE TABLE IF NOT EXISTS push_logs (
+   144→    id              TEXT PRIMARY KEY,
+   145→    workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+   146→    user_id         TEXT NOT NULL REFERENCES users(id),
+   147→    target_repo     TEXT NOT NULL,
+   148→    target_branch   TEXT NOT NULL,
+   149→    commit_sha      TEXT NOT NULL,
+   150→    commit_message  TEXT,
+   151→    push_type       TEXT NOT NULL CHECK (push_type IN ('direct', 'pr')),
+   152→    pr_number       INTEGER,
+   153→    pr_url          TEXT,
+   154→    approved_by_user INTEGER NOT NULL DEFAULT 0,
+   155→    auto_approved   INTEGER NOT NULL DEFAULT 0,
+   156→    files_changed   INTEGER,
+   157→    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+   158→);
+   159→
+   160→CREATE TABLE IF NOT EXISTS registry (
+   161→    workspace_id    TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+   162→    indexed_at      TEXT NOT NULL DEFAULT (datetime('now')),
+   163→    owner_username  TEXT NOT NULL,
+   164→    owner_avatar    TEXT DEFAULT '',
+   165→    title           TEXT NOT NULL,
+   166→    description     TEXT DEFAULT '',
+   167→    source_repo     TEXT,
+   168→    hf_space_url    TEXT
+   169→);
+   170→
+   171→CREATE INDEX IF NOT EXISTS idx_workspaces_user ON workspaces(user_id);
+   172→CREATE INDEX IF NOT EXISTS idx_push_logs_workspace ON push_logs(workspace_id);
+   173→CREATE INDEX IF NOT EXISTS idx_registry_indexed ON registry(indexed_at);
+   174→
+   175→-- ===========================================================================
+   176→-- Tier 3 — Conscious: Multi-Agent Shared-Brain Architecture (Phase 1)
+   177→-- 7 new tables, all prefixed conscious_. See TIER3_PLAN.md §9 for the spec.
+   178→-- FK ordering note: conscious_proposal is defined BEFORE conscious_blackboard_entry
+   179→-- because the latter references proposal(id). SQLite allows forward refs within
+   180→-- the same executescript as long as the referenced table exists by the time the
+   181→-- script finishes — confirmed safe.
+   182→-- ===========================================================================
+   183→
+   184→CREATE TABLE IF NOT EXISTS conscious (
+   185→    id                    TEXT PRIMARY KEY,
+   186→    workspace_id          TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+   187→    owner_user_id         TEXT NOT NULL REFERENCES users(id),
+   188→    title                 TEXT NOT NULL DEFAULT 'Untitled Conscious',
+   189→    goal                  TEXT NOT NULL DEFAULT '',
+   190→    orchestrator_agent_id TEXT,
+   191→    cost_ceiling_usd      REAL NOT NULL DEFAULT 0,
+   192→    cost_spent_usd        REAL NOT NULL DEFAULT 0,
+   193→    brain_commit_policy   TEXT NOT NULL DEFAULT 'on' CHECK (brain_commit_policy IN ('on','off')),
+   194→    graphiti_enabled      INTEGER NOT NULL DEFAULT 0,
+   195→    max_agents            INTEGER NOT NULL DEFAULT 8,
+   196→    status                TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused','archived')),
+   197→    last_synced_at        TEXT,                          -- Phase 3: last HF Dataset brain sync timestamp (null = never)
+   198→    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+   199→    updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+   200→);
+   201→CREATE INDEX IF NOT EXISTS idx_conscious_workspace ON conscious(workspace_id);
+   202→CREATE INDEX IF NOT EXISTS idx_conscious_owner ON conscious(owner_user_id);
+   203→
+   204→CREATE TABLE IF NOT EXISTS conscious_agent (
+   205→    id                TEXT PRIMARY KEY,
+   206→    conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+   207→    role              TEXT NOT NULL,
+   208→    model             TEXT NOT NULL,
+   209→    tier              TEXT NOT NULL CHECK (tier IN ('claude','open')),
+   210→    status            TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running','waiting','done','failed')),
+   211→    worktree_path     TEXT,
+   212→    branch            TEXT,
+   213→    parent_agent_id   TEXT REFERENCES conscious_agent(id),
+   214→    subscribed_events TEXT NOT NULL DEFAULT '[]',
+   215→    is_orchestrator   INTEGER NOT NULL DEFAULT 0,
+   216→    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+   217→    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+   218→);
+   219→CREATE INDEX IF NOT EXISTS idx_conscious_agent_conscious ON conscious_agent(conscious_id);
+   220→CREATE INDEX IF NOT EXISTS idx_conscious_agent_orchestrator ON conscious_agent(conscious_id, is_orchestrator);
+   221→
+   222→-- conscious_proposal is defined BEFORE conscious_blackboard_entry (forward FK).
+   223→CREATE TABLE IF NOT EXISTS conscious_proposal (
+   224→    id                      TEXT PRIMARY KEY,
+   225→    conscious_id            TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+   226→    proposer_agent_id       TEXT NOT NULL REFERENCES conscious_agent(id),
+   227→    section                 TEXT NOT NULL,
+   228→    key                     TEXT NOT NULL,
+   229→    value                   TEXT NOT NULL,
+   230→    reason                  TEXT NOT NULL DEFAULT '',
+   231→    status                  TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','committed','rejected','expired')),
+   232→    committed_by_agent_id   TEXT REFERENCES conscious_agent(id),
+   233→    rejection_reason        TEXT,
+   234→    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+   235→    resolved_at             TEXT
+   236→);
+   237→CREATE INDEX IF NOT EXISTS idx_proposal_conscious ON conscious_proposal(conscious_id, status);
+   238→
+   239→CREATE TABLE IF NOT EXISTS conscious_blackboard_entry (
+   240→    id                      TEXT PRIMARY KEY,
+   241→    conscious_id            TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+   242→    section                 TEXT NOT NULL,
+   243→    key                     TEXT NOT NULL,
+   244→    value                   TEXT NOT NULL,
+   245→    author_agent_id         TEXT NOT NULL REFERENCES conscious_agent(id),
+   246→    committed_by_agent_id   TEXT NOT NULL REFERENCES conscious_agent(id),
+   247→    proposal_id             TEXT REFERENCES conscious_proposal(id),
+   248→    version                 INTEGER NOT NULL,
+   249→    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+   250→    UNIQUE(conscious_id, section, key, version)
+   251→);
+   252→CREATE INDEX IF NOT EXISTS idx_bb_conscious ON conscious_blackboard_entry(conscious_id);
+   253→CREATE INDEX IF NOT EXISTS idx_bb_section_key ON conscious_blackboard_entry(conscious_id, section, key, version);
+   254→
+   255→CREATE TABLE IF NOT EXISTS conscious_drawer_entry (
+   256→    id                TEXT PRIMARY KEY,
+   257→    conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+   258→    invoke_id         TEXT NOT NULL,
+   259→    from_agent_id     TEXT NOT NULL REFERENCES conscious_agent(id),
+   260→    to_agent_id       TEXT NOT NULL REFERENCES conscious_agent(id),
+   261→    kind              TEXT NOT NULL CHECK (kind IN ('invoke','delegate')),
+   262→    task              TEXT NOT NULL,
+   263→    inputs            TEXT NOT NULL DEFAULT '{}',
+   264→    result            TEXT NOT NULL DEFAULT '',
+   265→    result_path       TEXT,
+   266→    files_path        TEXT,
+   267→    status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','done','failed','timeout')),
+   268→    started_at        TEXT,
+   269→    completed_at      TEXT,
+   270→    error             TEXT,
+   271→    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+   272→);
+   273→CREATE INDEX IF NOT EXISTS idx_drawer_conscious ON conscious_drawer_entry(conscious_id, status);
+   274→CREATE INDEX IF NOT EXISTS idx_drawer_to_agent ON conscious_drawer_entry(to_agent_id, status);
+   275→
+   276→CREATE TABLE IF NOT EXISTS conscious_message (
+   277→    id              TEXT PRIMARY KEY,
+   278→    conscious_id    TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+   279→    from_agent_id   TEXT NOT NULL REFERENCES conscious_agent(id),
+   280→    to_agent_id     TEXT,
+   281→    body            TEXT NOT NULL,
+   282→    read_at         TEXT,
+   283→    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+   284→);
+   285→CREATE INDEX IF NOT EXISTS idx_msg_conscious ON conscious_message(conscious_id, created_at);
+   286→CREATE INDEX IF NOT EXISTS idx_msg_to_agent ON conscious_message(to_agent_id, read_at);
+   287→
+   288→CREATE TABLE IF NOT EXISTS conscious_task (
+   289→    id                TEXT PRIMARY KEY,
+   290→    conscious_id      TEXT NOT NULL REFERENCES conscious(id) ON DELETE CASCADE,
+   291→    title             TEXT NOT NULL,
+   292→    description       TEXT NOT NULL DEFAULT '',
+   293→    assignee_agent_id TEXT REFERENCES conscious_agent(id),
+   294→    status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','claimed','in_progress','done','failed','blocked')),
+   295→    depends_on        TEXT NOT NULL DEFAULT '[]',
+   296→    cost_ceiling_usd  REAL,
+   297→    cost_spent_usd    REAL NOT NULL DEFAULT 0,
+   298→    claimed_at        TEXT,
+   299→    completed_at      TEXT,
+   300→    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+   301→    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+   302→);
+   303→CREATE INDEX IF NOT EXISTS idx_task_conscious ON conscious_task(conscious_id, status);
+   304→
+   305→-- Chat sessions (persistent agent chat history)
+   306→CREATE TABLE IF NOT EXISTS chat_sessions (
+   307→    id TEXT PRIMARY KEY,
+   308→    title TEXT NOT NULL DEFAULT 'New Chat',
+   309→    model TEXT,
+   310→    workspace_id TEXT,
+   311→    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+   312→    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   313→);
+   314→
+   315→CREATE TABLE IF NOT EXISTS chat_events (
+   316→    id INTEGER PRIMARY KEY AUTOINCREMENT,
+   317→    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+   318→    seq INTEGER NOT NULL,
+   319→    event_type TEXT NOT NULL,
+   320→    content TEXT NOT NULL DEFAULT '',
+   321→    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+   322→);
+   323→CREATE INDEX IF NOT EXISTS idx_chat_events_session_seq ON chat_events(session_id, seq);
+   324→"""
+   325→
+   326→
+   327→# ---------------------------------------------------------------------------
+   328→# Users
+   329→# ---------------------------------------------------------------------------
+   330→
+   331→def _gen_id() -> str:
+   332→    return uuid.uuid4().hex[:16]
+   333→
+   334→
+   335→def upsert_user(*, user_id: str | None = None, github_id: int | None = None, github_username: str | None = None,
+   336→                github_token_encrypted: str | None = None,
+   337→                hf_id: str | None = None, hf_username: str | None = None,
+   338→                hf_token_encrypted: str | None = None,
+   339→                hf_refresh_token_encrypted: str | None = None,
+   340→                hf_token_expires_at: str | None = None) -> dict:
+   341→    """Create or update a user by user_id (internal UUID), github_id, or hf_id.
+   342→    Returns the user row. user_id takes precedence for lookup."""
+   343→    db = _db()
+   344→    now = _iso_now()
+   345→    with _write_lock:
+   346→        # find existing
+   347→        user = None
+   348→        if user_id is not None:
+   349→            row = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+   350→            if row:
+   351→                user = dict(row)
+   352→        if user is None and github_id is not None:
+   353→            row = db.execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
+   354→            if row:
+   355→                user = dict(row)
+   356→        if user is None and hf_id is not None:
+   357→            row = db.execute("SELECT * FROM users WHERE hf_id = ?", (hf_id,)).fetchone()
+   358→            if row:
+   359→                user = dict(row)
+   360→        if user is None:
+   361→            uid = user_id if user_id else _gen_id()
+   362→            db.execute(
+   363→                "INSERT INTO users (id, github_id, github_username, github_token_encrypted, "
+   364→                "hf_id, hf_username, hf_token_encrypted, "
+   365→                "hf_refresh_token_encrypted, hf_token_expires_at, "
+   366→                "created_at, updated_at) "
+   367→                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+   368→                (uid, github_id, github_username, github_token_encrypted,
+   369→                 hf_id, hf_username, hf_token_encrypted,
+   370→                 hf_refresh_token_encrypted, hf_token_expires_at, now, now))
+   371→            db.commit()
+   372→            return get_user(uid)
+   373→        # update
+   374→        updates = []
+   375→        params = []
+   376→        if github_id is not None:
+   377→            updates.append("github_id = ?")
+   378→            params.append(github_id)
+   379→        if github_username is not None:
+   380→            updates.append("github_username = ?")
+   381→            params.append(github_username)
+   382→        if github_token_encrypted is not None:
+   383→            updates.append("github_token_encrypted = ?")
+   384→            params.append(github_token_encrypted)
+   385→        if hf_id is not None:
+   386→            updates.append("hf_id = ?")
+   387→            params.append(hf_id)
+   388→        if hf_username is not None:
+   389→            updates.append("hf_username = ?")
+   390→            params.append(hf_username)
+   391→        if hf_token_encrypted is not None:
+   392→            updates.append("hf_token_encrypted = ?")
+   393→            params.append(hf_token_encrypted)
+   394→        if hf_refresh_token_encrypted is not None:
+   395→            updates.append("hf_refresh_token_encrypted = ?")
+   396→            params.append(hf_refresh_token_encrypted)
+   397→        if hf_token_expires_at is not None:
+   398→            updates.append("hf_token_expires_at = ?")
+   399→            params.append(hf_token_expires_at)
+   400→        if updates:
+   401→            updates.append("updated_at = ?")
+   402→            params.append(now)
+   403→            params.append(user["id"])
+   404→            db.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", params)
+   405→            db.commit()
+   406→    return get_user(user["id"])
+   407→
+   408→
+   409→def get_user(user_id: str) -> dict | None:
+   410→    row = _db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+   411→    return dict(row) if row else None
+   412→
+   413→
+   414→def get_user_by_github_id(github_id: int) -> dict | None:
+   415→    row = _db().execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
+   416→    return dict(row) if row else None
+   417→
+   418→
+   419→def get_user_by_hf_id(hf_id: str) -> dict | None:
+   420→    row = _db().execute("SELECT * FROM users WHERE hf_id = ?", (hf_id,)).fetchone()
+   421→    return dict(row) if row else None
+   422→
+   423→
+   424→def get_user_by_session_id(session_id: str) -> dict | None:
+   425→    """Session ID IS the user ID for now (simple session model)."""
+   426→    return get_user(session_id)
+   427→
+   428→
+   429→def delete_github_token(user_id: str) -> None:
+   430→    with _write_lock:
+   431→        db = _db()
+   432→        db.execute("UPDATE users SET github_id=NULL, github_username=NULL, "
+   433→                   "github_token_encrypted=NULL, updated_at=? WHERE id=?",
+   434→                   (_iso_now(), user_id))
+   435→        db.commit()
+   436→
+   437→
+   438→# ---------------------------------------------------------------------------
+   439→# Workspaces
+   440→# ---------------------------------------------------------------------------
+   441→
+   442→def create_workspace(user_id: str, *, title: str, source_repo: str | None = None,
+   443→                     source_branch: str | None = None,
+   444→                     source_branches: list[str] | None = None,
+   445→                     visibility: str = "private",
+   446→                     description: str = "", auto_sync: bool = False,
+   447→                     sandbox_path: str = "", hf_space_id: str | None = None) -> dict:
+   448→    db = _db()
+   449→    wid = _gen_id()
+   450→    now = _iso_now()
+   451→    branches_json = json.dumps(source_branches) if source_branches else None
+   452→    with _write_lock:
+   453→        db.execute(
+   454→            "INSERT INTO workspaces (id, user_id, source_repo, source_branch, "
+   455→            "source_branches, sandbox_path, hf_space_id, auto_sync, visibility, "
+   456→            "title, description, created_at, last_modified) VALUES "
+   457→            "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+   458→            (wid, user_id, source_repo, source_branch, branches_json,
+   459→             sandbox_path, hf_space_id,
+   460→             int(auto_sync), visibility, title, description, now, now))
+   461→        db.commit()
+   462→    return get_workspace(wid)
+   463→
+   464→
+   465→def get_workspace(workspace_id: str) -> dict | None:
+   466→    row = _db().execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+   467→    return dict(row) if row else None
+   468→
+   469→
+   470→def list_user_workspaces(user_id: str) -> list[dict]:
+   471→    rows = _db().execute(
+   472→        "SELECT * FROM workspaces WHERE user_id = ? ORDER BY last_modified DESC",
+   473→        (user_id,)).fetchall()
+   474→    return [dict(r) for r in rows]
+   475→
+   476→
+   477→def update_workspace(workspace_id: str, **fields) -> dict | None:
+   478→    allowed = {"title", "description", "visibility", "current_branch",
+   479→               "hf_space_id", "auto_sync", "last_modified", "sandbox_path",
+   480→               "source_branches"}
+   481→    updates = []
+   482→    params = []
+   483→    for k, v in fields.items():
+   484→        if k not in allowed:
+   485→            continue
+   486→        if k == "auto_sync":
+   487→            v = int(v)
+   488→        elif k == "source_branches" and isinstance(v, list):
+   489→            v = json.dumps(v)
+   490→        updates.append(f"{k} = ?")
+   491→        params.append(v)
+   492→    if not updates:
+   493→        return get_workspace(workspace_id)
+   494→    updates.append("last_modified = ?")
+   495→    params.append(_iso_now())
+   496→    params.append(workspace_id)
+   497→    with _write_lock:
+   498→        _db().execute(f"UPDATE workspaces SET {', '.join(updates)} WHERE id = ?", params)
+   499→        _db().commit()
+   500→    return get_workspace(workspace_id)
+   501→
+   502→
+   503→def delete_workspace(workspace_id: str) -> bool:
+   504→    with _write_lock:
+   505→        db = _db()
+   506→        db.execute("DELETE FROM registry WHERE workspace_id = ?", (workspace_id,))
+   507→        cur = db.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
+   508→        db.commit()
+   509→        return cur.rowcount > 0
+   510→
+   511→
+   512→# ---------------------------------------------------------------------------
+   513→# Push logs
+   514→# ---------------------------------------------------------------------------
+   515→
+   516→def log_push(user_id: str, workspace_id: str, *, target_repo: str, target_branch: str,
+   517→             commit_sha: str, commit_message: str = "", push_type: str = "direct",
+   518→             pr_number: int | None = None, pr_url: str | None = None,
+   519→             approved_by_user: bool = False, auto_approved: bool = False,
+   520→             files_changed: int = 0) -> dict:
+   521→    db = _db()
+   522→    pid = _gen_id()
+   523→    with _write_lock:
+   524→        db.execute(
+   525→            "INSERT INTO push_logs (id, workspace_id, user_id, target_repo, target_branch, "
+   526→            "commit_sha, commit_message, push_type, pr_number, pr_url, approved_by_user, "
+   527→            "auto_approved, files_changed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+   528→            (pid, workspace_id, user_id, target_repo, target_branch, commit_sha,
+   529→             commit_message, push_type, pr_number, pr_url, int(approved_by_user),
+   530→             int(auto_approved), files_changed, _iso_now()))
+   531→        db.commit()
+   532→    row = _db().execute("SELECT * FROM push_logs WHERE id = ?", (pid,)).fetchone()
+   533→    return dict(row) if row else {}
+   534→
+   535→
+   536→def list_push_logs(workspace_id: str, limit: int = 50) -> list[dict]:
+   537→    rows = _db().execute(
+   538→        "SELECT * FROM push_logs WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?",
+   539→        (workspace_id, limit)).fetchall()
+   540→    return [dict(r) for r in rows]
+   541→
+   542→
+   543→# ---------------------------------------------------------------------------
+   544→# Registry (public spaces)
+   545→# ---------------------------------------------------------------------------
+   546→
+   547→def register_public_workspace(workspace_id: str, *, owner_username: str,
+   548→                              title: str, description: str = "",
+   549→                              source_repo: str | None = None,
+   550→                              hf_space_url: str | None = None,
+   551→                              owner_avatar: str = "") -> dict:
+   552→    db = _db()
+   553→    with _write_lock:
+   554→        db.execute(
+   555→            "INSERT OR REPLACE INTO registry (workspace_id, indexed_at, owner_username, "
+   556→            "owner_avatar, title, description, source_repo, hf_space_url) "
+   557→            "VALUES (?,?,?,?,?,?,?,?)",
+   558→            (workspace_id, _iso_now(), owner_username, owner_avatar,
+   559→             title, description, source_repo, hf_space_url))
+   560→        db.commit()
+   561→    row = _db().execute("SELECT * FROM registry WHERE workspace_id = ?",
+   562→                        (workspace_id,)).fetchone()
+   563→    return dict(row) if row else {}
+   564→
+   565→
+   566→def unregister_public_workspace(workspace_id: str) -> None:
+   567→    with _write_lock:
+   568→        _db().execute("DELETE FROM registry WHERE workspace_id = ?", (workspace_id,))
+   569→        _db().commit()
+   570→
+   571→
+   572→def list_public_workspaces(*, page: int = 1, per_page: int = 20,
+   573→                           sort: str = "recent", search: str = "") -> dict:
+   574→    db = _db()
+   575→    where = "WHERE 1=1"
+   576→    params: list = []
+   577→    if search:
+   578→        where += " AND (r.title LIKE ? ESCAPE '\\' OR r.description LIKE ? ESCAPE '\\' OR r.owner_username LIKE ? ESCAPE '\\')"
+   579→        # escape LIKE wildcards to prevent pattern injection
+   580→        escaped = search.replace('%', '\\%').replace('_', '\\_')
+   581→        q = "%" + escaped + "%"
+   582→        params += [q, q, q]
+   583→    order = "r.indexed_at DESC" if sort == "recent" else "r.indexed_count DESC"
+   584→    #   indexed_count doesn't exist yet — fall back to indexed_at
+   585→    order = "r.indexed_at DESC"
+   586→    total = db.execute(f"SELECT COUNT(*) FROM registry r {where}", params).fetchone()[0]
+   587→    offset = (max(1, page) - 1) * per_page
+   588→    rows = db.execute(
+   589→        f"SELECT r.* FROM registry r {where} ORDER BY {order} LIMIT ? OFFSET ?",
+   590→        params + [per_page, offset]).fetchall()
+   591→    return {"items": [dict(r) for r in rows], "total": total,
+   592→            "page": page, "per_page": per_page}
+   593→
+   594→
+   595→# ---------------------------------------------------------------------------
+   596→# Helpers
+   597→# ---------------------------------------------------------------------------
+   598→
+   599→def _iso_now() -> str:
+   600→    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+   601→
+   602→
+   603→# ---------------------------------------------------------------------------
+   604→# Chat sessions
+   605→# ---------------------------------------------------------------------------
+   606→
+   607→def create_chat_session(*, title: str = "New Chat", model: str | None = None,
+   608→                        workspace_id: str | None = None) -> dict:
+   609→    db = _db()
+   610→    sid = _gen_id()
+   611→    now = _iso_now()
+   612→    with _write_lock:
+   613→        db.execute(
+   614→            "INSERT INTO chat_sessions (id, title, model, workspace_id, created_at, updated_at) "
+   615→            "VALUES (?, ?, ?, ?, ?, ?)",
+   616→            (sid, title, model, workspace_id, now, now))
+   617→        db.commit()
+   618→    return get_chat_session(sid)
+   619→
+   620→
+   621→def get_chat_session(session_id: str) -> dict | None:
+   622→    row = _db().execute("SELECT * FROM chat_sessions WHERE id = ?", (session_id,)).fetchone()
+   623→    return dict(row) if row else None
+   624→
+   625→
+   626→def list_chat_sessions(limit: int = 50) -> list[dict]:
+   627→    rows = _db().execute(
+   628→        "SELECT * FROM chat_sessions ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+   629→    return [dict(r) for r in rows]
+   630→
+   631→
+   632→def update_chat_session(session_id: str, **fields) -> dict | None:
+   633→    allowed = {"title", "model", "workspace_id"}
+   634→    updates = []
+   635→    params = []
+   636→    for k, v in fields.items():
+   637→        if k not in allowed:
+   638→            continue
+   639→        updates.append(f"{k} = ?")
+   640→        params.append(v)
+   641→    if not updates:
+   642→        return get_chat_session(session_id)
+   643→    updates.append("updated_at = ?")
+   644→    params.append(_iso_now())
+   645→    params.append(session_id)
+   646→    with _write_lock:
+   647→        _db().execute(f"UPDATE chat_sessions SET {', '.join(updates)} WHERE id = ?", params)
+   648→        _db().commit()
+   649→    return get_chat_session(session_id)
+   650→
+   651→
+   652→def delete_chat_session(session_id: str) -> bool:
+   653→    with _write_lock:
+   654→        db = _db()
+   655→        cur = db.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+   656→        db.commit()
+   657→        return cur.rowcount > 0
+   658→
+   659→
+   660→def append_chat_events(session_id: str, events: list[dict]) -> None:
+   661→    """Append events to a chat session, skipping events already stored by seq."""
+   662→    if not events:
+   663→        return
+   664→    db = _db()
+   665→    with _write_lock:
+   666→        row = db.execute(
+   667→            "SELECT COALESCE(MAX(seq), -1) FROM chat_events WHERE session_id = ?",
+   668→            (session_id,)).fetchone()
+   669→        persisted_max = row[0] if row else -1
+   670→        insert_count = 0
+   671→        for ev in events:
+   672→            i = ev.get("i", -1)
+   673→            if i <= persisted_max:
+   674→                continue
+   675→            db.execute(
+   676→                "INSERT INTO chat_events (session_id, seq, event_type, content, created_at) "
+   677→                "VALUES (?, ?, ?, ?, ?)",
+   678→                (session_id, i, ev.get("type", "unknown"), json.dumps(ev), _iso_now()))
+   679→            insert_count += 1
+   680→        if insert_count:
+   681→            db.commit()
+   682→
+   683→
+   684→def get_chat_events(session_id: str) -> list[dict]:
+   685→    rows = _db().execute(
+   686→        "SELECT content FROM chat_events WHERE session_id = ? ORDER BY seq ASC",
+   687→        (session_id,)).fetchall()
+   688→    return [json.loads(r["content"]) for r in rows]
+   689→

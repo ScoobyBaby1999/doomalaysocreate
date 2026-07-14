@@ -1,0 +1,974 @@
+     1→// Workspace screen: list workspaces, create new, view details with file browser
+     2→// and git operations.  The main GitHub integration UI.
+     3→
+     4→import { useEffect, useMemo, useRef, useState } from "react";
+     5→import { GitHubClient, type Workspace, type Repo, type Branch, type PushLog, type RegistryEntry } from "../api/github";
+     6→import { GithubConnect } from "../components/GithubConnect";
+     7→import type { Settings } from "../api/panel";
+     8→
+     9→type View = "list" | "create" | "detail" | "registry";
+    10→
+    11→export function WorkspaceScreen({
+    12→  settings,
+    13→  onChange,
+    14→}: {
+    15→  settings: Settings;
+    16→  onChange: (s: Settings) => void;
+    17→}) {
+    18→  // Debounced logout guard: a single 401 used to wipe githubSessionId on the
+    19→  // spot, which logged the user out every time they opened the panel — even
+    20→  // right after connecting — because the FIRST request (listWorkspaces) would
+    21→  // race the JWT reconstruction on a freshly-restarted Space. Now we verify
+    22→  // with /api/auth/status before clearing. If status says still-authenticated,
+    23→  // the 401 was transient (DB warm-up, audience skew) and we keep the session.
+    24→  const clearingRef = useRef(false);
+    25→  const handleUnauthorized = () => {
+    26→    if (clearingRef.current) return;          // already verifying — don't stack
+    27→    clearingRef.current = true;
+    28→    const probe = new GitHubClient(settings);
+    29→    probe.status()
+    30→      .then((s) => {
+    31→        if (s.authenticated) {
+    32→          // Session is actually valid — the 401 was transient. Don't log out.
+    33→          return;
+    34→        }
+    35→        onChange({ ...settings, githubSessionId: "", githubUsername: "" });
+    36→        setView("list");
+    37→      })
+    38→      .catch(() => {
+    39→        // Status check itself failed — clear to be safe, but this is rare.
+    40→        onChange({ ...settings, githubSessionId: "", githubUsername: "" });
+    41→        setView("list");
+    42→      })
+    43→      .finally(() => { clearingRef.current = false; });
+    44→  };
+    45→  const client = useMemo(
+    46→    () => new GitHubClient(settings, handleUnauthorized),
+    47→    // handleUnauthorized is stable enough — it only closes over settings/onChange
+    48→    // which change together. Recreating the client on settings change is correct.
+    49→    [settings, onChange],
+    50→  );
+    51→  const [view, setView] = useState<View>("list");
+    52→  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+    53→  const [selected, setSelected] = useState<Workspace | null>(null);
+    54→  const [loading, setLoading] = useState(true);
+    55→  const [error, setError] = useState("");
+    56→  const refreshRef = useRef(0);
+    57→
+    58→  const connected = !!settings.githubSessionId;
+    59→
+    60→  function switchView(v: View) {
+    61→    setError("");
+    62→    setView(v);
+    63→  }
+    64→
+    65→  // Load workspaces on mount
+    66→  useEffect(() => {
+    67→    if (!connected) {
+    68→      setLoading(false);
+    69→      return;
+    70→    }
+    71→    let alive = true;
+    72→    client
+    73→      .listWorkspaces()
+    74→      .then((r) => {
+    75→        if (alive) setWorkspaces(r.workspaces);
+    76→      })
+    77→      .catch((e) => {
+    78→        if (alive) setError(e instanceof Error ? e.message : String(e));
+    79→      })
+    80→      .finally(() => {
+    81→        if (alive) setLoading(false);
+    82→      });
+    83→    // eslint-disable-next-line react-hooks/exhaustive-deps
+    84→  }, [connected]);
+    85→
+    86→  function refresh() {
+    87→    setLoading(true);
+    88→    setError("");
+    89→    const reqId = ++refreshRef.current;
+    90→    client
+    91→      .listWorkspaces()
+    92→      .then((r) => {
+    93→        if (reqId === refreshRef.current) setWorkspaces(r.workspaces);
+    94→      })
+    95→      .catch((e) => {
+    96→        if (reqId === refreshRef.current) setError(e instanceof Error ? e.message : String(e));
+    97→      })
+    98→      .finally(() => {
+    99→        if (reqId === refreshRef.current) setLoading(false);
+   100→      });
+   101→  }
+   102→
+   103→  function openDetail(ws: Workspace) {
+   104→    setSelected(ws);
+   105→    switchView("detail");
+   106→  }
+   107→
+   108→  // --- Not connected view ---
+   109→  if (!connected) {
+   110→    return (
+   111→      <div className="flex flex-col items-center justify-center h-full p-6 text-center space-y-4">
+   112→        <p className="text-sm font-medium">Connect GitHub to start</p>
+   113→        <p className="text-sm text-muted max-w-xs">
+   114→          Link your GitHub account to clone repos, work on code, and push changes.
+   115→        </p>
+   116→        <GithubConnect
+   117→          settings={settings}
+   118→          onConnected={(id, username) => {
+   119→            onChange({ ...settings, githubSessionId: id, githubUsername: username });
+   120→          }}
+   121→        />
+   122→      </div>
+   123→    );
+   124→  }
+   125→
+   126→  // --- List view ---
+   127→  if (view === "list") {
+   128→    return (
+   129→      <div className="flex flex-col h-full">
+   130→        <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted">
+   131→          <GithubConnect
+   132→            settings={settings}
+   133→            onConnected={(id, username) => {
+   134→              onChange({ ...settings, githubSessionId: id, githubUsername: username });
+   135→            }}
+   136→          />
+   137→          <button
+   138→            onClick={() => switchView("create")}
+   139→            className="ml-auto px-2 py-1 rounded-lg border border-border hover:border-accent text-accent"
+   140→          >
+   141→            + New
+   142→          </button>
+   143→          <button onClick={() => switchView("registry")} className="underline">
+   144→            browse
+   145→          </button>
+   146→          <button onClick={refresh} className="underline">
+   147→            refresh
+   148→          </button>
+   149→          {settings.githubSessionId && (
+   150→            <button
+   151→              onClick={() => onChange({ ...settings, githubSessionId: "", githubUsername: "" })}
+   152→              className="px-2 py-1 rounded border border-rose-500/40 text-rose-300 hover:bg-rose-500/10"
+   153→              title="Clear session (fixes stale 401 errors)"
+   154→            >
+   155→              clear
+   156→            </button>
+   157→          )}
+   158→        </div>
+   159→
+   160→        {error && (
+   161→          <div className="px-3 py-2 text-sm text-rose-300 border-b border-rose-500/40 bg-rose-500/10">
+   162→            {error}
+   163→          </div>
+   164→        )}
+   165→
+   166→        <div className="flex-1 overflow-y-auto">
+   167→          {loading && workspaces.length === 0 ? (
+   168→            <div className="text-center text-muted text-sm mt-12">loading…</div>
+   169→          ) : workspaces.length === 0 ? (
+   170→            <div className="text-center text-muted text-sm mt-12 px-6 space-y-2">
+   171→              <p>No workspaces yet.</p>
+   172→              <p>Create one to clone a repo and start working on code with the agent.</p>
+   173→            </div>
+   174→          ) : (
+   175→            <div className="divide-y divide-border">
+   176→              {workspaces.map((ws) => (
+   177→                <button
+   178→                  key={ws.id}
+   179→                  onClick={() => openDetail(ws)}
+   180→                  className="w-full text-left px-3 py-3 hover:bg-surface transition-colors"
+   181→                >
+   182→                  <div className="flex items-center gap-2">
+   183→                    <span className="text-sm font-medium text-text">{ws.title}</span>
+   184→                    {ws.visibility === "public" && (
+   185→                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/20 text-accent">
+   186→                        public
+   187→                      </span>
+   188→                    )}
+   189→                  </div>
+   190→                  {ws.source_repo && (
+   191→                    <div className="text-[11px] text-muted mt-0.5">
+   192→                      {ws.source_repo.replace("https://github.com/", "")} · {ws.current_branch}
+   193→                      {ws.source_branches && ws.source_branches.length > 1 && (
+   194→                        <span className="text-[10px] text-muted/60 ml-1">
+   195→                          (+{ws.source_branches.length - 1} more)
+   196→                        </span>
+   197→                      )}
+   198→                    </div>
+   199→                  )}
+   200→                  <div className="text-[10px] text-muted mt-0.5">
+   201→                    updated {new Date(ws.last_modified).toLocaleDateString()}
+   202→                  </div>
+   203→                </button>
+   204→              ))}
+   205→            </div>
+   206→          )}
+   207→        </div>
+   208→      </div>
+   209→    );
+   210→  }
+   211→
+   212→  // --- Create view ---
+   213→  if (view === "create") {
+   214→    return (
+   215→      <CreateWorkspace
+   216→        client={client}
+   217→        onCreated={(ws) => {
+   218→          setWorkspaces((prev) => [ws, ...prev]);
+   219→          setSelected(ws);
+   220→          switchView("detail");
+   221→        }}
+   222→        onCancel={() => switchView("list")}
+   223→      />
+   224→    );
+   225→  }
+   226→
+   227→  // --- Detail view ---
+   228→  if (view === "detail" && selected) {
+   229→    return (
+   230→      <WorkspaceDetail
+   231→        client={client}
+   232→        workspace={selected}
+   233→        onBack={() => switchView("list")}
+   234→        onUpdated={(ws) => {
+   235→          setSelected(ws);
+   236→          setWorkspaces((prev) => prev.map((w) => (w.id === ws.id ? ws : w)));
+   237→        }}
+   238→        onDeleted={(id) => {
+   239→          setWorkspaces((prev) => prev.filter((w) => w.id !== id));
+   240→          switchView("list");
+   241→        }}
+   242→      />
+   243→    );
+   244→  }
+   245→
+   246→  // --- Registry view ---
+   247→  if (view === "registry") {
+   248→    return (
+   249→      <RegistryBrowser
+   250→        client={client}
+   251→        onBack={() => switchView("list")}
+   252→      />
+   253→    );
+   254→  }
+   255→
+   256→  return null;
+   257→}
+   258→
+   259→// --- Create Workspace Form -------------------------------------------------
+   260→
+   261→function CreateWorkspace({
+   262→  client,
+   263→  onCreated,
+   264→  onCancel,
+   265→}: {
+   266→  client: GitHubClient;
+   267→  onCreated: (ws: Workspace) => void;
+   268→  onCancel: () => void;
+   269→}) {
+   270→  const [title, setTitle] = useState("");
+   271→  const [description, setDescription] = useState("");
+   272→  const [repos, setRepos] = useState<Repo[]>([]);
+   273→  const [selectedRepo, setSelectedRepo] = useState<string>("");
+   274→  const [branches, setBranches] = useState<Branch[]>([]);
+   275→  const [selectedBranch, setSelectedBranch] = useState<string>("");
+   276→  const [selectedBranches, setSelectedBranches] = useState<Set<string>>(new Set());
+   277→  const [branchMode, setBranchMode] = useState<"single" | "all" | "select">("single");
+   278→  const [loadingRepos, setLoadingRepos] = useState(true);
+   279→  const [loadingBranches, setLoadingBranches] = useState(false);
+   280→  const [submitting, setSubmitting] = useState(false);
+   281→  const [error, setError] = useState("");
+   282→  const repoSelectRef = useRef(0);
+   283→  const titleEdited = useRef(false);
+   284→  const descriptionEdited = useRef(false);
+   285→
+   286→  useEffect(() => {
+   287→    let alive = true;
+   288→    client
+   289→      .repos(1, 100)
+   290→      .then((r) => {
+   291→        if (alive) setRepos(r.repos);
+   292→      })
+   293→      .catch(() => {
+   294→        if (alive) setError("Failed to load repos");
+   295→      })
+   296→      .finally(() => {
+   297→        if (alive) setLoadingRepos(false);
+   298→      });
+   299→    return () => {
+   300→      alive = false;
+   301→    };
+   302→    // eslint-disable-next-line react-hooks/exhaustive-deps
+   303→  }, []);
+   304→
+   305→  async function handleRepoSelect(fullName: string) {
+   306→    setSelectedRepo(fullName);
+   307→    setSelectedBranch("");
+   308→    setSelectedBranches(new Set());
+   309→    if (!fullName) {
+   310→      setBranches([]);
+   311→      // Auto-clear title/description if they were auto-filled
+   312→      if (!titleEdited.current) setTitle("");
+   313→      if (!descriptionEdited.current) setDescription("");
+   314→      return;
+   315→    }
+   316→    setLoadingBranches(true);
+   317→    const reqId = ++repoSelectRef.current;
+   318→    try {
+   319→      const [owner, repo] = fullName.split("/");
+   320→      const branchesResult = await client.branches(owner, repo);
+   321→      if (reqId !== repoSelectRef.current) return;
+   322→      setBranches(branchesResult.branches);
+   323→      const def = branchesResult.branches.find((b) => b.name === "main") || branchesResult.branches[0];
+   324→      if (def) setSelectedBranch(def.name);
+   325→      // Auto-fill title/description if not manually edited
+   326→      const repoInfo = repos.find((r) => r.full_name === fullName);
+   327→      if (repoInfo && !titleEdited.current) {
+   328→        setTitle(repoInfo.name);
+   329→      }
+   330→      if (repoInfo && !descriptionEdited.current) {
+   331→        setDescription(repoInfo.description || "");
+   332→      }
+   333→    } catch (e) {
+   334→      if (reqId === repoSelectRef.current) setError(e instanceof Error ? e.message : String(e));
+   335→    } finally {
+   336→      if (reqId === repoSelectRef.current) setLoadingBranches(false);
+   337→    }
+   338→  }
+   339→
+   340→  async function handleCreate() {
+   341→    if (!title.trim()) {
+   342→      setError("Title is required");
+   343→      return;
+   344→    }
+   345→    setSubmitting(true);
+   346→    setError("");
+   347→    try {
+   348→      const opts: Parameters<GitHubClient["createWorkspace"]>[0] = {
+   349→        title: title.trim(),
+   350→        description: description.trim(),
+   351→      };
+   352→      if (selectedRepo) {
+   353→        opts.source_repo = `https://github.com/${selectedRepo}.git`;
+   354→        if (branchMode === "single") {
+   355→          opts.source_branch = selectedBranch || undefined;
+   356→        } else if (branchMode === "select") {
+   357→          opts.source_branches = Array.from(selectedBranches);
+   358→          opts.source_branch = opts.source_branches[0] || undefined;
+   359→        }
+   360→        // branchMode === "all": omit source_branch — backend clones full repo
+   361→      }
+   362→      const ws = await client.createWorkspace(opts);
+   363→      onCreated(ws);
+   364→    } catch (e) {
+   365→      setError(e instanceof Error ? e.message : String(e));
+   366→    } finally {
+   367→      setSubmitting(false);
+   368→    }
+   369→  }
+   370→
+   371→  return (
+   372→    <div className="flex flex-col h-full">
+   373→      <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted">
+   374→        <button onClick={onCancel} className="underline">
+   375→          ← back
+   376→        </button>
+   377→        <span className="font-medium text-text">New Workspace</span>
+   378→      </div>
+   379→
+   380→      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+   381→        {error && (
+   382→          <div className="text-sm text-rose-300 bg-rose-500/10 rounded-lg px-3 py-2">
+   383→            {error}
+   384→          </div>
+   385→        )}
+   386→
+   387→        <label className="block">
+   388→          <span className="text-[11px] text-muted">Title</span>
+   389→          <input
+   390→            value={title}
+   391→            onChange={(e) => { titleEdited.current = true; setTitle(e.target.value); }}
+   392→            placeholder="my-project"
+   393→            className="mt-1 w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
+   394→          />
+   395→        </label>
+   396→
+   397→        <label className="block">
+   398→          <span className="text-[11px] text-muted">Description (optional)</span>
+   399→          <input
+   400→            value={description}
+   401→            onChange={(e) => { descriptionEdited.current = true; setDescription(e.target.value); }}
+   402→            placeholder="What this workspace is for"
+   403→            className="mt-1 w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
+   404→          />
+   405→        </label>
+   406→
+   407→        <label className="block">
+   408→          <span className="text-[11px] text-muted">Clone from repo (optional)</span>
+   409→          <select
+   410→            value={selectedRepo}
+   411→            onChange={(e) => handleRepoSelect(e.target.value)}
+   412→            disabled={loadingRepos}
+   413→            className="mt-1 w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
+   414→          >
+   415→            <option value="">{loadingRepos ? "loading repos…" : "— none (empty workspace) —"}</option>
+   416→            {repos.map((r) => (
+   417→              <option key={r.full_name} value={r.full_name}>
+   418→                {r.full_name} {r.private ? "🔒" : ""}
+   419→              </option>
+   420→            ))}
+   421→          </select>
+   422→        </label>
+   423→
+   424→        {selectedRepo && (
+   425→          <>
+   426→            <label className="block">
+   427→              <span className="text-[11px] text-muted">Branch selection</span>
+   428→              <div className="mt-1 flex gap-2 text-sm">
+   429→                {(["single", "all", "select"] as const).map((mode) => (
+   430→                  <button
+   431→                    key={mode}
+   432→                    onClick={() => setBranchMode(mode)}
+   433→                    className={`px-3 py-1.5 rounded-lg border text-[11px] ${
+   434→                      branchMode === mode
+   435→                        ? "border-accent bg-accent/10 text-accent"
+   436→                        : "border-border text-muted hover:border-accent"
+   437→                    }`}
+   438→                  >
+   439→                    {mode === "single" ? "Single" : mode === "all" ? "All" : "Select"}
+   440→                  </button>
+   441→                ))}
+   442→              </div>
+   443→            </label>
+   444→
+   445→            {branchMode === "single" && (
+   446→              <label className="block">
+   447→                <span className="text-[11px] text-muted">Branch</span>
+   448→                <select
+   449→                  value={selectedBranch}
+   450→                  onChange={(e) => setSelectedBranch(e.target.value)}
+   451→                  disabled={loadingBranches}
+   452→                  className="mt-1 w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
+   453→                >
+   454→                  {loadingBranches ? (
+   455→                    <option>loading…</option>
+   456→                  ) : (
+   457→                    branches.map((b) => (
+   458→                      <option key={b.name} value={b.name}>
+   459→                        {b.name}
+   460→                      </option>
+   461→                    ))
+   462→                  )}
+   463→                </select>
+   464→              </label>
+   465→            )}
+   466→
+   467→            {branchMode === "select" && (
+   468→              <label className="block">
+   469→                <span className="text-[11px] text-muted">Branches to clone</span>
+   470→                <div className="mt-1 max-h-40 overflow-y-auto border border-border rounded-lg p-2 space-y-1">
+   471→                  {loadingBranches ? (
+   472→                    <div className="text-[11px] text-muted px-2 py-1">loading…</div>
+   473→                  ) : (
+   474→                    branches.map((b) => (
+   475→                      <label key={b.name} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-surface cursor-pointer text-sm">
+   476→                        <input
+   477→                          type="checkbox"
+   478→                          checked={selectedBranches.has(b.name)}
+   479→                          onChange={(e) => {
+   480→                            const next = new Set(selectedBranches);
+   481→                            if (e.target.checked) next.add(b.name);
+   482→                            else next.delete(b.name);
+   483→                            setSelectedBranches(next);
+   484→                          }}
+   485→                          className="accent-accent"
+   486→                        />
+   487→                        {b.name}
+   488→                      </label>
+   489→                    ))
+   490→                  )}
+   491→                </div>
+   492→              </label>
+   493→            )}
+   494→
+   495→            {branchMode === "all" && (
+   496→              <div className="text-[11px] text-muted bg-surface border border-border rounded-lg px-3 py-2">
+   497→                All branches will be cloned (shallow).
+   498→              </div>
+   499→            )}
+   500→          </>
+   501→        )}
+   502→
+   503→        <button
+   504→          onClick={handleCreate}
+   505→          disabled={submitting || !title.trim()}
+   506→          className="w-full py-2 rounded-lg bg-accent text-white font-medium disabled:opacity-40"
+   507→        >
+   508→          {submitting ? "Creating…" : "Create Workspace"}
+   509→        </button>
+   510→      </div>
+   511→    </div>
+   512→  );
+   513→}
+   514→
+   515→// --- Workspace Detail View -------------------------------------------------
+   516→
+   517→function WorkspaceDetail({
+   518→  client,
+   519→  workspace: initial,
+   520→  onBack,
+   521→  onUpdated,
+   522→  onDeleted,
+   523→}: {
+   524→  client: GitHubClient;
+   525→  workspace: Workspace;
+   526→  onBack: () => void;
+   527→  onUpdated: (ws: Workspace) => void;
+   528→  onDeleted: (id: string) => void;
+   529→}) {
+   530→  const [ws, setWs] = useState(initial);
+   531→  const [logs, setLogs] = useState<PushLog[]>([]);
+   532→  const [commitMsg, setCommitMsg] = useState("");
+   533→  const [committing, setCommitting] = useState(false);
+   534→  const [pushing, setPushing] = useState(false);
+   535→  const [error, setError] = useState("");
+   536→  const [success, setSuccess] = useState("");
+   537→  const [pendingApproval, setPendingApproval] = useState<{
+   538→    requestId: string;
+   539→    status: string;
+   540→    branch?: string;
+   541→    title?: string;
+   542→  } | null>(null);
+   543→  const [approving, setApproving] = useState(false);
+   544→  const approvingRef = useRef(false);
+   545→  const [publishing, setPublishing] = useState(false);
+   546→
+   547→  // Load push logs
+   548→  useEffect(() => {
+   549→    let alive = true;
+   550→    client
+   551→      .pushLogs(ws.id, 10)
+   552→      .then((r) => {
+   553→        if (alive) setLogs(r.logs);
+   554→      })
+   555→      .catch(() => {});
+   556→    return () => {
+   557→      alive = false;
+   558→    };
+   559→    // eslint-disable-next-line react-hooks/exhaustive-deps
+   560→  }, [ws.id]);
+   561→
+   562→  // Poll pending push approval
+   563→  useEffect(() => {
+   564→    if (!pendingApproval || pendingApproval.status !== "pending") return;
+   565→    let alive = true;
+   566→    const iv = setInterval(async () => {
+   567→      try {
+   568→        const result = await client.pushRequestStatus(pendingApproval.requestId);
+   569→        if (!alive) return;
+   570→        if (result.status === "approved" || result.status === "rejected" || result.status === "error") {
+   571→          clearInterval(iv);
+   572→          setPendingApproval(null);
+   573→          if (result.status === "approved") {
+   574→            setSuccess("Push approved! Reloading…");
+   575→            // Refresh workspace state
+   576→            const fresh = await client.getWorkspace(ws.id);
+   577→            if (alive) {
+   578→              setWs(fresh);
+   579→              onUpdated(fresh);
+   580→              const logsR = await client.pushLogs(ws.id, 10);
+   581→              if (alive) setLogs(logsR.logs);
+   582→            }
+   583→          } else if (result.status === "rejected") {
+   584→            setError("Push rejected.");
+   585→          } else {
+   586→            setError("Push request failed.");
+   587→          }
+   588→        }
+   589→        // If still pending, do nothing — interval continues
+   590→      } catch {
+   591→        // Transient error — keep polling
+   592→      }
+   593→    }, 3000);
+   594→    return () => {
+   595→      alive = false;
+   596→      clearInterval(iv);
+   597→    };
+   598→    // eslint-disable-next-line react-hooks/exhaustive-deps
+   599→  }, [pendingApproval?.requestId, pendingApproval?.status]);
+   600→
+   601→  async function handleCommit() {
+   602→    if (!commitMsg.trim()) return;
+   603→    setCommitting(true);
+   604→    setError("");
+   605→    setSuccess("");
+   606→    try {
+   607→      const r = await client.commit(ws.id, commitMsg.trim());
+   608→      setSuccess(`Committed: ${r.commit_sha.slice(0, 7)}`);
+   609→      setCommitMsg("");
+   610→    } catch (e) {
+   611→      setError(e instanceof Error ? e.message : String(e));
+   612→    } finally {
+   613→      setCommitting(false);
+   614→    }
+   615→  }
+   616→
+   617→  async function handlePush() {
+   618→    setPushing(true);
+   619→    setError("");
+   620→    setSuccess("");
+   621→    try {
+   622→      const result = await client.push(ws.id, { branch: ws.current_branch });
+   623→      if ("request_id" in result) {
+   624→        setPendingApproval({
+   625→          requestId: result.request_id,
+   626→          status: "pending",
+   627→          branch: result.branch,
+   628→          title: result.title,
+   629→        });
+   630→        setSuccess("Push pending approval — waiting for review");
+   631→      } else {
+   632→        setSuccess(`Pushed: ${(result as { commit_sha: string }).commit_sha.slice(0, 7)}`);
+   633→      }
+   634→    } catch (e) {
+   635→      setError(e instanceof Error ? e.message : String(e));
+   636→    } finally {
+   637→      setPushing(false);
+   638→    }
+   639→  }
+   640→
+   641→  async function handleApprovePush(approved: boolean) {
+   642→    if (!pendingApproval || approvingRef.current) return;
+   643→    approvingRef.current = true;
+   644→    setApproving(true);
+   645→    try {
+   646→      await client.resolvePushRequest(pendingApproval.requestId, approved);
+   647→      // The polling effect will pick up the status change
+   648→    } catch (e) {
+   649→      setError(e instanceof Error ? e.message : String(e));
+   650→    } finally {
+   651→      approvingRef.current = false;
+   652→      setApproving(false);
+   653→    }
+   654→  }
+   655→
+   656→  async function handleDelete() {
+   657→    if (!confirm(`Delete workspace "${ws.title}"? This cannot be undone.`)) return;
+   658→    try {
+   659→      await client.deleteWorkspace(ws.id);
+   660→      onDeleted(ws.id);
+   661→    } catch (e) {
+   662→      setError(e instanceof Error ? e.message : String(e));
+   663→    }
+   664→  }
+   665→
+   666→  async function handlePublish() {
+   667→    setPublishing(true);
+   668→    setError("");
+   669→    try {
+   670→      await client.publish(ws.id);
+   671→      setSuccess("Published to registry");
+   672→    } catch (e) {
+   673→      setError(e instanceof Error ? e.message : String(e));
+   674→    } finally {
+   675→      setPublishing(false);
+   676→    }
+   677→  }
+   678→
+   679→  async function handleUnpublish() {
+   680→    setPublishing(true);
+   681→    setError("");
+   682→    try {
+   683→      await client.unpublish(ws.id);
+   684→      setSuccess("Removed from registry");
+   685→    } catch (e) {
+   686→      setError(e instanceof Error ? e.message : String(e));
+   687→    } finally {
+   688→      setPublishing(false);
+   689→    }
+   690→  }
+   691→
+   692→  return (
+   693→    <div className="flex flex-col h-full">
+   694→      {/* Header */}
+   695→      <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted">
+   696→        <button onClick={onBack} className="underline">
+   697→          ← back
+   698→        </button>
+   699→        <span className="font-medium text-text">{ws.title}</span>
+   700→        <span className="px-1.5 py-0.5 rounded bg-surface2 text-[10px]">
+   701→          {ws.current_branch}
+   702→        </span>
+   703→        {ws.source_repo && (
+   704→          <a
+   705→            href={ws.source_repo}
+   706→            target="_blank"
+   707→            rel="noreferrer noopener"
+   708→            className="text-accent underline ml-auto"
+   709→          >
+   710→            repo ↗
+   711→          </a>
+   712→        )}
+   713→      </div>
+   714→
+   715→      {error && (
+   716→        <div className="px-3 py-2 text-sm text-rose-300 border-b border-rose-500/40 bg-rose-500/10">
+   717→          {error}
+   718→        </div>
+   719→      )}
+   720→      {success && (
+   721→        <div className="px-3 py-2 text-sm text-green-300 border-b border-green-500/40 bg-green-500/10">
+   722→          {success}
+   723→        </div>
+   724→      )}
+   725→
+   726→      {/* Pending Push Approval */}
+   727→      {pendingApproval && pendingApproval.status === "pending" && (
+   728→        <div className="px-3 py-3 border-b border-border bg-amber-500/5">
+   729→          <div className="flex items-center gap-2 mb-2">
+   730→            <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+   731→            <span className="text-sm text-amber-200">Push pending approval</span>
+   732→          </div>
+   733→          {pendingApproval.branch && (
+   734→            <div className="text-[11px] text-muted mb-2">
+   735→              Branch: <span className="text-text">{pendingApproval.branch}</span>
+   736→            </div>
+   737→          )}
+   738→          <div className="flex gap-2">
+   739→            <button
+   740→              onClick={() => handleApprovePush(true)}
+   741→              disabled={approving}
+   742→              className="flex-1 py-1.5 rounded-lg bg-green-600 text-white text-sm disabled:opacity-40"
+   743→            >
+   744→              {approving ? "…" : "Approve"}
+   745→            </button>
+   746→            <button
+   747→              onClick={() => handleApprovePush(false)}
+   748→              disabled={approving}
+   749→              className="flex-1 py-1.5 rounded-lg border border-rose-500/40 text-rose-300 text-sm hover:bg-rose-500/10 disabled:opacity-40"
+   750→            >
+   751→              {approving ? "…" : "Reject"}
+   752→            </button>
+   753→          </div>
+   754→        </div>
+   755→      )}
+   756→
+   757→      {/* Commit + Push */}
+   758→      <div className="border-b border-border p-3 space-y-2">
+   759→        <textarea
+   760→          value={commitMsg}
+   761→          onChange={(e) => setCommitMsg(e.target.value)}
+   762→          placeholder="Commit message…"
+   763→          rows={2}
+   764→          className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent resize-none"
+   765→        />
+   766→        <div className="flex gap-2">
+   767→          <button
+   768→            onClick={handleCommit}
+   769→            disabled={committing || !commitMsg.trim()}
+   770→            className="flex-1 py-1.5 rounded-lg border border-border text-sm hover:border-accent disabled:opacity-40"
+   771→          >
+   772→            {committing ? "committing…" : "Commit"}
+   773→          </button>
+   774→          <button
+   775→            onClick={handlePush}
+   776→            disabled={pushing}
+   777→            className="flex-1 py-1.5 rounded-lg bg-accent text-white text-sm disabled:opacity-40"
+   778→          >
+   779→            {pushing ? "pushing…" : "Push"}
+   780→          </button>
+   781→        </div>
+   782→      </div>
+   783→
+   784→      {/* Push History */}
+   785→      <div className="flex-1 overflow-y-auto">
+   786→        <div className="px-3 py-2 text-[11px] text-muted font-medium border-b border-border">
+   787→          push history
+   788→        </div>
+   789→        {logs.length === 0 ? (
+   790→          <div className="text-center text-muted text-sm mt-8">No pushes yet</div>
+   791→        ) : (
+   792→          <div className="divide-y divide-border">
+   793→            {logs.map((log) => (
+   794→              <div key={log.id} className="px-3 py-2 text-[11px]">
+   795→                <div className="flex items-center gap-2">
+   796→                  <span className="font-mono text-text">{log.commit_sha.slice(0, 7)}</span>
+   797→                  <span className="text-muted">{log.push_type}</span>
+   798→                  {log.pr_url && (
+   799→                    <a
+   800→                      href={log.pr_url}
+   801→                      target="_blank"
+   802→                      rel="noreferrer noopener"
+   803→                      className="text-accent underline"
+   804→                    >
+   805→                      PR #{log.pr_number}
+   806→                    </a>
+   807→                  )}
+   808→                </div>
+   809→                {log.commit_message && (
+   810→                  <div className="text-muted mt-0.5">{log.commit_message}</div>
+   811→                )}
+   812→                <div className="text-muted mt-0.5">
+   813→                  → {log.target_repo.replace("https://github.com/", "")}/{log.target_branch} ·{" "}
+   814→                  {new Date(log.created_at).toLocaleString()}
+   815→                </div>
+   816→              </div>
+   817→            ))}
+   818→          </div>
+   819→        )}
+   820→      </div>
+   821→
+   822→      {/* Danger zone */}
+   823→      <div className="border-t border-border p-3 space-y-2">
+   824→        <button
+   825→          onClick={handlePublish}
+   826→          disabled={publishing}
+   827→          className="w-full py-1.5 rounded-lg border border-border text-[11px] hover:border-accent disabled:opacity-40"
+   828→        >
+   829→          {publishing ? "…" : "Publish to Registry"}
+   830→        </button>
+   831→        <button
+   832→          onClick={handleUnpublish}
+   833→          disabled={publishing}
+   834→          className="w-full py-1.5 rounded-lg border border-border text-[11px] hover:border-accent disabled:opacity-40"
+   835→        >
+   836→          {publishing ? "…" : "Unpublish from Registry"}
+   837→        </button>
+   838→        <button
+   839→          onClick={handleDelete}
+   840→          className="w-full py-1.5 rounded-lg border border-rose-500/40 text-rose-300 text-[11px] hover:bg-rose-500/10"
+   841→        >
+   842→          Delete Workspace
+   843→        </button>
+   844→      </div>
+   845→    </div>
+   846→  );
+   847→}
+   848→
+   849→// --- Registry Browser ------------------------------------------------------
+   850→
+   851→function RegistryBrowser({
+   852→  client,
+   853→  onBack,
+   854→}: {
+   855→  client: GitHubClient;
+   856→  onBack: () => void;
+   857→}) {
+   858→  const [entries, setEntries] = useState<RegistryEntry[]>([]);
+   859→  const [loading, setLoading] = useState(true);
+   860→  const [search, setSearch] = useState("");
+   861→  const [error, setError] = useState("");
+   862→  const searchRef = useRef(0);
+   863→
+   864→  useEffect(() => {
+   865→    let alive = true;
+   866→    client
+   867→      .listRegistry({ per_page: 50 })
+   868→      .then((r) => {
+   869→        if (alive) setEntries(r.items);
+   870→      })
+   871→      .catch((e) => {
+   872→        if (alive) setError(e instanceof Error ? e.message : String(e));
+   873→      })
+   874→      .finally(() => {
+   875→        if (alive) setLoading(false);
+   876→      });
+   877→    return () => {
+   878→      alive = false;
+   879→    };
+   880→    // eslint-disable-next-line react-hooks/exhaustive-deps
+   881→  }, []);
+   882→
+   883→  async function handleSearch() {
+   884→    setLoading(true);
+   885→    setError("");
+   886→    const reqId = ++searchRef.current;
+   887→    try {
+   888→      const r = await client.listRegistry({ search: search.trim() || undefined, per_page: 50 });
+   889→      if (reqId === searchRef.current) setEntries(r.items);
+   890→    } catch (e) {
+   891→      if (reqId === searchRef.current) setError(e instanceof Error ? e.message : String(e));
+   892→    } finally {
+   893→      if (reqId === searchRef.current) setLoading(false);
+   894→    }
+   895→  }
+   896→
+   897→  return (
+   898→    <div className="flex flex-col h-full">
+   899→      <div className="flex items-center gap-2 px-3 h-9 border-b border-border text-[11px] text-muted">
+   900→        <button onClick={onBack} className="underline">
+   901→          ← back
+   902→        </button>
+   903→        <span className="font-medium text-text">Public Workspaces</span>
+   904→      </div>
+   905→
+   906→      <div className="px-3 py-2 border-b border-border flex gap-2">
+   907→        <input
+   908→          value={search}
+   909→          onChange={(e) => setSearch(e.target.value)}
+   910→          onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+   911→          placeholder="Search…"
+   912→          className="flex-1 bg-surface border border-border rounded-lg px-3 py-1.5 text-sm outline-none focus:border-accent"
+   913→        />
+   914→        <button
+   915→          onClick={handleSearch}
+   916→          className="px-3 py-1.5 rounded-lg border border-border text-sm hover:border-accent"
+   917→        >
+   918→          Search
+   919→        </button>
+   920→      </div>
+   921→
+   922→      {error && (
+   923→        <div className="px-3 py-2 text-sm text-rose-300 border-b border-rose-500/40 bg-rose-500/10">
+   924→          {error}
+   925→        </div>
+   926→      )}
+   927→
+   928→      <div className="flex-1 overflow-y-auto">
+   929→        {loading ? (
+   930→          <div className="text-center text-muted text-sm mt-12">loading…</div>
+   931→        ) : entries.length === 0 ? (
+   932→          <div className="text-center text-muted text-sm mt-12 px-6">
+   933→            {search ? "No results found." : "No public workspaces yet."}
+   934→          </div>
+   935→        ) : (
+   936→          <div className="divide-y divide-border">
+   937→            {entries.map((entry) => (
+   938→              <div key={entry.workspace_id} className="px-3 py-3">
+   939→                <div className="flex items-center gap-2">
+   940→                  <span className="text-sm font-medium text-text">{entry.title}</span>
+   941→                  <span className="text-[11px] text-muted">by {entry.owner_username}</span>
+   942→                </div>
+   943→                {entry.description && (
+   944→                  <div className="text-[11px] text-muted mt-0.5">{entry.description}</div>
+   945→                )}
+   946→                {entry.source_repo && (
+   947→                  <a
+   948→                    href={entry.source_repo}
+   949→                    target="_blank"
+   950→                    rel="noreferrer noopener"
+   951→                    className="text-[11px] text-accent underline mt-0.5 inline-block"
+   952→                  >
+   953→                    {entry.source_repo.replace("https://github.com/", "")} ↗
+   954→                  </a>
+   955→                )}
+   956→                {entry.hf_space_url && (
+   957→                  <a
+   958→                    href={entry.hf_space_url}
+   959→                    target="_blank"
+   960→                    rel="noreferrer noopener"
+   961→                    className="text-[11px] text-accent underline mt-0.5 inline-block ml-2"
+   962→                  >
+   963→                    Space ↗
+   964→                  </a>
+   965→                )}
+   966→              </div>
+   967→            ))}
+   968→          </div>
+   969→        )}
+   970→      </div>
+   971→    </div>
+   972→  );
+   973→}
+   974→

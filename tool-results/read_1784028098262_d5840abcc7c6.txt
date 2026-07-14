@@ -1,0 +1,611 @@
+     1→     1→import { useEffect, useRef, useCallback, useState, useMemo } from "react";
+     2→     2→import type { Settings } from "../api/panel";
+     3→     3→import { AgentClient } from "../api/agent";
+     4→     4→import { useChatStore } from "../state/chatStore";
+     5→     5→import { useModelStore } from "../lib/model-store";
+     6→     6→import { ChatMessageBubble } from "../components/ChatMessageBubble";
+     7→     7→import { SessionSidebar } from "../components/SessionSidebar";
+     8→     8→import { FileDrawer } from "../components/FileDrawer";
+     9→     9→import { PanelDrawer, type PanelInvocation } from "../components/PanelDrawer";
+    10→    10→
+    11→    11→export function AgentChat({ settings }: { settings: Settings }) {
+    12→    12→  // Model store
+    13→    13→  const openOverlay = useModelStore((s) => s.openOverlay);
+    14→    14→  const selectedModelId = useModelStore((s) => s.selectedModelId);
+    15→    15→  const selectedProviderName = useModelStore((s) => s.selectedProviderName);
+    16→    16→  const providers = useModelStore((s) => s.providers);
+    17→    17→  const selectedSlotId = useModelStore((s) => s.selectedSlotId);
+    18→    18→
+    19→    19→  // Derive display info for selected model
+    20→    20→  const modelDisplay = (() => {
+    21→    21→    if (!selectedModelId) return null;
+    22→    22→    for (const p of providers) {
+    23→    23→      const m = p.models.find(
+    24→    24→        (m) => m.id === selectedModelId || m.slotId === selectedSlotId,
+    25→    25→      );
+    26→    26→      if (m)
+    27→    27→        return {
+    28→    28→          label: m.displayName || m.id,
+    29→    29→          color: p.color || "#5b8cff",
+    30→    30→        };
+    31→    31→    }
+    32→    32→    return {
+    33→    33→      label: selectedModelId.split("/").pop() || selectedModelId,
+    34→    34→      color: "#5b8cff",
+    35→    35→    };
+    36→    36→  })();
+    37→    37→
+    38→    38→  // The model ID to send to the backend. Prefer the physical slot ID
+    39→    39→  // ("provider/model"), fall back to the logical ID. The backend resolves
+    40→    40→  // either form (see _handle_agent_post).
+    41→    41→  const effectiveModelId = selectedSlotId || selectedModelId;
+    42→    42→
+    43→    43→  // Chat store — use SELECTIVE subscriptions so typing in the input doesn't
+    44→    44→  // re-render the whole message list. Each useChatStore((s) => ...) only
+    45→    45→  // re-renders when that specific slice changes.
+    46→    46→  const sessions = useChatStore((s) => s.sessions);
+    47→    47→  const activeSessionId = useChatStore((s) => s.activeSessionId);
+    48→    48→  const messages = useChatStore((s) => s.messages);
+    49→    49→  const isBusy = useChatStore((s) => s.isBusy);
+    50→    50→  const isStreaming = useChatStore((s) => s.isStreaming);
+    51→    51→  const status = useChatStore((s) => s.status);
+    52→    52→  const inputText = useChatStore((s) => s.inputText);
+    53→    53→  const error = useChatStore((s) => s.error);
+    54→    54→  const effort = useChatStore((s) => s.effort);
+    55→    55→  const webSearch = useChatStore((s) => s.webSearch);
+    56→    56→  const deepResearch = useChatStore((s) => s.deepResearch);
+    57→    57→  const files = useChatStore((s) => s.files);
+    58→    58→  const fileDrawerOpen = useChatStore((s) => s.fileDrawerOpen);
+    59→    59→  const panelDrawerOpen = useChatStore((s) => s.panelDrawerOpen);
+    60→    60→  const panelInvocations = useChatStore((s) => s.panelInvocations);
+    61→    61→  const sidebarOpen = useChatStore((s) => s.sidebarOpen);
+    62→    62→  const cost = useChatStore((s) => s.cost);
+    63→    63→  const queue = useChatStore((s) => s.queue);
+    64→    64→  const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
+    65→    65→  // Model verification fields
+    66→    66→  const resolvedModel = useChatStore((s) => s.resolvedModel);
+    67→    67→  const resolvedProvider = useChatStore((s) => s.resolvedProvider);
+    68→    68→  const requestedModel = useChatStore((s) => s.requestedModel);
+    69→    69→  // Actions (stable references from zustand — don't cause re-renders)
+    70→    70→  const setInputText = useChatStore((s) => s.setInputText);
+    71→    71→  const setEffort = useChatStore((s) => s.setEffort);
+    72→    72→  const toggleWebSearch = useChatStore((s) => s.toggleWebSearch);
+    73→    73→  const toggleDeepResearch = useChatStore((s) => s.toggleDeepResearch);
+    74→    74→  const setSidebarOpen = useChatStore((s) => s.setSidebarOpen);
+    75→    75→  const setFileDrawerOpen = useChatStore((s) => s.setFileDrawerOpen);
+    76→    76→  const setPanelDrawerOpen = useChatStore((s) => s.setPanelDrawerOpen);
+    77→    77→  const loadSessions = useChatStore((s) => s.loadSessions);
+    78→    78→  const createSession = useChatStore((s) => s.createSession);
+    79→    79→  const switchSession = useChatStore((s) => s.switchSession);
+    80→    80→  const deleteSession = useChatStore((s) => s.deleteSession);
+    81→    81→  const renameSession = useChatStore((s) => s.renameSession);
+    82→    82→  const sendMessage = useChatStore((s) => s.sendMessage);
+    83→    83→  const stopGeneration = useChatStore((s) => s.stopGeneration);
+    84→    84→  const dequeueMessage = useChatStore((s) => s.dequeueMessage);
+    85→    85→
+    86→    86→  // Refs
+    87→    87→  const clientRef = useRef(new AgentClient(settings));
+    88→    88→  const scrollRef = useRef<HTMLDivElement>(null);
+    89→    89→  const inputRef = useRef<HTMLTextAreaElement>(null);
+    90→    90→  const lastUserMsgRef = useRef("");
+    91→    91→  const stickToBottomRef = useRef(true);
+    92→    92→
+    93→    93→  // Keep client fresh when settings change — useMemo so it only rebuilds
+    94→    94→  // when settings actually change, NOT on every render.
+    95→    95→  const client = useMemo(() => new AgentClient(settings), [settings]);
+    96→    96→  clientRef.current = client;
+    97→    97→
+    98→    98→  // Auto-scroll behavior: only stick to bottom if the user is already there.
+    99→    99→  const handleScroll = useCallback(() => {
+   100→   100→    const el = scrollRef.current;
+   101→   101→    if (!el) return;
+   102→   102→    const atBottom =
+   103→   103→      el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+   104→   104→    stickToBottomRef.current = atBottom;
+   105→   105→  }, []);
+   106→   106→
+   107→   107→  useEffect(() => {
+   108→   108→    if (scrollRef.current && stickToBottomRef.current) {
+   109→   109→      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+   110→   110→    }
+   111→   111→  }, [messages, isStreaming]);
+   112→   112→
+   113→   113→  // Load sessions on mount (auto-restores active session if any).
+   114→   114→  useEffect(() => {
+   115→   115→    loadSessions(clientRef.current);
+   116→   116→    // eslint-disable-next-line react-hooks/exhaustive-deps
+   117→   117→  }, []);
+   118→   118→
+   119→   119→  // Handle send — note the store handles queueing when busy.
+   120→   120→  const handleSend = useCallback(
+   121→   121→    async (text?: string) => {
+   122→   122→      const msg = (text ?? inputText).trim();
+   123→   123→      if (!msg) return;
+   124→   124→      lastUserMsgRef.current = msg;
+   125→   125→      await sendMessage(clientRef.current, msg, effectiveModelId || undefined);
+   126→   126→    },
+   127→   127→    [inputText, effectiveModelId, sendMessage],
+   128→   128→  );
+   129→   129→
+   130→   130→  // Handle stop
+   131→   131→  const handleStop = useCallback(async () => {
+   132→   132→    await stopGeneration(clientRef.current);
+   133→   133→  }, [stopGeneration]);
+   134→   134→
+   135→   135→  // Handle new session
+   136→   136→  const handleNewSession = useCallback(async () => {
+   137→   137→    await createSession(clientRef.current, effectiveModelId || undefined);
+   138→   138→    inputRef.current?.focus();
+   139→   139→  }, [createSession, effectiveModelId]);
+   140→   140→
+   141→   141→  // Handle keydown — Enter sends, Shift+Enter newlines. While busy, Enter
+   142→   142→  // queues instead of being disabled.
+   143→   143→  const handleKeyDown = useCallback(
+   144→   144→    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+   145→   145→      if (e.key === "Enter" && !e.shiftKey) {
+   146→   146→        e.preventDefault();
+   147→   147→        handleSend();
+   148→   148→      }
+   149→   149→    },
+   150→   150→    [handleSend],
+   151→   151→  );
+   152→   152→
+   153→   153→  // Auto-resize textarea
+   154→   154→  const handleInputChange = useCallback(
+   155→   155→    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+   156→   156→      setInputText(e.target.value);
+   157→   157→      const el = e.target;
+   158→   158→      el.style.height = "auto";
+   159→   159→      el.style.height = Math.min(el.scrollHeight, 160) + "px";
+   160→   160→    },
+   161→   161→    [setInputText],
+   162→   162→  );
+   163→   163→
+   164→   164→  // Settings panel
+   165→   165→  const [settingsOpen, setSettingsOpen] = useState(false);
+   166→   166→
+   167→   167→  const running = isBusy && (status === "running" || status === "starting");
+   168→   168→  const queueCount = queue.length;
+   169→   169→
+   170→   170→  return (
+   171→   171→    <div className="flex flex-col h-full relative bg-bg">
+   172→   172→      {/* Header */}
+   173→   173→      <header className="flex items-center gap-2 px-3 h-11 border-b border-border shrink-0 bg-surface/50">
+   174→   174→        {/* Session menu toggle */}
+   175→   175→        <button
+   176→   176→          onClick={() => setSidebarOpen(!sidebarOpen)}
+   177→   177→          className={`p-1.5 rounded-md transition-colors ${
+   178→   178→            sidebarOpen
+   179→   179→              ? "text-accent bg-accent/10"
+   180→   180→              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+   181→   181→          }`}
+   182→   182→          title="Chat sessions"
+   183→   183→        >
+   184→   184→          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+   185→   185→            <line x1="3" y1="6" x2="21" y2="6" />
+   186→   186→            <line x1="3" y1="12" x2="21" y2="12" />
+   187→   187→            <line x1="3" y1="18" x2="21" y2="18" />
+   188→   188→          </svg>
+   189→   189→        </button>
+   190→   190→
+   191→   191→        {/* Active session title (truncated) */}
+   192→   192→        <div className="text-[12.5px] font-medium text-foreground truncate max-w-[140px]">
+   193→   193→          {activeSessionId
+   194→   194→            ? sessions.find((s) => s.id === activeSessionId)?.title || "New Chat"
+   195→   195→            : "New Chat"}
+   196→   196→        </div>
+   197→   197→
+   198→   198→        {/* Model selector */}
+   199→   199→        <button
+   200→   200→          onClick={() => !running && openOverlay()}
+   201→   201→          disabled={running}
+   202→   202→          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[200px] ml-auto"
+   203→   203→          title={selectedProviderName || "Select model"}
+   204→   204→        >
+   205→   205→          <span
+   206→   206→            className="w-2 h-2 rounded-full shrink-0"
+   207→   207→            style={{ background: modelDisplay?.color || "#5b8cff" }}
+   208→   208→          />
+   209→   209→          <span className="truncate text-accent">
+   210→   210→            {modelDisplay?.label || "Select model"}
+   211→   211→          </span>
+   212→   212→          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground shrink-0">
+   213→   213→            <polyline points="6 9 12 15 18 9" />
+   214→   214→          </svg>
+   215→   215→        </button>
+   216→   216→
+   217→   217→        {/* Model verification badge — shows what the backend ACTUALLY resolved.
+   218→   218→            If resolvedModel differs from requestedModel, show a warning so the
+   219→   219→            user knows the model they picked isn't the one running. */}
+   220→   220→        {resolvedModel && (
+   221→   221→          <div className="flex flex-col items-end gap-0.5 ml-1" title={`Verified: ${resolvedProvider || "?"} → ${resolvedModel}`}>
+   222→   222→            <span className="text-[9px] text-emerald-400/80 font-mono tabular-nums flex items-center gap-0.5">
+   223→   223→              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+   224→   224→              {resolvedProvider || "unknown"}
+   225→   225→            </span>
+   226→   226→            {requestedModel && resolvedModel &&
+   227→   227→             requestedModel.split("/").pop()?.toLowerCase() !== resolvedModel.split("/").pop()?.toLowerCase() && (
+   228→   228→              <span className="text-[8px] text-amber-400/90 font-mono" title={`Requested ${requestedModel} but backend resolved to ${resolvedModel}`}>
+   229→   229→                ⚠ redirected
+   230→   230→              </span>
+   231→   231→            )}
+   232→   232→          </div>
+   233→   233→        )}
+   234→   234→
+   235→   235→        {/* Cost indicator */}
+   236→   236→        {cost != null && cost > 0 && (
+   237→   237→          <span className="text-[10px] text-muted-foreground tabular-nums">
+   238→   238→            ${cost.toFixed(4)}
+   239→   239→          </span>
+   240→   240→        )}
+   241→   241→
+   242→   242→        {/* Status pill */}
+   243→   243→        {running && (
+   244→   244→          <div className="flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
+   245→   245→            <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+   246→   246→            <span className="capitalize">{status}</span>
+   247→   247→          </div>
+   248→   248→        )}
+   249→   249→
+   250→   250→        {/* Files */}
+   251→   251→        <button
+   252→   252→          onClick={() => setFileDrawerOpen(!fileDrawerOpen)}
+   253→   253→          className={`p-1.5 rounded-md transition-colors ${
+   254→   254→            fileDrawerOpen
+   255→   255→              ? "text-accent bg-accent/10"
+   256→   256→              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+   257→   257→          }`}
+   258→   258→          title="Files"
+   259→   259→        >
+   260→   260→          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+   261→   261→            <path d="M13.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+   262→   262→            <polyline points="13 2 13 9 20 9" />
+   263→   263→          </svg>
+   264→   264→        </button>
+   265→   265→
+   266→   266→        <button
+   267→   267→          onClick={() => setPanelDrawerOpen(!panelDrawerOpen)}
+   268→   268→          className={`p-1.5 rounded-md transition-colors ${
+   269→   269→            panelDrawerOpen
+   270→   270→              ? "text-accent bg-accent/10"
+   271→   271→              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+   272→   272→          }`}
+   273→   273→          title="Panel invocations"
+   274→   274→        >
+   275→   275→          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+   276→   276→            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+   277→   277→          </svg>
+   278→   278→        </button>
+   279→   279→
+   280→   280→        {running ? (
+   281→   281→          <button
+   282→   282→            onClick={handleStop}
+   283→   283→            className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-md bg-red-500/15 text-red-300 hover:bg-red-500/25 transition-colors font-medium shrink-0"
+   284→   284→          >
+   285→   285→            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+   286→   286→              <rect x="6" y="6" width="12" height="12" rx="1" />
+   287→   287→            </svg>
+   288→   288→            Stop
+   289→   289→          </button>
+   290→   290→        ) : (
+   291→   291→          <button
+   292→   292→            onClick={handleNewSession}
+   293→   293→            className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-md bg-accent/15 text-accent hover:bg-accent/25 transition-colors font-medium shrink-0"
+   294→   294→          >
+   295→   295→            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+   296→   296→              <line x1="12" y1="5" x2="12" y2="19" />
+   297→   297→              <line x1="5" y1="12" x2="19" y2="12" />
+   298→   298→            </svg>
+   299→   299→            New
+   300→   300→          </button>
+   301→   301→        )}
+   302→   302→      </header>
+   303→   303→
+   304→   304→      {/* Messages area */}
+   305→   305→      <div
+   306→   306→        ref={scrollRef}
+   307→   307→        onScroll={handleScroll}
+   308→   308→        className="flex-1 overflow-y-auto min-h-0 scroll-smooth"
+   309→   309→      >
+   310→   310→        {isLoadingMessages && messages.length === 0 ? (
+   311→   311→          <div className="flex items-center justify-center h-full">
+   312→   312→            <div className="flex items-center gap-2 text-muted-foreground text-[12px]">
+   313→   313→              <div className="w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+   314→   314→              Loading chat…
+   315→   315→            </div>
+   316→   316→          </div>
+   317→   317→        ) : messages.length === 0 && !isBusy ? (
+   318→   318→          <EmptyState onSend={handleSend} />
+   319→   319→        ) : (
+   320→   320→          <div className="py-3 max-w-3xl mx-auto">
+   321→   321→            {messages.map((msg) => (
+   322→   322→              <ChatMessageBubble key={msg.id} message={msg} />
+   323→   323→            ))}
+   324→   324→
+   325→   325→            {/* Typing indicator — only when the latest message is a user
+   326→   326→                message and we haven't received the first delta yet. */}
+   327→   327→            {running &&
+   328→   328→              messages.length > 0 &&
+   329→   329→              messages[messages.length - 1].role === "user" && (
+   330→   330→                <div className="px-4 py-2.5">
+   331→   331→                  <div className="flex items-center gap-2.5">
+   332→   332→                    <div className="shrink-0 w-7 h-7 rounded-md bg-accent/15 flex items-center justify-center">
+   333→   333→                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5b8cff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+   334→   334→                        <path d="M12 2a10 10 0 0 1 10 10c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2z" />
+   335→   335→                        <path d="M12 16v-4" />
+   336→   336→                        <path d="M12 8h.01" />
+   337→   337→                      </svg>
+   338→   338→                    </div>
+   339→   339→                    <span className="flex gap-1 items-center h-4">
+   340→   340→                      <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: "0ms" }} />
+   341→   341→                      <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: "150ms" }} />
+   342→   342→                      <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: "300ms" }} />
+   343→   343→                    </span>
+   344→   344→                  </div>
+   345→   345→                </div>
+   346→   346→              )}
+   347→   347→          </div>
+   348→   348→        )}
+   349→   349→      </div>
+   350→   350→
+   351→   351→      {/* Queue indicator (1-up: shows pending messages while LLM is busy) */}
+   352→   352→      {queueCount > 0 && (
+   353→   353→        <div className="border-t border-border bg-accent/5 px-3 py-2 shrink-0">
+   354→   354→          <div className="flex items-center gap-2 text-[11.5px] text-accent">
+   355→   355→            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse">
+   356→   356→              <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+   357→   357→            </svg>
+   358→   358→            <span className="font-medium">
+   359→   359→              {queueCount} message{queueCount !== 1 ? "s" : ""} queued
+   360→   360→            </span>
+   361→   361→            <div className="flex-1 truncate text-muted-foreground/80">
+   362→   362→              Next: {queue[0]?.text.slice(0, 80)}
+   363→   363→              {queue[0] && queue[0].text.length > 80 ? "…" : ""}
+   364→   364→            </div>
+   365→   365→            <button
+   366→   366→              onClick={() => queue.forEach((q) => dequeueMessage(q.id))}
+   367→   367→              className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-surface2 transition-colors"
+   368→   368→              title="Clear queue"
+   369→   369→            >
+   370→   370→              Clear
+   371→   371→            </button>
+   372→   372→          </div>
+   373→   373→        </div>
+   374→   374→      )}
+   375→   375→
+   376→   376→      {/* Error banner */}
+   377→   377→      {error && (
+   378→   378→        <div className="border-t border-red-500/30 bg-red-500/10 px-4 py-2.5 text-[13px] text-red-300 flex items-center gap-3 shrink-0">
+   379→   379→          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+   380→   380→            <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+   381→   381→          </svg>
+   382→   382→          <span className="flex-1">{error}</span>
+   383→   383→          <button
+   384→   384→            onClick={() => useChatStore.setState({ error: null })}
+   385→   385→            className="text-red-300/70 hover:text-red-200 px-2 py-0.5 text-[11px]"
+   386→   386→          >
+   387→   387→            dismiss
+   388→   388→          </button>
+   389→   389→          {lastUserMsgRef.current && (
+   390→   390→            <button
+   391→   391→              onClick={() => handleSend(lastUserMsgRef.current)}
+   392→   392→              className="px-3 py-1 rounded-md border border-red-500/40 text-[11px] hover:bg-red-500/20 transition-colors shrink-0"
+   393→   393→            >
+   394→   394→              Retry
+   395→   395→            </button>
+   396→   396→          )}
+   397→   397→        </div>
+   398→   398→      )}
+   399→   399→
+   400→   400→      {/* Input area */}
+   401→   401→      <div className="border-t border-border bg-surface/30 pt-2 pb-3 px-3 shrink-0">
+   402→   402→        {/* Quick settings */}
+   403→   403→        {settingsOpen && (
+   404→   404→          <div className="flex items-center gap-1.5 px-1 pb-2 overflow-x-auto">
+   405→   405→            <span className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mr-1 shrink-0">Effort</span>
+   406→   406→            {(["low", "med", "high", "max"] as const).map((e) => (
+   407→   407→              <button
+   408→   408→                key={e}
+   409→   409→                onClick={() => setEffort(e)}
+   410→   410→                className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 ${
+   411→   411→                  effort === e
+   412→   412→                    ? "border-accent text-accent bg-accent/10"
+   413→   413→                    : "border-border text-muted-foreground hover:border-accent/50"
+   414→   414→                }`}
+   415→   415→              >
+   416→   416→                {e}
+   417→   417→              </button>
+   418→   418→            ))}
+   419→   419→            <div className="w-px h-4 bg-border mx-1 shrink-0" />
+   420→   420→            <button
+   421→   421→              onClick={toggleWebSearch}
+   422→   422→              className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 flex items-center gap-1 ${
+   423→   423→                webSearch
+   424→   424→                  ? "border-accent text-accent bg-accent/10"
+   425→   425→                  : "border-border text-muted-foreground hover:border-accent/50"
+   426→   426→              }`}
+   427→   427→            >
+   428→   428→              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+   429→   429→                <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+   430→   430→              </svg>
+   431→   431→              Web
+   432→   432→            </button>
+   433→   433→            <button
+   434→   434→              onClick={toggleDeepResearch}
+   435→   435→              className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 flex items-center gap-1 ${
+   436→   436→                deepResearch
+   437→   437→                  ? "border-accent text-accent bg-accent/10"
+   438→   438→                  : "border-border text-muted-foreground hover:border-accent/50"
+   439→   439→              }`}
+   440→   440→            >
+   441→   441→              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+   442→   442→                <path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z" /><circle cx="12" cy="10" r="3" />
+   443→   443→              </svg>
+   444→   444→              Deep
+   445→   445→            </button>
+   446→   446→          </div>
+   447→   447→        )}
+   448→   448→
+   449→   449→        {/* Input row */}
+   450→   450→        <div className="flex items-end gap-2 max-w-3xl mx-auto">
+   451→   451→          <button
+   452→   452→            onClick={() => setSettingsOpen((p) => !p)}
+   453→   453→            className={`p-2 rounded-lg transition-colors shrink-0 mb-0.5 ${
+   454→   454→              settingsOpen
+   455→   455→                ? "text-accent bg-accent/10"
+   456→   456→                : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+   457→   457→            }`}
+   458→   458→            title="Settings"
+   459→   459→          >
+   460→   460→            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+   461→   461→              <circle cx="12" cy="12" r="3" />
+   462→   462→              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+   463→   463→            </svg>
+   464→   464→          </button>
+   465→   465→
+   466→   466→          <textarea
+   467→   467→            ref={inputRef}
+   468→   468→            value={inputText}
+   469→   469→            onChange={handleInputChange}
+   470→   470→            onKeyDown={handleKeyDown}
+   471→   471→            rows={1}
+   472→   472→            placeholder={
+   473→   473→              isBusy
+   474→   474→                ? "Queue another message… (Enter to queue, Shift+Enter for newline)"
+   475→   475→                : "Ask the agent to build, edit, run, or pack something…"
+   476→   476→            }
+   477→   477→            className="flex-1 resize-none bg-surface2 border border-border rounded-xl px-3.5 py-2.5 text-[14.5px] leading-relaxed outline-none focus:border-accent min-h-[40px] max-h-[160px] transition-colors placeholder:text-muted-foreground/60"
+   478→   478→          />
+   479→   479→
+   480→   480→          <button
+   481→   481→            onClick={() => (running ? handleStop() : handleSend())}
+   482→   482→            disabled={!running && !inputText.trim()}
+   483→   483→            className={`h-10 px-4 rounded-xl font-medium text-[13px] disabled:opacity-40 disabled:cursor-not-allowed shrink-0 transition-all flex items-center gap-1.5 ${
+   484→   484→              running
+   485→   485→                ? "bg-red-500/90 text-white hover:bg-red-500"
+   486→   486→                : "bg-accent text-white hover:bg-accent/90"
+   487→   487→            }`}
+   488→   488→            title={running ? "Stop" : "Send (or queue if busy)"}
+   489→   489→          >
+   490→   490→            {running ? (
+   491→   491→              <>
+   492→   492→                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+   493→   493→                  <rect x="6" y="6" width="12" height="12" rx="1" />
+   494→   494→                </svg>
+   495→   495→                Stop
+   496→   496→              </>
+   497→   497→            ) : isBusy ? (
+   498→   498→              <>
+   499→   499→                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+   500→   500→                  <line x1="12" y1="5" x2="12" y2="19" />
+   501→   501→                  <line x1="5" y1="12" x2="19" y2="12" />
+   502→   502→                </svg>
+   503→   503→                Queue
+   504→   504→              </>
+   505→   505→            ) : (
+   506→   506→              <>
+   507→   507→                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+   508→   508→                  <line x1="22" y1="2" x2="10" y2="14" />
+   509→   509→                  <polygon points="22 2 15 22 10 14 2 9 22 2" />
+   510→   510→                </svg>
+   511→   511→                Send
+   512→   512→              </>
+   513→   513→            )}
+   514→   514→          </button>
+   515→   515→        </div>
+   516→   516→      </div>
+   517→   517→
+   518→   518→      {/* Overlays */}
+   519→   519→      <SessionSidebar
+   520→   520→        open={sidebarOpen}
+   521→   521→        sessions={sessions}
+   522→   522→        activeId={activeSessionId}
+   523→   523→        isLoading={false}
+   524→   524→        onSelect={(id) => {
+   525→   525→          switchSession(clientRef.current, id);
+   526→   526→          setSidebarOpen(false);
+   527→   527→        }}
+   528→   528→        onDelete={(id) => deleteSession(clientRef.current, id)}
+   529→   529→        onRename={(id, title) => renameSession(clientRef.current, id, title)}
+   530→   530→        onNew={handleNewSession}
+   531→   531→        onClose={() => setSidebarOpen(false)}
+   532→   532→      />
+   533→   533→
+   534→   534→      <FileDrawer
+   535→   535→        open={fileDrawerOpen}
+   536→   536→        onClose={() => setFileDrawerOpen(false)}
+   537→   537→        files={files}
+   538→   538→        sessionId={null}
+   539→   539→        settings={settings}
+   540→   540→        onRefresh={() => {}}
+   541→   541→      />
+   542→   542→
+   543→   543→      <PanelDrawer
+   544→   544→        open={panelDrawerOpen}
+   545→   545→        onClose={() => setPanelDrawerOpen(false)}
+   546→   546→        invocations={panelInvocations as PanelInvocation[]}
+   547→   547→      />
+   548→   548→    </div>
+   549→   549→  );
+   550→   550→}
+   551→   551→
+   552→   552→// ---------------------------------------------------------------------------
+   553→   553→// Empty state
+   554→   554→// ---------------------------------------------------------------------------
+   555→   555→
+   556→   556→function EmptyState({ onSend }: { onSend: (text: string) => void }) {
+   557→   557→  const suggestions = [
+   558→   558→    "Build a React component that displays a data table with sorting and filtering",
+   559→   559→    "Create a Python script that fetches data from an API and saves it to CSV",
+   560→   560→    "Write a Dockerfile for a Node.js application with multi-stage build",
+   561→   561→    "Set up a CI/CD pipeline configuration for running tests on every push",
+   562→   562→  ];
+   563→   563→
+   564→   564→  return (
+   565→   565→    <div className="flex flex-col items-center justify-center h-full px-6 py-12">
+   566→   566→      <div className="max-w-md w-full text-center">
+   567→   567→        {/* Icon */}
+   568→   568→        <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mx-auto mb-5">
+   569→   569→          <svg
+   570→   570→            width="28"
+   571→   571→            height="28"
+   572→   572→            viewBox="0 0 24 24"
+   573→   573→            fill="none"
+   574→   574→            stroke="currentColor"
+   575→   575→            strokeWidth="1.5"
+   576→   576→            strokeLinecap="round"
+   577→   577→            strokeLinejoin="round"
+   578→   578→            className="text-accent"
+   579→   579→          >
+   580→   580→            <path d="M12 2a10 10 0 0 1 10 10c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2z" />
+   581→   581→            <path d="M12 16v-4" />
+   582→   582→            <path d="M12 8h.01" />
+   583→   583→          </svg>
+   584→   584→        </div>
+   585→   585→
+   586→   586→        <h2 className="text-[17px] font-semibold text-foreground mb-2">
+   587→   587→          What would you like to build?
+   588→   588→        </h2>
+   589→   589→        <p className="text-[13px] text-muted-foreground mb-8 leading-relaxed">
+   590→   590→          The agent works in a private workspace and can build, edit, run, or
+   591→   591→          pack your code. Files appear in the file drawer. You can queue
+   592→   592→          multiple messages while it works.
+   593→   593→        </p>
+   594→   594→
+   595→   595→        {/* Suggestions */}
+   596→   596→        <div className="space-y-2 text-left">
+   597→   597→          {suggestions.map((s, i) => (
+   598→   598→            <button
+   599→   599→              key={i}
+   600→   600→              onClick={() => onSend(s)}
+   601→   601→              className="w-full text-left text-[12.5px] px-4 py-3 rounded-xl border border-border hover:border-accent/50 hover:bg-accent/5 transition-all text-muted-foreground hover:text-foreground leading-relaxed"
+   602→   602→            >
+   603→   603→              {s}
+   604→   604→            </button>
+   605→   605→          ))}
+   606→   606→        </div>
+   607→   607→      </div>
+   608→   608→    </div>
+   609→   609→  );
+   610→   610→}
+   611→   611→

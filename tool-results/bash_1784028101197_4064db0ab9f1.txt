@@ -1,0 +1,673 @@
+     1→from __future__ import annotations
+     2→import asyncio
+     3→import json
+     4→import os
+     5→import threading
+     6→import time
+     7→from dataclasses import dataclass
+     8→from typing import Any
+     9→
+    10→import httpx
+    11→
+    12→from content.roles import Roles
+    13→from providers import slot
+    14→from oplog import log_event
+    15→
+    16→# Stream responses by default. Long-reasoning models (DeepSeek V4 Pro / R1, etc.)
+    17→# emit large outputs that, non-streamed, make the provider hold the connection
+    18→# until done - tripping gateway 504s / read timeouts even though the model streams
+    19→# instantly in the vendor playground. STREAM=0 to disable.
+    20→STREAM_DEFAULT = os.environ.get("STREAM", "1").strip() not in ("0", "false", "no", "")
+    21→
+    22→#   fallback context window (tokens) for a slot whose ctx isn't in the catalog map.
+    23→#   conservative: big enough for normal prompts, small enough that an UNKNOWN host is
+    24→#   excluded from huge prompts (known small-ctx hosts are in the map, so still correct).
+    25→ORCH_DEFAULT_CTX = int(os.environ.get("ORCH_DEFAULT_CTX", "32768"))
+    26→
+    27→
+    28→# scheduler: picks slots by score + rotation + cooldown, paces calls per provider,
+    29→# and translates provider responses into ProviderError codes the orchestrator can route.
+    30→
+    31→# cooldowns - 429 means rate limit, give that slot a long break.
+    32→# everything else short-cools by a minute. keep blacklist for hard 4xx.
+    33→cooldown_rate_limit: float = 300.0
+    34→cooldown_minute: float = 60.0
+    35→
+    36→# family score recency multiplier - fresh wins (within 60s) count fully,
+    37→# old wins (>30min) decay to 0.7x.
+    38→rank_success_recently: float = 60.0
+    39→rank_success_window: float = 1800.0
+    40→rank_low_multiplier: float = 0.7
+    41→rank_default_multiplier: float = 0.9
+    42→
+    43→
+    44→# stat buckets - one per family, one per slot.
+    45→
+    46→@dataclass
+    47→class FamilyState:                # tracks how a model family (across providers) is doing
+    48→    successes: int = 0
+    49→    failures: int = 0
+    50→    last_success_ts: float = 0.0
+    51→
+    52→
+    53→@dataclass
+    54→class SlotState:                  # tracks one (provider, model) slot's health
+    55→    cooldown_until: float = 0.0
+    56→    blacklisted: bool = False
+    57→    last_error: str = ""
+    58→
+    59→
+    60→class SchedulerError(RuntimeError):
+    61→    """raised when no slot can serve the requested role."""
+    62→
+    63→
+    64→class ProviderError(RuntimeError):
+    65→    """llm error - 4xx / 5xx / http: / json: / shape: / empty: / refusal:"""
+    66→
+    67→
+    68→# error code classes - the orchestrator uses these to decide whether to
+    69→# retry, blacklist, or pause the whole run.
+    70→network_codes = {"http", "5xx", "524"}      # transient network / server problems
+    71→access_codes = {"400", "401", "403", "404"} # slot is permanently bad
+    72→
+    73→
+    74→def is_network_code(code: str) -> bool:
+    75→    #   used by the orchestrator to detect "all-attempts-failed-the-network".
+    76→    #   getaddrinfo / connection-reset / read timeouts all flow into 'http:'.
+    77→    return code in network_codes
+    78→
+    79→
+    80→# upstream proxies (openrouter etc.) report errors as STRING codes inside an
+    81→# http-200 body. normalize the common ones to our numeric codes so the failure
+    82→# routing (429 -> proportional cooldown, 401/403 -> blacklist) actually fires
+    83→# instead of falling through to the generic 60s cooldown.
+    84→UPSTREAM_CODE_MAP = {
+    85→    "rate_limit_exceeded": "429", "insufficient_quota": "429", "rate_limited": "429",
+    86→    "invalid_api_key": "401", "unauthorized": "401", "authentication_error": "401",
+    87→    "forbidden": "403", "permission_denied": "403",
+    88→    "not_found": "404", "model_not_found": "404",
+    89→    "context_length_exceeded": "413", "tokens_limit_reached": "413",
+    90→}
+    91→
+    92→
+    93→def normalize_upstream_code(raw) -> str:
+    94→    code = str(raw if raw is not None else "unknown")
+    95→    return UPSTREAM_CODE_MAP.get(code.lower(), code)
+    96→
+    97→
+    98→class SlotScheduler:
+    99→    """pick slots using provider rotation + family score + cooldown."""
+   100→
+   101→    def __init__(self, slots: list[slot], ctx_by_who: dict[str, int] | None = None) -> None:
+   102→        self.slots: list[slot] = list(slots)
+   103→        #       per-slot context window (who -> tokens). passed by REFERENCE so Panel can
+   104→        #       keep populating it as logical-model / panel slots register after boot.
+   105→        #       used to skip routing a prompt to a host whose window can't hold it.
+   106→        self.ctx_by_who: dict[str, int] = ctx_by_who if ctx_by_who is not None else {}
+   107→        self.slot_state: dict[str, SlotState] = {s.who: SlotState() for s in slots}
+   108→        families = {s.model_family for s in slots}
+   109→        self.family_state: dict[str, FamilyState] = {f: FamilyState() for f in families}
+   110→        #       this scheduler is now shared across the request-handler threads
+   111→        #       (each runs its own asyncio loop via asyncio.run) AND the JobRunner's
+   112→        #       background loop, so all mutable state is guarded by a threading.Lock.
+   113→        #       pacing reserves the next call slot under the lock and sleeps OUTSIDE
+   114→        #       it (you can't hold a threading.Lock across await).
+   115→        self._lock = threading.Lock()
+   116→        self.provider_last_call: dict[str, float] = {}
+   117→        #       per-provider success counts (telemetry) and ATTEMPT counts. rotation
+   118→        #       ranks by attempts (every pick), not successes, so a chronically
+   119→        #       failing provider accrues attempts and rotates to the back instead of
+   120→        #       staying at 0 successes and hogging first pick. seeded to 0 per
+   121→        #       process; pure runtime state, no disk.
+   122→        self.provider_calls: dict[str, int] = {}
+   123→        self.provider_attempts: dict[str, int] = {}
+   124→        for s in slots:
+   125→            self.provider_calls.setdefault(s.provider.name, 0)
+   126→            self.provider_attempts.setdefault(s.provider.name, 0)
+   127→
+   128→    def add_slots(self, slots: list[slot]) -> None:
+   129→        #   register slots discovered after construction (logical-model candidates
+   130→        #   / panel-named physical slots) so they join rotation. idempotent.
+   131→        with self._lock:
+   132→            for s in slots:
+   133→                if s.who in self.slot_state:
+   134→                    continue
+   135→                self.slots.append(s)
+   136→                self.slot_state[s.who] = SlotState()
+   137→                self.family_state.setdefault(s.model_family, FamilyState())
+   138→                self.provider_calls.setdefault(s.provider.name, 0)
+   139→                self.provider_attempts.setdefault(s.provider.name, 0)
+   140→
+   141→    def recency_mult(self, family: str) -> float:
+   142→        #   recent win -> 1x. nothing recent -> default 0.9. old win decays to 0.7.
+   143→        family_stats = self.family_state[family]
+   144→        if family_stats.last_success_ts == 0.0:
+   145→            return rank_default_multiplier
+   146→        age = time.time() - family_stats.last_success_ts
+   147→        if age <= rank_success_recently:
+   148→            return 1.0
+   149→        if age >= rank_success_window:
+   150→            return rank_low_multiplier
+   151→        span = rank_success_window - rank_success_recently
+   152→        frac = (age - rank_success_recently) / span
+   153→        return 1.0 - frac * (1.0 - rank_low_multiplier)
+   154→
+   155→    def family_score(self, family: str) -> float:
+   156→        #   laplace-smoothed success rate, scaled by recency. flaky models drop fast.
+   157→        family_stats = self.family_state[family]
+   158→        base = (family_stats.successes + 1) / (family_stats.successes + family_stats.failures + 2)
+   159→        return base * self.recency_mult(family)
+   160→
+   161→    def slot_ctx(self, who: str) -> int:
+   162→        return self.ctx_by_who.get(who, ORCH_DEFAULT_CTX)
+   163→
+   164→    def is_eligible(self, candidate: slot, role: Roles, exclude: set[str], now: float,
+   165→                    min_ctx: int = 0) -> bool:
+   166→        if role not in candidate.roles:
+   167→            return False
+   168→        state = self.slot_state[candidate.who]
+   169→        if state.blacklisted:
+   170→            return False
+   171→        if state.cooldown_until > now:
+   172→            return False
+   173→        if candidate.provider.name in exclude:
+   174→            return False
+   175→        if min_ctx and self.slot_ctx(candidate.who) < min_ctx:
+   176→            return False  # window too small to hold this prompt
+   177→        return True
+   178→
+   179→    def rank_key(self, candidate: slot) -> tuple:
+   180→        #   sort key for slot picking. lowest tuple wins.
+   181→        #     1. provider_attempts asc - rotate; fewest-ATTEMPTED provider wins so a
+   182→        #        repeatedly-failing provider rotates to the back (not stuck at first).
+   183→        #     2. family_score desc     - prefer healthier model families
+   184→        #     3. last_call asc         - freshest within a tie
+   185→        provider_attempts = self.provider_attempts.get(candidate.provider.name, 0)
+   186→        family_score = self.family_score(candidate.model_family)
+   187→        last_call = self.provider_last_call.get(candidate.provider.name, 0.0)
+   188→        return (provider_attempts, -family_score, last_call)
+   189→
+   190→    def _mark_attempt(self, picked: slot) -> None:
+   191→        #   called under the lock when a slot is selected. drives attempt-based rotation.
+   192→        self.provider_attempts[picked.provider.name] = (
+   193→            self.provider_attempts.get(picked.provider.name, 0) + 1
+   194→        )
+   195→
+   196→    @staticmethod
+   197→    def _as_exclude(exclude_providers: set[str] | str | None) -> set[str]:
+   198→        if exclude_providers is None:
+   199→            return set()
+   200→        if isinstance(exclude_providers, str):
+   201→            return {exclude_providers}
+   202→        return set(exclude_providers)
+   203→
+   204→    def pick_slot(self, role: Roles, exclude_providers: set[str] | str | None = None,
+   205→                  min_ctx: int = 0) -> slot:
+   206→        exclude = self._as_exclude(exclude_providers)
+   207→        with self._lock:
+   208→            now = time.time()
+   209→            eligible = [s for s in self.slots if self.is_eligible(s, role, exclude, now, min_ctx)]
+   210→
+   211→            #       fallback: relax the exclude (rotation rule) - better to repeat a
+   212→            #       provider than to fail the call entirely. min_ctx is KEPT: never route
+   213→            #       an oversized prompt to an undersized host.
+   214→            if not eligible and exclude:
+   215→                relaxed = [s for s in self.slots if self.is_eligible(s, role, set(), now, min_ctx)]
+   216→                if relaxed:
+   217→                    log_event("rotation_relaxed",
+   218→                              role=role.value, excluded=sorted(exclude),
+   219→                              relaxed_count=len(relaxed))
+   220→                    eligible = relaxed
+   221→
+   222→            if not eligible:
+   223→                cooling = sum(1 for s in self.slot_state.values() if s.cooldown_until > now)
+   224→                blacklisted = sum(1 for s in self.slot_state.values() if s.blacklisted)
+   225→                largest = max((self.slot_ctx(s.who) for s in self.slots), default=0)
+   226→                ctx_note = (f", need >={min_ctx} ctx but largest host = {largest}"
+   227→                            if min_ctx else "")
+   228→                raise SchedulerError(
+   229→                    f"role={role.value}: no eligible carriers ("
+   230→                    f"{cooling} cooling, {blacklisted} blacklisted, "
+   231→                    f"{len(self.slots)} total{ctx_note})"
+   232→                )
+   233→            eligible.sort(key=self.rank_key)
+   234→            chosen = eligible[0]
+   235→            self._mark_attempt(chosen)
+   236→            return chosen
+   237→
+   238→    def pick_slot_from(self, candidates: list[slot], role: Roles,
+   239→                       exclude_providers: set[str] | str | None = None) -> slot | None:
+   240→        #   like pick_slot but restricted to a candidate subset (one logical model's
+   241→        #   hosts). returns the best eligible candidate, or None if all are excluded /
+   242→        #   cooling / blacklisted. used by route_judge to bounce across providers.
+   243→        exclude = self._as_exclude(exclude_providers)
+   244→        with self._lock:
+   245→            now = time.time()
+   246→            eligible = [s for s in candidates if self.is_eligible(s, role, exclude, now)]
+   247→            if not eligible:
+   248→                return None
+   249→            eligible.sort(key=self.rank_key)
+   250→            chosen = eligible[0]
+   251→            self._mark_attempt(chosen)
+   252→            return chosen
+   253→
+   254→    def record_success(self, picked: slot) -> None:
+   255→        with self._lock:
+   256→            family = self.family_state[picked.model_family]
+   257→            family.successes += 1
+   258→            family.last_success_ts = time.time()
+   259→            state = self.slot_state[picked.who]
+   260→            #       only clear ALREADY-EXPIRED cooldown markers. an in-flight success
+   261→            #       must never erase an ACTIVE cooldown - not a budget cooldown (set
+   262→            #       hours ahead) nor a concurrent 429's cooldown (captest race, kimi):
+   263→            #       two calls race on one slot, one 429s (long cooldown), the other
+   264→            #       succeeds and would wipe it -> we'd hammer a rate-limited provider.
+   265→            if state.cooldown_until <= time.time():
+   266→                state.cooldown_until = 0.0
+   267→            state.last_error = ""
+   268→            #       provider rotation - count successful calls per provider so the
+   269→            #       next pick rotates to whichever has been used least.
+   270→            self.provider_calls[picked.provider.name] = (
+   271→                self.provider_calls.get(picked.provider.name, 0) + 1
+   272→            )
+   273→
+   274→    def set_budget_cooldown(self, provider_name: str, until_ts: float, reason: str = "") -> None:
+   275→        #   cool every slot of a provider until until_ts - used when per-profile
+   276→        #   metrics show the provider is at/over its published daily budget, so we
+   277→        #   stop routing to it without a real 429. reuses the is_eligible cooldown path.
+   278→        with self._lock:
+   279→            n = 0
+   280→            for s in self.slots:
+   281→                if s.provider.name == provider_name:
+   282→                    st = self.slot_state[s.who]
+   283→                    if until_ts > st.cooldown_until:
+   284→                        st.cooldown_until = until_ts
+   285→                        n += 1
+   286→        if n:
+   287→            log_event("budget_cooldown", provider=provider_name,
+   288→                      slots=n, until_s=round(until_ts - time.time(), 1), reason=reason[:160])
+   289→
+   290→    def _record_failure_locked(self, picked: slot, code: str, reason: str = "") -> None:
+   291→        #   different fail codes route to different penalties:
+   292→        #     json/shape/empty/refusal -> family-wide demerit
+   293→        #     429                      -> long slot cooldown
+   294→        #     400/401/403/404          -> blacklist the slot for the run (524 is transient: short cooldown)
+   295→        #     other (5xx, http, ...)   -> short slot cooldown
+   296→        state = self.slot_state[picked.who]
+   297→        state.last_error = f"{code}:{reason}"[:200]
+   298→
+   299→        if code in ("json", "shape", "empty", "refusal"):
+   300→            self.family_state[picked.model_family].failures += 1
+   301→            log_event("family_penalty",
+   302→                      slot=picked.who, family=picked.model_family,
+   303→                      code=code, reason=reason[:160])
+   304→        elif code == "429":
+   305→            #       proportional cooldown - LOW-rpm providers wait longer (stricter
+   306→            #       published limit), high-rpm ones hit the 15s floor. ceiling at the
+   307→            #       legacy 5min. rpm guarded >=1: a 0-rpm misconfig must not crash
+   308→            #       the failure path.
+   309→            cooldown_s = min(cooldown_rate_limit,
+   310→                             max(15.0, 120.0 / max(1, picked.provider.rpm) * 2))
+   311→            state.cooldown_until = time.time() + cooldown_s
+   312→            log_event("cooldown_set",
+   313→                      slot=picked.who, code=code, rpm=picked.provider.rpm,
+   314→                      cooldown_s=round(cooldown_s, 1), reason=reason[:160])
+   315→        elif code in ("400", "401", "403", "404"):
+   316→            #       hard access errors - the slot is broken for this account.
+   317→            state.blacklisted = True
+   318→            log_event("slot_blacklisted",
+   319→                      slot=picked.who, code=code, reason=reason[:160])
+   320→        elif code in ("413", "422"):
+   321→            #       payload-size / shape rejection - this call won't fit,
+   322→            #       but smaller calls might. cool the slot briefly so we rotate.
+   323→            state.cooldown_until = time.time() + cooldown_minute
+   324→            log_event("cooldown_set",
+   325→                      slot=picked.who, code=code,
+   326→                      cooldown_s=cooldown_minute, reason=reason[:160])
+   327→        else:
+   328→            #       transient network / 5xx / unknown - short cooldown.
+   329→            state.cooldown_until = time.time() + cooldown_minute
+   330→            log_event("cooldown_set",
+   331→                      slot=picked.who, code=code,
+   332→                      cooldown_s=cooldown_minute, reason=reason[:160])
+   333→
+   334→    def record_failure(self, picked: slot, code: str, reason: str = "") -> None:
+   335→        with self._lock:
+   336→            self._record_failure_locked(picked, code, reason)
+   337→
+   338→    async def wait_for_provider_pacing(self, picked: slot) -> None:
+   339→        #   pace calls per provider to stay under rpm. RESERVE the next allowed
+   340→        #   call time under the threading lock (so concurrent callers across loops
+   341→        #   stack their waits), then sleep outside the lock. min_gap=0 disables.
+   342→        #
+   343→        #   NOTE on the apparent "race" here (flagged in a whole-repo model review,
+   344→        #   2026-06; judged a FALSE POSITIVE): provider_last_call is advanced to the
+   345→        #   RESERVED time under the lock, so the Nth concurrent caller reads the
+   346→        #   (N-1)th caller's reservation and reserves min_gap after it. Callers sleep
+   347→        #   to their own staggered reservations - they cannot collapse onto the same
+   348→        #   slot, regardless of which thread or event loop they came from.
+   349→        name = picked.provider.name
+   350→        min_gap = 60.0 / max(1, picked.provider.rpm)
+   351→        with self._lock:
+   352→            now = time.time()
+   353→            last = self.provider_last_call.get(name, 0.0)
+   354→            earliest = max(now, last + min_gap)
+   355→            self.provider_last_call[name] = earliest
+   356→            sleep_s = earliest - now
+   357→        if sleep_s > 0:
+   358→            log_event("pacing_wait",
+   359→                      provider=name, slot=picked.who,
+   360→                      sleep_s=round(sleep_s, 2), rpm=picked.provider.rpm)
+   361→            await asyncio.sleep(sleep_s)
+   362→
+   363→    def earliest_wake_ts(self) -> float:
+   364→        #   for the runner: when is the soonest non-blacklisted slot off cooldown?
+   365→        with self._lock:
+   366→            cooling = [
+   367→                state.cooldown_until for state in self.slot_state.values()
+   368→                if not state.blacklisted and state.cooldown_until > 0.0
+   369→            ]
+   370→        return min(cooling) if cooling else 0.0
+   371→
+   372→    def snapshot(self) -> list[dict]:
+   373→        #   debug/telemetry view - one row per slot, sorted best-family-first.
+   374→        with self._lock:
+   375→            return self._snapshot_locked()
+   376→
+   377→    def _snapshot_locked(self) -> list[dict]:
+   378→        now = time.time()
+   379→        rows = []
+   380→        for s in self.slots:
+   381→            state = self.slot_state[s.who]
+   382→            family = self.family_state[s.model_family]
+   383→            rows.append({
+   384→                "slot": s.who,
+   385→                "family": s.model_family,
+   386→                "roles": [r.value for r in s.roles],
+   387→                "family_successes": family.successes,
+   388→                "family_failures": family.failures,
+   389→                "family_score": round(self.family_score(s.model_family), 3),
+   390→                "cooling_s": max(0.0, round(state.cooldown_until - now, 1)),
+   391→                "blacklisted": state.blacklisted,
+   392→                "last_error": state.last_error,
+   393→            })
+   394→        rows.sort(key=lambda r: r["family_score"], reverse=True)
+   395→        return rows
+   396→
+   397→    def provider_rollup(self) -> dict[str, dict]:
+   398→        #   per-provider rotation + health summary for /api/stats.
+   399→        with self._lock:
+   400→            now = time.time()
+   401→            out: dict[str, dict] = {}
+   402→            for s in self.slots:
+   403→                st = self.slot_state[s.who]
+   404→                row = out.setdefault(s.provider.name, {
+   405→                    "calls": self.provider_calls.get(s.provider.name, 0),
+   406→                    "slots": 0, "cooling_slots": 0, "blacklisted_slots": 0,
+   407→                    "pool": s.provider.pool, "rpm": s.provider.rpm,
+   408→                    "rpd": s.provider.rpd, "tpd": s.provider.tpd,
+   409→                })
+   410→                row["slots"] += 1
+   411→                if st.cooldown_until > now:
+   412→                    row["cooling_slots"] += 1
+   413→                if st.blacklisted:
+   414→                    row["blacklisted_slots"] += 1
+   415→            return out
+   416→
+   417→
+   418→# the http call. all retries / rotation / cooldowns happen one level up; here we
+   419→# just translate one http exchange into either a (content, usage) pair or a
+   420→# ProviderError. when MOCK_MODE is on it routes to the synthetic mock provider so
+   421→# the whole stack can run with zero real API calls.
+   422→
+   423→async def call_slot(client: httpx.AsyncClient, picked: slot, messages: list[dict[str, str]],
+   424→                    *, max_tokens: int, timeout_s: float = 600.0,
+   425→                    response_format: dict | None = None,
+   426→                    extra_body: dict | None = None,
+   427→                    on_progress=None) -> tuple[str, dict]:
+   428→    #   extra_body carries per-model reasoning/thinking fields (from reasoning_catalog)
+   429→    #   that are shallow-merged into the request. On success, usage may include a
+   430→    #   "reasoning_content" key when a thinking model streamed its trace.
+   431→    import mock_provider
+   432→    if mock_provider.ENABLED:
+   433→        return await mock_provider.mock_call_slot(
+   434→            client, picked, messages, max_tokens=max_tokens,
+   435→            timeout_s=timeout_s, response_format=response_format)
+   436→
+   437→    p = picked.provider
+   438→    #   clamp to the provider's published per-request output ceiling (e.g. GitHub
+   439→    #   Models free tier rejects ~4k+). everywhere else stays uncapped so frontier
+   440→    #   models can use their full budget.
+   441→    if p.max_out:
+   442→        max_tokens = min(max_tokens, p.max_out)
+   443→    headers = {
+   444→        "Authorization": f"Bearer {p.api_key}",
+   445→        "Content-Type": "application/json",
+   446→    }
+   447→    headers.update(p.extra_headers)
+   448→
+   449→    body: dict[str, Any] = {
+   450→        "model": picked.model,
+   451→        "messages": messages,
+   452→        "max_tokens": max_tokens,
+   453→    }
+   454→    if response_format is not None:
+   455→        body["response_format"] = response_format
+   456→    if extra_body:
+   457→        body.update(extra_body)
+   458→
+   459→    log_base = dict(provider=p.name, model=picked.model, family=picked.model_family,
+   460→                    slot=picked.who)
+   461→
+   462→    if STREAM_DEFAULT:
+   463→        return await _call_slot_stream(client, picked, headers, body, timeout_s, log_base,
+   464→                                       on_progress=on_progress)
+   465→
+   466→    t_call = time.monotonic()
+   467→    status: int | None = None
+   468→    try:
+   469→        response = await client.post(p.url, headers=headers, json=body, timeout=timeout_s)
+   470→        status = response.status_code
+   471→        duration = round(time.monotonic() - t_call, 2)
+   472→
+   473→        # http status routing - 429 cools, 4xx blacklists, 5xx cools.
+   474→        if status == 429:
+   475→            log_event("call_fail", **log_base, http_status=429,
+   476→                      fail_code="429", reason="HTTP 429", duration_s=duration)
+   477→            raise ProviderError(f"429:HTTP 429 from {picked.who}")
+   478→        if status is not None and 400 <= status < 500:
+   479→            body_text = response.text[:160]
+   480→            #       NVIDIA NIM reports a temporarily-down model as HTTP 400
+   481→            #       "DEGRADED function cannot be invoked" (seen live on
+   482→            #       deepseek-v4-pro). that's a transient outage, NOT a permanent
+   483→            #       slot verdict - classify as 5xx so it cools instead of
+   484→            #       blacklisting until restart.
+   485→            if status == 400 and "DEGRADED" in body_text:
+   486→                msg = f"HTTP 400 (degraded): {body_text}"
+   487→                log_event("call_fail", **log_base, http_status=status,
+   488→                          fail_code="5xx", reason=msg, duration_s=duration)
+   489→                raise ProviderError(f"5xx:{msg}")
+   490→            #       413 = payload too large, 422 = message-shape rejection
+   491→            #       (slot-specific: rotate away, short cooldown). 400/401/403/404
+   492→            #       blacklist. other 4xx (402, 408, 451, ...) surface their numeric
+   493→            #       code so failure routing cools the slot rather than treating it
+   494→            #       as network-class ('http') and retrying a failing host forever.
+   495→            msg = f"HTTP {status}: {body_text}"
+   496→            log_event("call_fail", **log_base, http_status=status,
+   497→                      fail_code=str(status), reason=msg, duration_s=duration)
+   498→            raise ProviderError(f"{status}:{msg}")
+   499→        if status is not None and status >= 500:
+   500→            msg = f"HTTP {status}: {response.text[:160]}"
+   501→            code = "524" if status == 524 else "5xx"
+   502→            log_event("call_fail", **log_base, http_status=status,
+   503→                      fail_code=code, reason=msg, duration_s=duration)
+   504→            raise ProviderError(f"{code}:{msg}")
+   505→        response.raise_for_status()
+   506→
+   507→        try:
+   508→            data = response.json()
+   509→        except ValueError as e:
+   510→            log_event("call_fail", **log_base, http_status=status,
+   511→                      fail_code="json", reason=f"non-json: {e!r}", duration_s=duration,
+   512→                      url=p.url[:120] if p.url else None)
+   513→            raise ProviderError(f"json:{e!r}")
+   514→
+   515→        # openrouter quirk: upstream errors arrive as http 200 with a body
+   516→        # like {"error": {"code": ..., "message": ...}}. catch that.
+   517→        if isinstance(data, dict) and data.get("error"):
+   518→            err = data["error"]
+   519→            err_code = normalize_upstream_code(err.get("code", "unknown"))
+   520→            msg = err.get("message", "")[:200]
+   521→            log_event("call_fail", **log_base, http_status=status,
+   522→                      fail_code=err_code, upstream_code=err_code,
+   523→                      reason=f"upstream {err_code}: {msg}", duration_s=duration)
+   524→            raise ProviderError(f"{err_code}:upstream {err_code}: {msg}")
+   525→
+   526→        try:
+   527→            message = data["choices"][0]["message"]
+   528→            content = message["content"]
+   529→        except (KeyError, IndexError, TypeError) as e:
+   530→            msg = f"bad shape: {e!r}; body={str(data)[:200]}"
+   531→            log_event("call_fail", **log_base, http_status=status,
+   532→                      fail_code="shape", reason=msg[:300], duration_s=duration)
+   533→            raise ProviderError(f"shape:{msg}")
+   534→
+   535→        #       reasoning models return the trace as message.reasoning_content in
+   536→        #       non-streamed responses; surface it in usage exactly like the
+   537→        #       streaming path does (and fall back to it when content is empty).
+   538→        reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+   539→        if (not content or not content.strip()) and reasoning and reasoning.strip():
+   540→            content = reasoning
+   541→
+   542→        if not content or not content.strip():
+   543→            log_event("call_fail", **log_base, http_status=status,
+   544→                      fail_code="empty", reason="empty content", duration_s=duration)
+   545→            raise ProviderError(f"empty:empty content from {picked.who}")
+   546→
+   547→        usage = data.get("usage", {}) if isinstance(data, dict) else {}
+   548→        if reasoning and isinstance(reasoning, str) and reasoning.strip():
+   549→            usage = dict(usage if isinstance(usage, dict) else {}, reasoning_content=reasoning)
+   550→        log_event("call_ok", **log_base, http_status=status,
+   551→                  duration_s=duration,
+   552→                  in_tokens=usage.get("prompt_tokens"),
+   553→                  out_tokens=usage.get("completion_tokens"),
+   554→                  out_chars=len(content))
+   555→        return content, (usage if isinstance(usage, dict) else {})
+   556→
+   557→    except httpx.HTTPError as e:
+   558→        duration = round(time.monotonic() - t_call, 2)
+   559→        log_event("call_fail", **log_base, http_status=status,
+   560→                  fail_code="http", reason=repr(e)[:300], duration_s=duration,
+   561→                  url=p.url[:120] if p.url else None)
+   562→        raise ProviderError(f"http:{e!r}")
+   563→
+   564→
+   565→
+   566→async def _call_slot_stream(client: httpx.AsyncClient, picked: slot, headers: dict,
+   567→                            body: dict, timeout_s: float, log_base: dict,
+   568→                            on_progress=None) -> tuple[str, dict]:
+   569→    #   streaming variant: keeps the connection alive across long generations and
+   570→    #   surfaces reasoning_content for thinking models. accumulates SSE deltas into
+   571→    #   one (content, usage) result, mapping the same error codes as the sync path.
+   572→    #   on_progress(content_chars, reasoning_chars, tail) is called every ~25 chunks
+   573→    #   so callers (the async JobRunner) can expose live "watch it think" state.
+   574→    p = picked.provider
+   575→    sbody = dict(body, stream=True, stream_options={"include_usage": True})
+   576→    t_call = time.monotonic()
+   577→    status: int | None = None
+   578→    try:
+   579→        async with client.stream("POST", p.url, headers=headers, json=sbody, timeout=timeout_s) as response:
+   580→            status = response.status_code
+   581→            if status != 200:
+   582→                text = (await response.aread()).decode("utf-8", "replace")[:200]
+   583→                duration = round(time.monotonic() - t_call, 2)
+   584→                if status == 429:
+   585→                    log_event("call_fail", **log_base, http_status=429, fail_code="429",
+   586→                              reason="HTTP 429", duration_s=duration)
+   587→                    raise ProviderError(f"429:HTTP 429 from {picked.who}")
+   588→                if status == 400 and "DEGRADED" in text:
+   589→                    #       NVIDIA NIM transient outage reported as 400 - cool, don't
+   590→                    #       blacklist (mirrors the non-stream path).
+   591→                    log_event("call_fail", **log_base, http_status=status, fail_code="5xx",
+   592→                              reason=f"HTTP 400 (degraded): {text}", duration_s=duration)
+   593→                    raise ProviderError(f"5xx:HTTP 400 (degraded): {text}")
+   594→                if status in (400, 401, 403, 404, 413, 422) or 400 <= status < 500:
+   595→                    #       includes other 4xx (402 etc.) - provider verdicts, not
+   596→                    #       network blips; numeric code routes to the right penalty.
+   597→                    log_event("call_fail", **log_base, http_status=status, fail_code=str(status),
+   598→                              reason=f"HTTP {status}: {text}", duration_s=duration)
+   599→                    raise ProviderError(f"{status}:HTTP {status}: {text}")
+   600→                code = "524" if status == 524 else ("5xx" if status >= 500 else "http")
+   601→                log_event("call_fail", **log_base, http_status=status, fail_code=code,
+   602→                          reason=f"HTTP {status}: {text}", duration_s=duration)
+   603→                raise ProviderError(f"{code}:HTTP {status}: {text}")
+   604→
+   605→            content_parts: list[str] = []
+   606→            reasoning_parts: list[str] = []
+   607→            content_len = reasoning_len = 0
+   608→            chunks_seen = 0
+   609→            usage: dict = {}
+   610→            async for line in response.aiter_lines():
+   611→                line = line.strip()
+   612→                if not line or not line.startswith("data:"):
+   613→                    continue
+   614→                payload = line[len("data:"):].strip()
+   615→                if payload == "[DONE]":
+   616→                    break
+   617→                try:
+   618→                    chunk = json.loads(payload)
+   619→                except ValueError:
+   620→                    continue
+   621→                if not isinstance(chunk, dict):
+   622→                    #       a bare array/string payload ('data: []') would crash the
+   623→                    #       .get() calls below with AttributeError (captest, kimi).
+   624→                    continue
+   625→                if chunk.get("error"):
+   626→                    err = chunk["error"]
+   627→                    #   some hosts send a STRING error instead of an object; coerce so
+   628→                    #   err.get() can't raise AttributeError (whole-repo review finding).
+   629→                    if not isinstance(err, dict):
+   630→                        err = {"code": "unknown", "message": str(err)}
+   631→                    ecode = normalize_upstream_code(err.get("code", "unknown"))
+   632→                    raise ProviderError(f"{ecode}:upstream {ecode}: {str(err.get('message',''))[:200]}")
+   633→                for ch in (chunk.get("choices") or []):
+   634→                    delta = ch.get("delta") or {}
+   635→                    if delta.get("content"):
+   636→                        content_parts.append(delta["content"])
+   637→                        content_len += len(delta["content"])
+   638→                    if delta.get("reasoning_content"):
+   639→                        reasoning_parts.append(delta["reasoning_content"])
+   640→                        reasoning_len += len(delta["reasoning_content"])
+   641→                if isinstance(chunk.get("usage"), dict):
+   642→                    usage = chunk["usage"]
+   643→                chunks_seen += 1
+   644→                if on_progress is not None and chunks_seen % 25 == 0:
+   645→                    tail_src = content_parts if content_parts else reasoning_parts
+   646→                    try:
+   647→                        on_progress(content_len, reasoning_len,
+   648→                                    "".join(tail_src[-8:])[-200:])
+   649→                    except Exception:  # noqa: BLE001 - progress is best-effort
+   650→                        pass
+   651→
+   652→        content = "".join(content_parts)
+   653→        reasoning = "".join(reasoning_parts)
+   654→        if not content.strip():
+   655→            content = reasoning
+   656→        duration = round(time.monotonic() - t_call, 2)
+   657→        if not content or not content.strip():
+   658→            log_event("call_fail", **log_base, http_status=status, fail_code="empty",
+   659→                      reason="empty content (stream)", duration_s=duration)
+   660→            raise ProviderError(f"empty:empty content from {picked.who}")
+   661→        if reasoning.strip():
+   662→            usage = dict(usage or {}, reasoning_content=reasoning)
+   663→        log_event("call_ok", **log_base, http_status=status, duration_s=duration,
+   664→                  in_tokens=usage.get("prompt_tokens"), out_tokens=usage.get("completion_tokens"),
+   665→                  out_chars=len(content), reasoning_chars=len(reasoning), streamed=True)
+   666→        return content, usage
+   667→    except httpx.HTTPError as e:
+   668→        duration = round(time.monotonic() - t_call, 2)
+   669→        log_event("call_fail", **log_base, http_status=status,
+   670→                  fail_code="http", reason=repr(e)[:300], duration_s=duration,
+   671→                  url=p.url[:120] if p.url else None)
+   672→        raise ProviderError(f"http:{e!r}")
+   673→

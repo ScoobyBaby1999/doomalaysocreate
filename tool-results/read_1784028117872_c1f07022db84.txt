@@ -1,0 +1,1143 @@
+     1→/**
+     2→ * Chat Store — Centralized state management for agent chat.
+     3→ *
+     4→ * Key features (the "1-up" philosophy):
+     5→ *  - **Message queue**: users can queue multiple messages while the LLM is
+     6→ *    working. They fire sequentially the moment the previous turn ends.
+     7→ *  - **SSE streaming**: real-time deltas (no 300ms polling pop-in).
+     8→ *  - **Crash-safe persistence**: activeSessionId and workspaceId survive
+     9→ *    refresh. The session list is rehydrated from the backend on mount.
+    10→ *  - **Optimistic UI**: every user action reflects instantly in the UI;
+    11→ *    backend errors are surfaced as inline retries, never as disappearing
+    12→ *    state.
+    13→ *  - **Immutable updates**: no in-place mutation of messages (which caused
+    14→ *    the previous "stack weirdly" bug).
+    15→ *  - **Single source of truth for the agent session**: we track
+    16→ *    `currentAgentSessionId` so Stop actually works.
+    17→ */
+    18→import { create } from "zustand";
+    19→import { persist } from "zustand/middleware";
+    20→import {
+    21→  AgentClient,
+    22→  type AgentEvent,
+    23→  type AgentFile,
+    24→  type AgentStatus,
+    25→  type ChatSession,
+    26→  type AgentStart,
+    27→} from "../api/agent";
+    28→
+    29→// ---------------------------------------------------------------------------
+    30→// Types
+    31→// ---------------------------------------------------------------------------
+    32→
+    33→export type ChatRole =
+    34→  | "user"
+    35→  | "assistant"
+    36→  | "thinking"
+    37→  | "tool"
+    38→  | "status"
+    39→  | "panel";
+    40→
+    41→export interface ChatMessage {
+    42→  id: string;
+    43→  role: ChatRole;
+    44→  content: string;
+    45→  isError?: boolean;
+    46→  isStreaming?: boolean;
+    47→  toolName?: string;
+    48→  toolSummary?: string;
+    49→  panelStatus?: string;
+    50→  costUsd?: number | null;
+    51→  timestamp: number;
+    52→  /** Backend seq number — used for dedupe. Local-only messages use -1. */
+    53→  seq: number;
+    54→  /** True for messages that haven't been ack'd by the backend yet. */
+    55→  pending?: boolean;
+    56→}
+    57→
+    58→export interface QueuedMessage {
+    59→  id: string;
+    60→  text: string;
+    61→  enqueuedAt: number;
+    62→}
+    63→
+    64→export interface PanelInvocation {
+    65→  invoke_id: string;
+    66→  task_name: string;
+    67→  prompt: string;
+    68→  panel: string[];
+    69→  status: string;
+    70→  snapshot?: Record<string, unknown>;
+    71→  error?: string;
+    72→}
+    73→
+    74→export interface ChatState {
+    75→  // Sessions
+    76→  sessions: ChatSession[];
+    77→  activeSessionId: string | null;
+    78→  isLoadingSessions: boolean;
+    79→  sessionError: string | null;
+    80→  /** True while we're restoring the active session's events on mount/switch. */
+    81→  isLoadingMessages: boolean;
+    82→
+    83→  // Messages
+    84→  messages: ChatMessage[];
+    85→  isStreaming: boolean;
+    86→  status: AgentStatus;
+    87→
+    88→  // Input
+    89→  inputText: string;
+    90→  /** True when an agent turn is in flight (UI shows Stop). */
+    91→  isBusy: boolean;
+    92→  error: string | null;
+    93→
+    94→  // Message queue (1-up: send-while-busy)
+    95→  queue: QueuedMessage[];
+    96→
+    97→  // Per-session toggles
+    98→  effort: "low" | "med" | "high" | "max";
+    99→  webSearch: boolean;
+   100→  deepResearch: boolean;
+   101→
+   102→  // Files
+   103→  files: AgentFile[];
+   104→  fileDrawerOpen: boolean;
+   105→
+   106→  // Panel
+   107→  panelInvocations: PanelInvocation[];
+   108→  panelDrawerOpen: boolean;
+   109→
+   110→  // Session sidebar
+   111→  sidebarOpen: boolean;
+   112→
+   113→  // Derived
+   114→  cost: number | null;
+   115→  currentModel: string | null;
+   116→  /** The model the backend actually resolved + is running (for verification). */
+   117→  resolvedModel: string | null;
+   118→  /** The provider serving the current/last agent turn (for verification). */
+   119→  resolvedProvider: string | null;
+   120→  /** The model the user requested (may differ from resolvedModel if the
+   121→   *  backend fell back). Shown in the UI so the user can spot mismatches. */
+   122→  requestedModel: string | null;
+   123→  workspaceId: string | null;
+   124→
+   125→  // Internal: current agent session ID (for Stop and SSE)
+   126→  _agentSessionId: string | null;
+   127→  _streamController: AbortController | null;
+   128→  /** Highest event seq we've seen for the current agent session. Used as the
+   129→   *  SSE cursor for the next turn so we don't replay the whole transcript. */
+   130→  _lastEventSeq: number;
+   131→
+   132→  // Actions
+   133→  setInputText: (text: string) => void;
+   134→  setEffort: (effort: "low" | "med" | "high" | "max") => void;
+   135→  toggleWebSearch: () => void;
+   136→  toggleDeepResearch: () => void;
+   137→  setSidebarOpen: (open: boolean) => void;
+   138→  setFileDrawerOpen: (open: boolean) => void;
+   139→  setPanelDrawerOpen: (open: boolean) => void;
+   140→  setWorkspaceId: (id: string | null) => void;
+   141→
+   142→  // Core operations
+   143→  loadSessions: (client: AgentClient) => Promise<void>;
+   144→  createSession: (client: AgentClient, model?: string) => Promise<string>;
+   145→  switchSession: (client: AgentClient, sessionId: string) => Promise<void>;
+   146→  deleteSession: (client: AgentClient, sessionId: string) => Promise<void>;
+   147→  renameSession: (client: AgentClient, sessionId: string, title: string) => Promise<void>;
+   148→  sendMessage: (
+   149→    client: AgentClient,
+   150→    message: string,
+   151→    model?: string
+   152→  ) => Promise<void>;
+   153→  /** Remove a queued message (only if not yet sent). */
+   154→  dequeueMessage: (id: string) => void;
+   155→  stopGeneration: (client: AgentClient) => Promise<void>;
+   156→  refreshFiles: (client: AgentClient) => Promise<void>;
+   157→}
+   158→
+   159→// ---------------------------------------------------------------------------
+   160→// Helpers
+   161→// ---------------------------------------------------------------------------
+   162→
+   163→let nextMsgId = 0;
+   164→function genMsgId(): string {
+   165→  return `m${++nextMsgId}_${Date.now().toString(36)}`;
+   166→}
+   167→
+   168→function genQueueId(): string {
+   169→  return `q${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+   170→}
+   171→
+   172→/** Convert raw AgentEvents into normalized ChatMessages. Pure function. */
+   173→export function eventsToMessages(events: AgentEvent[]): ChatMessage[] {
+   174→  const messages: ChatMessage[] = [];
+   175→  // Track the index of the streaming assistant / thinking message so deltas
+   176→  // merge into it without mutation.
+   177→  let streamingAssistantIdx = -1;
+   178→  let streamingThinkingIdx = -1;
+   179→
+   180→  for (const ev of events) {
+   181→    const ts = (ev.ts || Date.now() / 1000) * 1000;
+   182→    const seq = ev.i ?? messages.length;
+   183→
+   184→    switch (ev.type) {
+   185→      case "user": {
+   186→        messages.push({
+   187→          id: genMsgId(),
+   188→          role: "user",
+   189→          content: ev.text || "",
+   190→          timestamp: ts,
+   191→          seq,
+   192→        });
+   193→        streamingAssistantIdx = -1;
+   194→        streamingThinkingIdx = -1;
+   195→        break;
+   196→      }
+   197→      case "assistant": {
+   198→        messages.push({
+   199→          id: genMsgId(),
+   200→          role: "assistant",
+   201→          content: ev.text || "",
+   202→          timestamp: ts,
+   203→          seq,
+   204→        });
+   205→        streamingAssistantIdx = -1;
+   206→        streamingThinkingIdx = -1;
+   207→        break;
+   208→      }
+   209→      case "assistant_delta": {
+   210→        if (streamingAssistantIdx === -1) {
+   211→          messages.push({
+   212→            id: genMsgId(),
+   213→            role: "assistant",
+   214→            content: ev.text || "",
+   215→            isStreaming: true,
+   216→            timestamp: ts,
+   217→            seq,
+   218→          });
+   219→          streamingAssistantIdx = messages.length - 1;
+   220→        } else {
+   221→          const cur = messages[streamingAssistantIdx];
+   222→          messages[streamingAssistantIdx] = {
+   223→            ...cur,
+   224→            content: cur.content + (ev.text || ""),
+   225→            seq,
+   226→            isStreaming: true,
+   227→          };
+   228→        }
+   229→        streamingThinkingIdx = -1;
+   230→        break;
+   231→      }
+   232→      case "thinking": {
+   233→        // Merge consecutive thinking events into one bubble.
+   234→        // The backend accumulates thinking text in one event (same seq),
+   235→        // but the post-turn walk may emit a separate one. Merge by checking
+   236→        // if the last message is a thinking bubble.
+   237→        if (messages.length > 0 && messages[messages.length - 1].role === "thinking") {
+   238→          const last = messages[messages.length - 1];
+   239→          const newText = ev.text || "";
+   240→          const oldText = last.content || "";
+   241→          if (newText.length >= oldText.length && newText.startsWith(oldText)) {
+   242→            messages[messages.length - 1] = { ...last, content: newText, seq };
+   243→          } else if (!oldText.startsWith(newText)) {
+   244→            messages[messages.length - 1] = { ...last, content: oldText + newText, seq };
+   245→          }
+   246→        } else {
+   247→          messages.push({
+   248→            id: genMsgId(),
+   249→            role: "thinking",
+   250→            content: ev.text || "",
+   251→            timestamp: ts,
+   252→            seq,
+   253→          });
+   254→        }
+   255→        streamingThinkingIdx = -1;
+   256→        streamingAssistantIdx = -1;
+   257→        break;
+   258→      }
+   259→      case "thinking_delta": {
+   260→        if (streamingThinkingIdx === -1) {
+   261→          messages.push({
+   262→            id: genMsgId(),
+   263→            role: "thinking",
+   264→            content: ev.text || "",
+   265→            isStreaming: true,
+   266→            timestamp: ts,
+   267→            seq,
+   268→          });
+   269→          streamingThinkingIdx = messages.length - 1;
+   270→        } else {
+   271→          const cur = messages[streamingThinkingIdx];
+   272→          messages[streamingThinkingIdx] = {
+   273→            ...cur,
+   274→            content: cur.content + (ev.text || ""),
+   275→            seq,
+   276→            isStreaming: true,
+   277→          };
+   278→        }
+   279→        streamingAssistantIdx = -1;
+   280→        break;
+   281→      }
+   282→      case "tool_use": {
+   283→        messages.push({
+   284→          id: genMsgId(),
+   285→          role: "tool",
+   286→          content: "",
+   287→          toolName: ev.name || "tool",
+   288→          toolSummary: ev.summary || "",
+   289→          timestamp: ts,
+   290→          seq,
+   291→        });
+   292→        streamingAssistantIdx = -1;
+   293→        streamingThinkingIdx = -1;
+   294→        break;
+   295→      }
+   296→      case "tool_result": {
+   297→        messages.push({
+   298→          id: genMsgId(),
+   299→          role: "tool",
+   300→          content: ev.text || "",
+   301→          isError: ev.is_error,
+   302→          toolName: "result",
+   303→          timestamp: ts,
+   304→          seq,
+   305→        });
+   306→        streamingAssistantIdx = -1;
+   307→        streamingThinkingIdx = -1;
+   308→        break;
+   309→      }
+   310→      case "status": {
+   311→        const st = ev as {
+   312→          state: AgentStatus;
+   313→          detail?: string;
+   314→          cost_usd?: number | null;
+   315→        };
+   316→        if (st.state === "idle" && st.detail === "interrupted") {
+   317→          messages.push({
+   318→            id: genMsgId(),
+   319→            role: "status",
+   320→            content: "— stopped —",
+   321→            timestamp: ts,
+   322→            seq,
+   323→          });
+   324→        } else if (st.state === "error") {
+   325→          messages.push({
+   326→            id: genMsgId(),
+   327→            role: "status",
+   328→            content: st.detail || "Agent error",
+   329→            isError: true,
+   330→            costUsd: st.cost_usd,
+   331→            timestamp: ts,
+   332→            seq,
+   333→          });
+   334→        }
+   335→        // status events don't reset streaming indexes — they wrap a turn.
+   336→        break;
+   337→      }
+   338→      case "panel": {
+   339→        messages.push({
+   340→          id: genMsgId(),
+   341→          role: "panel",
+   342→          content: ev.task_name || "Panel",
+   343→          panelStatus: ev.status || "starting",
+   344→          timestamp: ts,
+   345→          seq,
+   346→        });
+   347→        streamingAssistantIdx = -1;
+   348→        streamingThinkingIdx = -1;
+   349→        break;
+   350→      }
+   351→      // steering events are not rendered as messages (they're routing metadata).
+   352→    }
+   353→  }
+   354→
+   355→  // Mark the last streaming message as no longer streaming (turn ended).
+   356→  if (streamingAssistantIdx !== -1) {
+   357→    messages[streamingAssistantIdx] = { ...messages[streamingAssistantIdx], isStreaming: false };
+   358→  }
+   359→  if (streamingThinkingIdx !== -1) {
+   360→    messages[streamingThinkingIdx] = { ...messages[streamingThinkingIdx], isStreaming: false };
+   361→  }
+   362→
+   363→  return messages;
+   364→}
+   365→
+   366→/** Append a single new event to the existing message list (immutable).
+   367→ *  DEDUP: every event type checks by seq before appending, so a replayed
+   368→ *  event (e.g. from a since=0 re-poll) never creates a duplicate message.
+   369→ *  Delta events (assistant_delta, thinking_delta) merge into the last streaming
+   370→ *  message of the matching role; they don't use seq dedup because multiple
+   371→ *  deltas share the growing message. */
+   372→function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
+   373→  const ts = (ev.ts || Date.now() / 1000) * 1000;
+   374→  const seq = ev.i ?? existing.length;
+   375→  const out = existing.slice();
+   376→
+   377→  // Universal seq dedup for non-delta events. Prevents duplicated
+   378→  // assistant/thinking/tool/status/panel messages when the SSE cursor resets
+   379→  // or the backend replays events. EXCEPTION: thinking events use the SAME
+   380→  // seq for merged updates (the backend replaces the text of the last
+   381→  // thinking event and re-emits it with the same i). So thinking events
+   382→  // bypass dedup and always go through the merge logic in the switch.
+   383→  if (ev.type !== "assistant_delta" && ev.type !== "thinking_delta" && ev.type !== "thinking") {
+   384→    if (out.some((m) => m.seq === seq && m.role !== "user")) {
+   385→      return out; // already have this event
+   386→    }
+   387→  }
+   388→
+   389→  switch (ev.type) {
+   390→    case "user": {
+   391→      // Backend echoes user messages. If we already have a pending user
+   392→      // message with the same content (the optimistic one we added locally),
+   393→      // mark it ack'd instead of duplicating.
+   394→      const idx = out.findIndex(
+   395→        (m) => m.role === "user" && m.pending && m.content === (ev.text || "")
+   396→      );
+   397→      if (idx !== -1) {
+   398→        out[idx] = { ...out[idx], pending: false, seq, timestamp: ts };
+   399→        return out;
+   400→      }
+   401→      // Otherwise, only add if we don't already have this exact seq as a user.
+   402→      if (!out.some((m) => m.role === "user" && m.seq === seq)) {
+   403→        out.push({
+   404→          id: genMsgId(),
+   405→          role: "user",
+   406→          content: ev.text || "",
+   407→          timestamp: ts,
+   408→          seq,
+   409→        });
+   410→      }
+   411→      return out;
+   412→    }
+   413→    case "assistant": {
+   414→      // A non-delta assistant event is a complete message. If there's a
+   415→      // streaming assistant message at the end, finalize it with this content.
+   416→      for (let i = out.length - 1; i >= 0; i--) {
+   417→        if (out[i].role === "assistant" && out[i].isStreaming) {
+   418→          out[i] = { ...out[i], content: ev.text || out[i].content, isStreaming: false, seq };
+   419→          return out;
+   420→        }
+   421→      }
+   422→      out.push({
+   423→        id: genMsgId(),
+   424→        role: "assistant",
+   425→        content: ev.text || "",
+   426→        timestamp: ts,
+   427→        seq,
+   428→      });
+   429→      return out;
+   430→    }
+   431→    case "assistant_delta": {
+   432→      // Find the last assistant message that is currently streaming.
+   433→      for (let i = out.length - 1; i >= 0; i--) {
+   434→        if (out[i].role === "assistant" && out[i].isStreaming) {
+   435→          out[i] = { ...out[i], content: out[i].content + (ev.text || ""), seq };
+   436→          return out;
+   437→        }
+   438→      }
+   439→      // No streaming assistant — start a new one.
+   440→      out.push({
+   441→        id: genMsgId(),
+   442→        role: "assistant",
+   443→        content: ev.text || "",
+   444→        isStreaming: true,
+   445→        timestamp: ts,
+   446→        seq,
+   447→      });
+   448→      return out;
+   449→    }
+   450→    case "thinking": {
+   451→      // The backend emits multiple "thinking" events as reasoning streams in.
+   452→      // emit() ACCUMULATES the text (appends fragments) and sends the
+   453→      // accumulated text with the SAME seq (i) to SSE. So consecutive thinking
+   454→      // events with the same seq should MERGE into one growing bubble.
+   455→      // We also merge by position: if the last thinking bubble is streaming,
+   456→      // merge into it. This handles both same-seq and positional merging.
+   457→      for (let i = out.length - 1; i >= 0; i--) {
+   458→        if (out[i].role === "thinking") {
+   459→          // Found a thinking bubble — merge into it.
+   460→          const newText = ev.text || "";
+   461→          const oldText = out[i].content || "";
+   462→          // The backend sends accumulated text (growing). If the new text
+   463→          // starts with the old text, it's the accumulated version — replace.
+   464→          // Otherwise append (fragment mode).
+   465→          if (newText.length >= oldText.length && newText.startsWith(oldText)) {
+   466→            out[i] = { ...out[i], content: newText, seq, timestamp: ts, isStreaming: true };
+   467→          } else if (oldText.startsWith(newText)) {
+   468→            // New text is a prefix of old — ignore (stale/duplicate)
+   469→            return out;
+   470→          } else {
+   471→            // Fragment — append
+   472→            out[i] = { ...out[i], content: oldText + newText, seq, timestamp: ts, isStreaming: true };
+   473→          }
+   474→          return out;
+   475→        }
+   476→        // If we hit a non-thinking message, stop scanning — start a new bubble.
+   477→        if (out[i].role === "assistant" || out[i].role === "user" || out[i].role === "tool") {
+   478→          break;
+   479→        }
+   480→      }
+   481→      // No existing thinking bubble — start a new one.
+   482→      out.push({
+   483→        id: genMsgId(),
+   484→        role: "thinking",
+   485→        content: ev.text || "",
+   486→        isStreaming: true,
+   487→        timestamp: ts,
+   488→        seq,
+   489→      });
+   490→      return out;
+   491→    }
+   492→    case "thinking_delta": {
+   493→      for (let i = out.length - 1; i >= 0; i--) {
+   494→        if (out[i].role === "thinking" && out[i].isStreaming) {
+   495→          out[i] = { ...out[i], content: out[i].content + (ev.text || ""), seq };
+   496→          return out;
+   497→        }
+   498→      }
+   499→      out.push({
+   500→        id: genMsgId(),
+   501→        role: "thinking",
+   502→        content: ev.text || "",
+   503→        isStreaming: true,
+   504→        timestamp: ts,
+   505→        seq,
+   506→      });
+   507→      return out;
+   508→    }
+   509→    case "tool_use": {
+   510→      out.push({
+   511→        id: genMsgId(),
+   512→        role: "tool",
+   513→        content: "",
+   514→        toolName: ev.name || "tool",
+   515→        toolSummary: ev.summary || "",
+   516→        timestamp: ts,
+   517→        seq,
+   518→      });
+   519→      return out;
+   520→    }
+   521→    case "tool_result": {
+   522→      out.push({
+   523→        id: genMsgId(),
+   524→        role: "tool",
+   525→        content: ev.text || "",
+   526→        isError: ev.is_error,
+   527→        toolName: "result",
+   528→        timestamp: ts,
+   529→        seq,
+   530→      });
+   531→      return out;
+   532→    }
+   533→    case "status": {
+   534→      const st = ev as {
+   535→        state: AgentStatus;
+   536→        detail?: string;
+   537→        cost_usd?: number | null;
+   538→      };
+   539→      if (st.state === "idle" && st.detail === "interrupted") {
+   540→        out.push({
+   541→          id: genMsgId(),
+   542→          role: "status",
+   543→          content: "— stopped —",
+   544→          timestamp: ts,
+   545→          seq,
+   546→        });
+   547→      } else if (st.state === "error") {
+   548→        out.push({
+   549→          id: genMsgId(),
+   550→          role: "status",
+   551→          content: st.detail || "Agent error",
+   552→          isError: true,
+   553→          costUsd: st.cost_usd,
+   554→          timestamp: ts,
+   555→          seq,
+   556→        });
+   557→      }
+   558→      return out;
+   559→    }
+   560→    case "panel": {
+   561→      out.push({
+   562→        id: genMsgId(),
+   563→        role: "panel",
+   564→        content: ev.task_name || "Panel",
+   565→        panelStatus: ev.status || "starting",
+   566→        timestamp: ts,
+   567→        seq,
+   568→      });
+   569→      return out;
+   570→    }
+   571→    default:
+   572→      return out;
+   573→  }
+   574→}
+   575→
+   576→/** Mark ALL streaming messages as done (called when a turn ends).
+   577→ *  Finalizes every isStreaming message, not just the last — fixes the bug
+   578→ *  where a thinking + assistant both streaming left one with a perpetual cursor. */
+   579→function finalizeStreaming(existing: ChatMessage[]): ChatMessage[] {
+   580→  let changed = false;
+   581→  const out = existing.map((m) => {
+   582→    if (m.isStreaming) {
+   583→      changed = true;
+   584→      return { ...m, isStreaming: false };
+   585→    }
+   586→    return m;
+   587→  });
+   588→  return changed ? out : existing;
+   589→}
+   590→
+   591→// ---------------------------------------------------------------------------
+   592→// Store
+   593→// ---------------------------------------------------------------------------
+   594→
+   595→const ACTIVE_SESSION_KEY = "doomalaysocreate.chat.active_session";
+   596→const WORKSPACE_KEY = "doomalaysocreate.chat.workspace_id";
+   597→
+   598→export const useChatStore = create<ChatState>()(
+   599→  persist(
+   600→    (set, get) => ({
+   601→      // -- State --
+   602→      sessions: [],
+   603→      activeSessionId: null,
+   604→      isLoadingSessions: false,
+   605→      sessionError: null,
+   606→      isLoadingMessages: false,
+   607→
+   608→      messages: [],
+   609→      isStreaming: false,
+   610→      status: "idle",
+   611→
+   612→      inputText: "",
+   613→      isBusy: false,
+   614→      error: null,
+   615→
+   616→      queue: [],
+   617→
+   618→      effort: "med",
+   619→      webSearch: false,
+   620→      deepResearch: false,
+   621→
+   622→      files: [],
+   623→      fileDrawerOpen: false,
+   624→
+   625→      panelInvocations: [],
+   626→      panelDrawerOpen: false,
+   627→
+   628→      sidebarOpen: false,
+   629→      cost: null,
+   630→      currentModel: null,
+   631→      resolvedModel: null,
+   632→      resolvedProvider: null,
+   633→      requestedModel: null,
+   634→      workspaceId: null,
+   635→
+   636→      _agentSessionId: null,
+   637→      _streamController: null,
+   638→      _lastEventSeq: 0,
+   639→
+   640→      // -- Simple setters --
+   641→      setInputText: (text) => set({ inputText: text }),
+   642→      setEffort: (effort) => set({ effort }),
+   643→      toggleWebSearch: () => set((s) => ({ webSearch: !s.webSearch })),
+   644→      toggleDeepResearch: () => set((s) => ({ deepResearch: !s.deepResearch })),
+   645→      setSidebarOpen: (open) => set({ sidebarOpen: open }),
+   646→      setFileDrawerOpen: (open) => set({ fileDrawerOpen: open }),
+   647→      setPanelDrawerOpen: (open) => set({ panelDrawerOpen: open }),
+   648→      setWorkspaceId: (id) => {
+   649→        set({ workspaceId: id });
+   650→        try {
+   651→          if (id) localStorage.setItem(WORKSPACE_KEY, id);
+   652→          else localStorage.removeItem(WORKSPACE_KEY);
+   653→        } catch {
+   654→          /* ignore */
+   655→        }
+   656→      },
+   657→
+   658→      // -- Load sessions --
+   659→      loadSessions: async (client) => {
+   660→        set({ isLoadingSessions: true, sessionError: null });
+   661→        // Always restore activeSessionId from localStorage first — even if the
+   662→        // network call fails, the user should keep their active session so
+   663→        // they can retry or send a new message without losing context.
+   664→        let storedActiveId: string | null = null;
+   665→        try {
+   666→          storedActiveId = localStorage.getItem(ACTIVE_SESSION_KEY);
+   667→        } catch {
+   668→          /* ignore */
+   669→        }
+   670→        try {
+   671→          const { sessions } = await client.listChatSessions();
+   672→          // Restore active session if it still exists.
+   673→          let activeId = get().activeSessionId || storedActiveId;
+   674→          if (activeId && !sessions.find((s) => s.id === activeId)) {
+   675→            activeId = null;
+   676→            try {
+   677→              localStorage.removeItem(ACTIVE_SESSION_KEY);
+   678→            } catch {
+   679→              /* ignore */
+   680→            }
+   681→          }
+   682→          set({
+   683→            sessions,
+   684→            isLoadingSessions: false,
+   685→            activeSessionId: activeId,
+   686→          });
+   687→
+   688→          // If we have an active session, load its events.
+   689→          if (activeId) {
+   690→            await get().switchSession(client, activeId);
+   691→          }
+   692→        } catch (e) {
+   693→          // Network failure — still restore the active session id from
+   694→          // localStorage so the user isn't dropped to an empty chat. They
+   695→          // can retry; the next successful loadSessions will reconcile.
+   696→          set({
+   697→            sessionError: e instanceof Error ? e.message : "Failed to load sessions",
+   698→            isLoadingSessions: false,
+   699→            activeSessionId: storedActiveId,
+   700→            sessions: [],
+   701→          });
+   702→        }
+   703→      },
+   704→
+   705→      // -- Create session --
+   706→      createSession: async (client, model) => {
+   707→        try {
+   708→          const cs = await client.createChatSession(
+   709→            undefined,
+   710→            model,
+   711→            get().workspaceId || undefined,
+   712→          );
+   713→          set((s) => ({
+   714→            sessions: [cs, ...s.sessions],
+   715→            activeSessionId: cs.id,
+   716→            messages: [],
+   717→            status: "idle",
+   718→            isBusy: false,
+   719→            isStreaming: false,
+   720→            error: null,
+   721→            cost: null,
+   722→            currentModel: model || null,
+   723→            resolvedModel: null,
+   724→            resolvedProvider: null,
+   725→            requestedModel: null,
+   726→            panelInvocations: [],
+   727→            files: [],
+   728→            queue: [],
+   729→            _agentSessionId: null,
+   730→            _streamController: null,
+   731→            _lastEventSeq: 0,
+   732→          }));
+   733→          try {
+   734→            localStorage.setItem(ACTIVE_SESSION_KEY, cs.id);
+   735→          } catch {
+   736→            /* ignore */
+   737→          }
+   738→          return cs.id;
+   739→        } catch (e) {
+   740→          set({
+   741→            error: e instanceof Error ? e.message : "Failed to create session",
+   742→          });
+   743→          throw e;
+   744→        }
+   745→      },
+   746→
+   747→      // -- Switch session --
+   748→      switchSession: async (client, sessionId) => {
+   749→        // Abort any in-flight stream first.
+   750→        const ctrl = get()._streamController;
+   751→        if (ctrl) {
+   752→          ctrl.abort();
+   753→        }
+   754→        set({
+   755→          isLoadingMessages: true,
+   756→          activeSessionId: sessionId,
+   757→          messages: [],
+   758→          error: null,
+   759→          status: "idle",
+   760→          isBusy: false,
+   761→          isStreaming: false,
+   762→          currentModel: null,
+   763→          resolvedModel: null,
+   764→          resolvedProvider: null,
+   765→          requestedModel: null,
+   766→          panelInvocations: [],
+   767→          queue: [],
+   768→          _agentSessionId: null,
+   769→          _streamController: null,
+   770→          _lastEventSeq: 0,
+   771→        });
+   772→        try {
+   773→          const evData = await client.getChatEvents(sessionId);
+   774→          const messages = eventsToMessages(evData.events);
+   775→          // Set the cursor to the end of the loaded events so the next turn
+   776→          // only requests new events (no full transcript replay).
+   777→          const maxSeq = evData.events.reduce((mx, ev) => Math.max(mx, (ev.i ?? 0) + 1), 0);
+   778→          set({ messages, isLoadingMessages: false, _lastEventSeq: maxSeq });
+   779→          try {
+   780→            localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
+   781→          } catch {
+   782→            /* ignore */
+   783→          }
+   784→          // If the session has a workspace_id, sync it.
+   785→          const cs = get().sessions.find((s) => s.id === sessionId);
+   786→          if (cs?.workspace_id && cs.workspace_id !== get().workspaceId) {
+   787→            get().setWorkspaceId(cs.workspace_id);
+   788→          }
+   789→        } catch (e) {
+   790→          set({
+   791→            error: e instanceof Error ? e.message : "Failed to load session",
+   792→            isLoadingMessages: false,
+   793→          });
+   794→        }
+   795→      },
+   796→
+   797→      // -- Delete session --
+   798→      deleteSession: async (client, sessionId) => {
+   799→        // Optimistic: remove from local state immediately.
+   800→        const wasActive = get().activeSessionId === sessionId;
+   801→        set((s) => {
+   802→          const sessions = s.sessions.filter((ses) => ses.id !== sessionId);
+   803→          const updates: Partial<ChatState> = { sessions };
+   804→          if (wasActive) {
+   805→            updates.activeSessionId = null;
+   806→            updates.messages = [];
+   807→            updates.status = "idle";
+   808→            updates.isBusy = false;
+   809→            updates.isStreaming = false;
+   810→            updates.queue = [];
+   811→            updates._agentSessionId = null;
+   812→            updates._streamController = null;
+   813→          }
+   814→          return updates;
+   815→        });
+   816→        if (wasActive) {
+   817→          try {
+   818→            localStorage.removeItem(ACTIVE_SESSION_KEY);
+   819→          } catch {
+   820→            /* ignore */
+   821→          }
+   822→        }
+   823→        try {
+   824→          await client.deleteChatSession(sessionId);
+   825→        } catch (e) {
+   826→          // Restore on failure.
+   827→          set({ error: e instanceof Error ? e.message : "Failed to delete session" });
+   828→          try {
+   829→            const { sessions } = await client.listChatSessions();
+   830→            set({ sessions });
+   831→          } catch {
+   832→            /* ignore */
+   833→          }
+   834→        }
+   835→      },
+   836→
+   837→      // -- Rename session --
+   838→      renameSession: async (client, sessionId, title) => {
+   839→        // Optimistic update.
+   840→        set((s) => ({
+   841→          sessions: s.sessions.map((ses) =>
+   842→            ses.id === sessionId ? { ...ses, title } : ses,
+   843→          ),
+   844→        }));
+   845→        try {
+   846→          await client.updateChatSession(sessionId, { title });
+   847→        } catch {
+   848→          // Revert on failure.
+   849→          try {
+   850→            const { sessions } = await client.listChatSessions();
+   851→            set({ sessions });
+   852→          } catch {
+   853→            /* ignore */
+   854→          }
+   855→        }
+   856→      },
+   857→
+   858→      // -- Dequeue --
+   859→      dequeueMessage: (id) => {
+   860→        set((s) => ({ queue: s.queue.filter((q) => q.id !== id) }));
+   861→      },
+   862→
+   863→      // -- Send message (with queue support) --
+   864→      sendMessage: async (client, message, model) => {
+   865→        const text = message.trim();
+   866→        if (!text) return;
+   867→        const state = get();
+   868→
+   869→        // If busy, enqueue instead of rejecting.
+   870→        if (state.isBusy) {
+   871→          set((s) => ({
+   872→            queue: [...s.queue, { id: genQueueId(), text, enqueuedAt: Date.now() }],
+   873→            inputText: "",
+   874→          }));
+   875→          return;
+   876→        }
+   877→
+   878→        await _runTurn(client, text, model, set, get);
+   879→      },
+   880→
+   881→      // -- Stop generation --
+   882→      stopGeneration: async (client) => {
+   883→        const agentSid = get()._agentSessionId;
+   884→        if (agentSid) {
+   885→          try {
+   886→            await client.interrupt(agentSid);
+   887→          } catch {
+   888→            /* ignore */
+   889→          }
+   890→        }
+   891→        const ctrl = get()._streamController;
+   892→        if (ctrl) {
+   893→          ctrl.abort();
+   894→        }
+   895→        set({
+   896→          status: "idle",
+   897→          isBusy: false,
+   898→          isStreaming: false,
+   899→          messages: finalizeStreaming(get().messages),
+   900→          _streamController: null,
+   901→        });
+   902→      },
+   903→
+   904→      // -- Refresh files --
+   905→      refreshFiles: async (client) => {
+   906→        const agentSid = get()._agentSessionId;
+   907→        if (!agentSid) return;
+   908→        try {
+   909→          const f = await client.files(agentSid);
+   910→          set({ files: f.files });
+   911→        } catch {
+   912→          /* ignore */
+   913→        }
+   914→      },
+   915→    }),
+   916→    {
+   917→      name: "doomalaysocreate.chat.store",
+   918→      partialize: (state) => ({
+   919→        effort: state.effort,
+   920→        webSearch: state.webSearch,
+   921→        deepResearch: state.deepResearch,
+   922→        sidebarOpen: state.sidebarOpen,
+   923→      }),
+   924→    },
+   925→  ),
+   926→);
+   927→
+   928→// ---------------------------------------------------------------------------
+   929→// Internal: run a single agent turn (called by sendMessage and the queue
+   930→// drainer).
+   931→// ---------------------------------------------------------------------------
+   932→
+   933→async function _runTurn(
+   934→  client: AgentClient,
+   935→  text: string,
+   936→  model: string | undefined,
+   937→  set: (partial: Partial<ChatState> | ((s: ChatState) => Partial<ChatState>)) => void,
+   938→  get: () => ChatState,
+   939→): Promise<void> {
+   940→  // Ensure we have an active chat session.
+   941→  let sessionId = get().activeSessionId;
+   942→  if (!sessionId) {
+   943→    try {
+   944→      sessionId = await get().createSession(client, model);
+   945→    } catch (e) {
+   946→      set({
+   947→        error: e instanceof Error ? e.message : "Failed to create session",
+   948→      });
+   949→      return;
+   950→    }
+   951→  }
+   952→
+   953→  // Add user message optimistically (pending until backend echoes it).
+   954→  const userMsg: ChatMessage = {
+   955→    id: genMsgId(),
+   956→    role: "user",
+   957→    content: text,
+   958→    timestamp: Date.now(),
+   959→    seq: -1,
+   960→    pending: true,
+   961→  };
+   962→  set((s) => ({
+   963→    messages: [...s.messages, userMsg],
+   964→    isBusy: true,
+   965→    isStreaming: true,
+   966→    error: null,
+   967→    status: "running",
+   968→    inputText: "",
+   969→    requestedModel: model || null,
+   970→  }));
+   971→
+   972→  // Buffer events for batch persistence at turn end.
+   973→  let bufferedEvents: AgentEvent[] = [];
+   974→  // Use the stored cursor so we don't replay the whole transcript every turn.
+   975→  // The cursor resets to 0 only when a new agent session is created.
+   976→  let since = get()._lastEventSeq || 0;
+   977→  let agentSid: string | null = null;
+   978→  let controller: AbortController | null = null;
+   979→  // Keep a separate ref the finally-block can read (TS narrows the let to
+   980→  // never inside the Promise closure otherwise).
+   981→  const controllerRef: { current: AbortController | null } = { current: null };
+   982→
+   983→  try {
+   984→    const start: AgentStart = await client.send(
+   985→      text,
+   986→      undefined, // no session_id — the backend reuses by chat_session_id
+   987→      model || undefined,
+   988→      get().workspaceId || undefined,
+   989→      sessionId,
+   990→    );
+   991→    agentSid = start.session_id;
+   992→
+   993→    // MODEL VERIFICATION: store what the backend actually resolved + is running.
+   994→    // The backend returns: model (requested), resolved_model, resolved_provider.
+   995→    // If resolved_model differs from what we requested, the UI shows a warning.
+   996→    const startAny = start as AgentStart & { resolved_model?: string; resolved_provider?: string; requested_model?: string };
+   997→    set({
+   998→      _agentSessionId: agentSid,
+   999→      currentModel: start.model,
+  1000→      requestedModel: startAny.requested_model || model || null,
+  1001→      resolvedModel: startAny.resolved_model || null,
+  1002→      resolvedProvider: startAny.resolved_provider || null,
+  1003→    });
+  1004→
+  1005→    // If this is a new agent session (not reused), reset the cursor so we
+  1006→    // get the full transcript from seq 0. If reused, keep the cursor.
+  1007→    // We detect reuse by checking if _lastEventSeq > 0 AND the session_id
+  1008→    // matches the previous one. Simplest: always start from the stored cursor.
+  1009→    // The backend's queue-based SSE will only send events with i >= since.
+  1010→
+  1011→    // Open SSE stream for live events. If SSE fails, fall back to polling.
+  1012→    await new Promise<void>((resolve) => {
+  1013→      let settled = false;
+  1014→      let pollTimer: ReturnType<typeof setInterval> | null = null;
+  1015→      const finish = () => {
+  1016→        if (settled) return;
+  1017→        settled = true;
+  1018→        if (pollTimer) clearInterval(pollTimer);
+  1019→        resolve();
+  1020→      };
+  1021→
+  1022→      const handleEvent = (ev: AgentEvent) => {
+  1023→        bufferedEvents.push(ev);
+  1024→        since = Math.max(since, (ev.i ?? 0) + 1);
+  1025→        set((s) => ({ messages: appendEvent(s.messages, ev), _lastEventSeq: since }));
+  1026→
+  1027→        // Update status from status events.
+  1028→        if (ev.type === "status") {
+  1029→          const st = ev as { state: AgentStatus; cost_usd?: number | null };
+  1030→          set({ status: st.state });
+  1031→          if (typeof st.cost_usd === "number") {
+  1032→            set({ cost: st.cost_usd });
+  1033→          }
+  1034→          if (st.state === "idle" || st.state === "error") {
+  1035→            set((s) => ({ messages: finalizeStreaming(s.messages) }));
+  1036→            // Give a brief moment for any trailing events, then finish.
+  1037→            setTimeout(finish, 200);
+  1038→          }
+  1039→        }
+  1040→      };
+  1041→
+  1042→      controller = client.stream(
+  1043→        agentSid!,
+  1044→        since,
+  1045→        handleEvent,
+  1046→        () => {
+  1047→          // SSE failed — fall back to polling.
+  1048→          if (pollTimer) return; // already polling
+  1049→          pollTimer = setInterval(async () => {
+  1050→            try {
+  1051→              const snap = await client.poll(agentSid!, since);
+  1052→              for (const ev of snap.events) handleEvent(ev);
+  1053→              if (snap.status !== "running" && snap.status !== "starting") {
+  1054→                set((s) => ({ messages: finalizeStreaming(s.messages) }));
+  1055→                finish();
+  1056→              }
+  1057→            } catch {
+  1058→              /* keep trying */
+  1059→            }
+  1060→          }, 800);
+  1061→        },
+  1062→        () => {
+  1063→          // Stream closed by server — turn done (or socket dropped).
+  1064→          // Do one final poll to catch any missed events.
+  1065→          client
+  1066→            .poll(agentSid!, since)
+  1067→            .then((snap) => {
+  1068→              for (const ev of snap.events) handleEvent(ev);
+  1069→              set((s) => ({ messages: finalizeStreaming(s.messages) }));
+  1070→              finish();
+  1071→            })
+  1072→            .catch(() => finish());
+  1073→        },
+  1074→      );
+  1075→      controllerRef.current = controller;
+  1076→      set({ _streamController: controller });
+  1077→    });
+  1078→
+  1079→    // Persist all buffered events to the chat session (backend dedupes).
+  1080→    if (bufferedEvents.length > 0) {
+  1081→      await client.persistEvents(sessionId, bufferedEvents);
+  1082→    }
+  1083→
+  1084→    // Refresh files (best effort).
+  1085→    try {
+  1086→      const f = await client.files(agentSid);
+  1087→      set({ files: f.files });
+  1088→    } catch {
+  1089→      /* ignore */
+  1090→    }
+  1091→
+  1092→    // Refresh session list to pick up auto-title.
+  1093→    try {
+  1094→      const { sessions } = await client.listChatSessions();
+  1095→      set({ sessions });
+  1096→    } catch {
+  1097→      /* ignore */
+  1098→    }
+  1099→
+  1100→    set({
+  1101→      isBusy: false,
+  1102→      isStreaming: false,
+  1103→      _agentSessionId: null,
+  1104→      _streamController: null,
+  1105→    });
+  1106→  } catch (e) {
+  1107→    set({
+  1108→      error: e instanceof Error ? e.message : String(e),
+  1109→      isBusy: false,
+  1110→      isStreaming: false,
+  1111→      status: "error",
+  1112→      messages: finalizeStreaming(get().messages),
+  1113→      _agentSessionId: null,
+  1114→      _streamController: null,
+  1115→    });
+  1116→    return;
+  1117→  } finally {
+  1118→    // ALWAYS abort the SSE stream when the turn ends — prevents trailing
+  1119→    // events from the previous turn leaking into the next turn.
+  1120→    const ctrl = controllerRef.current;
+  1121→    if (ctrl) {
+  1122→      try { ctrl.abort(); } catch { /* already aborted */ }
+  1123→    }
+  1124→  }
+  1125→
+  1126→  // Drain the queue: send the next message if any.
+  1127→  const next = get().queue[0];
+  1128→  if (next) {
+  1129→    set((s) => ({ queue: s.queue.slice(1) }));
+  1130→    await _runTurn(client, next.text, model, set, get);
+  1131→  }
+  1132→}
+  1133→
+  1134→// On store creation, restore workspaceId from localStorage (best effort).
+  1135→try {
+  1136→  const stored = localStorage.getItem(WORKSPACE_KEY);
+  1137→  if (stored) {
+  1138→    useChatStore.setState({ workspaceId: stored });
+  1139→  }
+  1140→} catch {
+  1141→  /* ignore */
+  1142→}
+  1143→

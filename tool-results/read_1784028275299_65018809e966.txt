@@ -1,0 +1,702 @@
+     1→"""GitHub integration for the doomalaysocreate critique service.
+     2→
+     3→Handles GitHub OAuth token exchange, encrypted storage, repo/branch/content
+     4→proxying, workspace CRUD, git commit/push/PR operations, and the public
+     5→workspace registry.  All GitHub API calls go through stdlib urllib (no httpx
+     6→at module level) to stay compatible with the stdlib-only server.
+     7→
+     8→Env vars required:
+     9→    GITHUB_CLIENT_ID       — GitHub OAuth App client ID
+    10→    GITHUB_CLIENT_SECRET   — GitHub OAuth App client secret
+    11→    ENCRYPTION_KEY         — Fernet key for token encryption (auto-generated if absent)
+    12→
+    13→The module is stateless — all durable state lives in ``db.py``.  Token
+    14→encryption/decryption is handled by ``crypto.py``.
+    15→"""
+    16→from __future__ import annotations
+    17→
+    18→import json
+    19→import os
+    20→import secrets
+    21→import time
+    22→import urllib.error
+    23→import urllib.request
+    24→from pathlib import Path
+    25→
+    26→import crypto
+    27→import db
+    28→import jwt_auth
+    29→
+    30→# ---------------------------------------------------------------------------
+    31→# Config
+    32→# ---------------------------------------------------------------------------
+    33→
+    34→GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+    35→GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
+    36→GITHUB_API = "https://api.github.com"
+    37→
+    38→# Scopes needed for repo access + push + PR creation
+    39→GITHUB_SCopes = "read:user user:email repo"
+    40→
+    41→
+    42→def _github_configured() -> bool:
+    43→    return bool(
+    44→        os.environ.get("GITHUB_CLIENT_ID", "").strip()
+    45→        and os.environ.get("GITHUB_CLIENT_SECRET", "").strip()
+    46→    )
+    47→
+    48→
+    49→# ---------------------------------------------------------------------------
+    50→# GitHub OAuth flow
+    51→# ---------------------------------------------------------------------------
+    52→
+    53→def make_github_authorize_url(state: str) -> str:
+    54→    """Build the GitHub OAuth authorize URL with state token."""
+    55→    from urllib.parse import urlencode
+    56→    params = urlencode({
+    57→        "client_id": os.environ.get("GITHUB_CLIENT_ID", ""),
+    58→        "scope": GITHUB_SCopes,
+    59→        "state": state,
+    60→    })
+    61→    return f"{GITHUB_AUTHORIZE_URL}?{params}"
+    62→
+    63→
+    64→def exchange_github_code(code: str) -> str:
+    65→    """Exchange OAuth code for access token.  Returns the raw token string.
+    66→
+    67→    Raises RuntimeError on failure.
+    68→    """
+    69→    from urllib.parse import urlencode
+    70→    body = urlencode({
+    71→        "client_id": os.environ.get("GITHUB_CLIENT_ID", ""),
+    72→        "client_secret": os.environ.get("GITHUB_CLIENT_SECRET", ""),
+    73→        "code": code,
+    74→    }).encode()
+    75→    req = urllib.request.Request(GITHUB_TOKEN_URL, data=body, method="POST")
+    76→    req.add_header("Accept", "application/json")
+    77→    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    78→    try:
+    79→        with urllib.request.urlopen(req, timeout=30) as resp:
+    80→            data = json.loads(resp.read().decode())
+    81→    except urllib.error.HTTPError as exc:
+    82→        detail = exc.read().decode(errors="replace")[:400]
+    83→        raise RuntimeError(f"GitHub token exchange failed (HTTP {exc.code}): {detail}") from exc
+    84→    token = data.get("access_token", "").strip()
+    85→    if not token:
+    86→        raise RuntimeError(f"GitHub token exchange returned no access_token: {data}")
+    87→    return token
+    88→
+    89→
+    90→def get_github_user(token: str) -> dict:
+    91→    """Fetch authenticated user info from GitHub API. Returns dict with
+    92→    'id', 'login', 'avatar_url', etc."""
+    93→    return _github_api("/user", token=token)
+    94→
+    95→
+    96→def _valid_user_id(user_id: str | None) -> bool:
+    97→    """Return True if user_id looks like a valid 16-char hex ID.
+    98→    Rejects JWT strings (contain dots) and other garbage."""
+    99→    if not user_id or not isinstance(user_id, str):
+   100→        return False
+   101→    if len(user_id) != 16:
+   102→        return False
+   103→    if "." in user_id:
+   104→        return False
+   105→    try:
+   106→        int(user_id, 16)
+   107→        return True
+   108→    except ValueError:
+   109→        return False
+   110→
+   111→
+   112→def upsert_user_from_github(github_token: str, user_id: str | None = None) -> dict:
+   113→    """Fetch GitHub user info, upsert into DB, return the user row.
+   114→
+   115→    If ``user_id`` is None, a deterministic ID is derived from the GitHub user id
+   116→    (via ``jwt_auth.derive_user_id``) so the row survives DB rebuilds.
+   117→    """
+   118→    info = get_github_user(github_token)
+   119→    encrypted = crypto.encrypt_token(github_token)
+   120→    if _valid_user_id(user_id):
+   121→        uid = user_id
+   122→    else:
+   123→        uid = jwt_auth.derive_user_id(info["id"])
+   124→    return db.upsert_user(
+   125→        user_id=uid,
+   126→        github_id=info["id"],
+   127→        github_username=info["login"],
+   128→        github_token_encrypted=encrypted,
+   129→    )
+   130→
+   131→
+   132→# ---------------------------------------------------------------------------
+   133→# GitHub API proxy (uses stored token from DB)
+   134→# ---------------------------------------------------------------------------
+   135→
+   136→def _github_api(path: str, *, token: str = "", method: str = "GET",
+   137→                body: dict | None = None) -> dict | list:
+   138→    """Raw GitHub API call via stdlib urllib."""
+   139→    url = f"{GITHUB_API}{path}"
+   140→    data = json.dumps(body).encode() if body is not None else None
+   141→    req = urllib.request.Request(url, data=data, method=method)
+   142→    req.add_header("Accept", "application/vnd.github+json")
+   143→    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+   144→    if token:
+   145→        req.add_header("Authorization", f"Bearer {token}")
+   146→    try:
+   147→        with urllib.request.urlopen(req, timeout=30) as resp:
+   148→            raw = resp.read().decode()
+   149→            return json.loads(raw) if raw.strip() else {}
+   150→    except urllib.error.HTTPError as exc:
+   151→        detail = exc.read().decode(errors="replace")[:400]
+   152→        raise RuntimeError(f"GitHub API {path} failed (HTTP {exc.code}): {detail}") from exc
+   153→
+   154→
+   155→def _token_for_user(user_id: str) -> str:
+   156→    """Retrieve and decrypt a user's stored GitHub token.  Raises if missing."""
+   157→    user = db.get_user(user_id)
+   158→    if not user or not user.get("github_token_encrypted"):
+   159→        raise RuntimeError("GitHub not connected — please link your GitHub account")
+   160→    return crypto.decrypt_token(user["github_token_encrypted"])
+   161→
+   162→
+   163→def list_user_repos(user_id: str, *, page: int = 1, per_page: int = 30,
+   164→                    sort: str = "updated") -> list[dict]:
+   165→    """List the authenticated user's repositories."""
+   166→    token = _token_for_user(user_id)
+   167→    path = f"/user/repos?page={page}&per_page={per_page}&sort={sort}&type=all"
+   168→    result = _github_api(path, token=token)
+   169→    # return slim fields the frontend needs
+   170→    return [
+   171→        {
+   172→            "full_name": r["full_name"],
+   173→            "name": r["name"],
+   174→            "owner": r["owner"]["login"],
+   175→            "private": r["private"],
+   176→            "default_branch": r["default_branch"],
+   177→            "description": r.get("description") or "",
+   178→            "updated_at": r["updated_at"],
+   179→            "clone_url": r["clone_url"],
+   180→        }
+   181→        for r in (result if isinstance(result, list) else [])
+   182→    ]
+   183→
+   184→
+   185→def list_repo_branches(user_id: str, owner: str, repo: str) -> list[dict]:
+   186→    """List branches for a repo."""
+   187→    token = _token_for_user(user_id)
+   188→    result = _github_api(f"/repos/{owner}/{repo}/branches?per_page=100", token=token)
+   189→    return [
+   190→        {"name": b["name"], "sha": b["commit"]["sha"]}
+   191→        for b in (result if isinstance(result, list) else [])
+   192→    ]
+   193→
+   194→
+   195→def get_file_content(user_id: str, owner: str, repo: str,
+   196→                     path: str, ref: str = "main") -> dict:
+   197→    """Fetch a single file's content from a repo."""
+   198→    token = _token_for_user(user_id)
+   199→    from urllib.parse import quote
+   200→    result = _github_api(
+   201→        f"/repos/{owner}/{repo}/contents/{quote(path, safe='')}?ref={ref}",
+   202→        token=token)
+   203→    return result  # {name, path, content (base64), encoding, sha, ...}
+   204→
+   205→
+   206→def get_repo_tree(user_id: str, owner: str, repo: str,
+   207→                  ref: str = "main", recursive: bool = True) -> list[dict]:
+   208→    """Fetch the full file tree of a repo (for context packing)."""
+   209→    token = _token_for_user(user_id)
+   210→    suffix = "?recursive=1" if recursive else ""
+   211→    result = _github_api(f"/repos/{owner}/{repo}/git/trees/{ref}{suffix}", token=token)
+   212→    return result.get("tree", []) if isinstance(result, dict) else []
+   213→
+   214→
+   215→# ---------------------------------------------------------------------------
+   216→# Workspace CRUD
+   217→# ---------------------------------------------------------------------------
+   218→
+   219→def create_workspace(user_id: str, *, title: str, description: str = "",
+   220→                     source_repo: str | None = None,
+   221→                     source_branch: str | None = None,
+   222→                     source_branches: list[str] | None = None,
+   223→                     visibility: str = "private",
+   224→                     auto_sync: bool = False) -> dict:
+   225→    """Create a new workspace.  If source_repo is given, clone it into the
+   226→    sandbox directory.  source_branches can specify multiple branches to clone;
+   227→    when source_branch is None and source_branches is None, all branches are cloned."""
+   228→    sandbox_base = Path(os.environ.get("WORKSPACE_BASE", "/data/workspaces"))
+   229→    ws_id = db._gen_id()
+   230→    sandbox_path = str(sandbox_base / ws_id)
+   231→    Path(sandbox_path).mkdir(parents=True, exist_ok=True)
+   232→    ws = db.create_workspace(
+   233→        user_id, title=title, description=description,
+   234→        source_repo=source_repo, source_branch=source_branch,
+   235→        source_branches=source_branches,
+   236→        visibility=visibility, auto_sync=auto_sync,
+   237→        sandbox_path=sandbox_path)
+   238→    if source_repo:
+   239→        _clone_repo(user_id, source_repo, source_branch,
+   240→                    dest=sandbox_path, branches=source_branches)
+   241→    return ws
+   242→
+   243→
+   244→def list_workspaces(user_id: str) -> list[dict]:
+   245→    return db.list_user_workspaces(user_id)
+   246→
+   247→
+   248→def ensure_workspace_sandbox(workspace_id: str) -> bool:
+   249→    """Verify the workspace sandbox directory exists and is a valid git repo.
+   250→    If the sandbox is missing (e.g. after Space restart), re-clone from source.
+   251→    Returns True if the sandbox is usable after this call."""
+   252→    ws = db.get_workspace(workspace_id)
+   253→    if not ws:
+   254→        return False
+   255→    sandbox = Path(ws["sandbox_path"])
+   256→    is_valid = sandbox.is_dir() and (sandbox / ".git").is_dir()
+   257→    if is_valid:
+   258→        return True
+   259→    # Sandbox missing or corrupted — re-clone if we have a source repo
+   260→    source_repo = ws.get("source_repo")
+   261→    if not source_repo:
+   262→        # No source repo, just recreate the directory
+   263→        sandbox.mkdir(parents=True, exist_ok=True)
+   264→        return True
+   265→    import shutil
+   266→    if sandbox.is_dir():
+   267→        shutil.rmtree(sandbox, ignore_errors=True)
+   268→    sandbox.mkdir(parents=True, exist_ok=True)
+   269→    try:
+   270→        user_id = ws["user_id"]
+   271→        branch = ws.get("source_branch") or None
+   272→        _clone_repo(user_id, source_repo, branch, dest=str(sandbox))
+   273→        return True
+   274→    except Exception:
+   275→        return False
+   276→
+   277→
+   278→def get_workspace(workspace_id: str) -> dict | None:
+   279→    return db.get_workspace(workspace_id)
+   280→
+   281→
+   282→def update_workspace(workspace_id: str, **fields) -> dict | None:
+   283→    return db.update_workspace(workspace_id, **fields)
+   284→
+   285→
+   286→def delete_workspace(workspace_id: str) -> bool:
+   287→    ws = db.get_workspace(workspace_id)
+   288→    if ws and ws.get("sandbox_path"):
+   289→        import shutil
+   290→        p = Path(ws["sandbox_path"])
+   291→        if p.is_dir():
+   292→            shutil.rmtree(p, ignore_errors=True)
+   293→    return db.delete_workspace(workspace_id)
+   294→
+   295→
+   296→# ---------------------------------------------------------------------------
+   297→# Git operations (commit, push, PR)
+   298→# ---------------------------------------------------------------------------
+   299→
+   300→def _run_git(sandbox: str, *args: str) -> str:
+   301→    """Run a git command in the workspace sandbox.  Returns stdout."""
+   302→    import subprocess
+   303→    cmd = ["git", "-C", sandbox] + list(args)
+   304→    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+   305→    if result.returncode != 0:
+   306→        raise RuntimeError(f"git {' '.join(args)} failed: {_sanitize_git_error(result.stderr.strip())}")
+   307→    return result.stdout.strip()
+   308→
+   309→
+   310→def run_git_command(sandbox: str, *args: str) -> str:
+   311→    """Public wrapper around ``_run_git`` for endpoints that need arbitrary git queries.
+   312→    
+   313→    Safely executes read-only or approved git commands in the workspace sandbox.
+   314→    Use for: status, diff, log, show, branch, etc.
+   315→    """
+   316→    return _run_git(sandbox, *args)
+   317→
+   318→
+   319→def _sanitize_git_error(err: str) -> str:
+   320→    """Strip URLs and auth tokens from git error messages."""
+   321→    import re
+   322→    # redact anything that looks like https://...@... or x-access-token:...
+   323→    err = re.sub(r'https://[^@]*@', 'https://***@', err)
+   324→    err = re.sub(r'x-access-token:[^\s]+', 'x-access-token:***', err)
+   325→    return err
+   326→
+   327→
+   328→def _clone_repo(user_id: str, repo_url: str, branch: str | None = None,
+   329→                dest: str | None = None, branches: list[str] | None = None) -> None:
+   330→    """Clone a GitHub repo into ``dest``.
+   331→
+   332→    Three modes:
+   333→    * ``branch=None`` and ``branches=None`` — full repo clone (all branches).
+   334→    * ``branch='main'`` and ``branches=None`` — single branch (current behaviour).
+   335→    * ``branches=['main','dev']`` — clone listed branches (first is default).
+   336→    """
+   337→    import subprocess
+   338→    from urllib.parse import urlparse
+   339→    if dest is None:
+   340→        raise RuntimeError("dest is required for _clone_repo")
+   341→    token = _token_for_user(user_id)
+   342→    parsed = urlparse(repo_url)
+   343→    auth_repo_url = f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
+   344→
+   345→    # Mode A: clone all branches
+   346→    if branch is None and branches is None:
+   347→        cmd = [
+   348→            "git", "clone", "--no-single-branch", "--depth", "1",
+   349→            auth_repo_url, dest,
+   350→        ]
+   351→        try:
+   352→            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+   353→        except subprocess.TimeoutExpired:
+   354→            raise RuntimeError("git clone timed out")
+   355→        if result.returncode != 0:
+   356→            raise RuntimeError(f"git clone failed: {_sanitize_git_error(result.stderr.strip())}")
+   357→        _strip_remote_token(dest, repo_url)
+   358→        return
+   359→
+   360→    # Mode C: clone specific branches
+   361→    if branches:
+   362→        first = branches[0]
+   363→        cmd = [
+   364→            "git", "clone", "--depth", "1", "-b", first, "--single-branch",
+   365→            auth_repo_url, dest,
+   366→        ]
+   367→        try:
+   368→            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+   369→        except subprocess.TimeoutExpired:
+   370→            raise RuntimeError("git clone timed out")
+   371→        if result.returncode != 0:
+   372→            raise RuntimeError(f"git clone failed: {_sanitize_git_error(result.stderr.strip())}")
+   373→
+   374→        for extra in branches[1:]:
+   375→            fetch = [
+   376→                "git", "-C", dest, "fetch", "origin",
+   377→                f"{extra}:refs/remotes/origin/{extra}", "--depth", "1",
+   378→            ]
+   379→            r = subprocess.run(fetch, capture_output=True, text=True, timeout=60)
+   380→            if r.returncode != 0:
+   381→                raise RuntimeError(
+   382→                    f"git fetch {extra} failed: {_sanitize_git_error(r.stderr.strip())}")
+   383→            co = subprocess.run(
+   384→                ["git", "-C", dest, "checkout", "-b", extra, f"origin/{extra}"],
+   385→                capture_output=True, text=True, timeout=30)
+   386→            if co.returncode != 0:
+   387→                raise RuntimeError(
+   388→                    f"git checkout {extra} failed: {_sanitize_git_error(co.stderr.strip())}")
+   389→        subprocess.run(
+   390→            ["git", "-C", dest, "checkout", first],
+   391→            capture_output=True, timeout=30)
+   392→        _strip_remote_token(dest, repo_url)
+   393→        return
+   394→
+   395→    # Mode B: single branch (default to "main")
+   396→    effective = branch or "main"
+   397→    cmd = [
+   398→        "git", "clone", "--depth", "1", "-b", effective,
+   399→        auth_repo_url, dest,
+   400→    ]
+   401→    try:
+   402→        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+   403→    except subprocess.TimeoutExpired:
+   404→        raise RuntimeError("git clone timed out")
+   405→    if result.returncode != 0:
+   406→        raise RuntimeError(f"git clone failed: {_sanitize_git_error(result.stderr.strip())}")
+   407→    _strip_remote_token(dest, repo_url)
+   408→
+   409→
+   410→def _strip_remote_token(dest: str, repo_url: str) -> None:
+   411→    """Overwrite origin's URL with the token-free form so ``.git/config``
+   412→    never persists the auth token after a clone.
+   413→
+   414→    ``git clone https://<token>@...`` writes the token into ``.git/config``;
+   415→    this rewrites it to the clean URL immediately after a successful clone,
+   416→    closing the window in which an LLM could ``cat .git/config`` and read the
+   417→    user's GitHub token.
+   418→    """
+   419→    from urllib.parse import urlparse
+   420→    parsed = urlparse(repo_url)
+   421→    clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+   422→    try:
+   423→        _run_git(dest, "remote", "set-url", "origin", clean)
+   424→    except RuntimeError:
+   425→        # no origin remote (shouldn't happen post-clone) — ignore
+   426→        pass
+   427→
+   428→
+   429→def init_repo(sandbox: str) -> None:
+   430→    """Init a fresh git repo in the sandbox (no remote)."""
+   431→    import subprocess
+   432→    subprocess.run(["git", "init"], cwd=sandbox, capture_output=True, timeout=10)
+   433→    subprocess.run(["git", "config", "user.email", "agent@doomalaysocreate.local"],
+   434→                   cwd=sandbox, capture_output=True, timeout=10)
+   435→    subprocess.run(["git", "config", "user.name", "Doomalaysocreate Agent"],
+   436→                   cwd=sandbox, capture_output=True, timeout=10)
+   437→
+   438→
+   439→def checkout_branch(sandbox: str, branch: str) -> None:
+   440→    """Checkout an existing branch or create it from the current HEAD."""
+   441→    import re
+   442→    if not branch or '..' in branch or branch.startswith('-') or ' ' in branch:
+   443→        raise RuntimeError(f"invalid branch name: {branch!r}")
+   444→    if not re.match(r'^[a-zA-Z0-9_./\-]+$', branch):
+   445→        raise RuntimeError(f"invalid branch name: {branch!r}")
+   446→    try:
+   447→        _run_git(sandbox, "checkout", branch)
+   448→    except RuntimeError:
+   449→        # branch doesn't exist locally — create it from HEAD
+   450→        _run_git(sandbox, "checkout", "-b", branch)
+   451→
+   452→
+   453→def commit_changes(sandbox: str, message: str) -> str:
+   454→    """Stage all changes and commit.  Returns the new commit SHA."""
+   455→    _run_git(sandbox, "add", "-A")
+   456→    # check if there's anything to commit
+   457→    status = _run_git(sandbox, "status", "--porcelain")
+   458→    if not status.strip():
+   459→        raise RuntimeError("Nothing to commit — no changes detected")
+   460→    _run_git(sandbox, "commit", "-m", message)
+   461→    return _run_git(sandbox, "rev-parse", "HEAD")
+   462→
+   463→
+   464→def push_to_remote(user_id: str, workspace_id: str, branch: str,
+   465→                   *, force: bool = False) -> str:
+   466→    """Push the workspace branch to the source repo's remote.  Returns commit SHA.
+   467→
+   468→    Pushes directly to an authenticated remote URL passed on the command line,
+   469→    so the token is NEVER written to ``.git/config`` (where the LLM could read
+   470→    it via ``cat .git/config``).  The token lives only in the subprocess argv
+   471→    for the duration of the push.  The on-disk ``origin`` remote is always
+   472→    kept pointing at the token-free URL.
+   473→    """
+   474→    ws = db.get_workspace(workspace_id)
+   475→    if not ws:
+   476→        raise RuntimeError("Workspace not found")
+   477→    if not ws.get("source_repo"):
+   478→        raise RuntimeError("Workspace has no source repo configured")
+   479→    token = _token_for_user(user_id)
+   480→    sandbox = ws["sandbox_path"]
+   481→    from urllib.parse import urlparse
+   482→    parsed = urlparse(ws["source_repo"])
+   483→    clean_repo_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+   484→    auth_repo_url = f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
+   485→    # ensure 'origin' in .git/config points at the CLEAN url (no token)
+   486→    try:
+   487→        _run_git(sandbox, "remote", "set-url", "origin", clean_repo_url)
+   488→    except RuntimeError:
+   489→        _run_git(sandbox, "remote", "add", "origin", clean_repo_url)
+   490→    # push directly to the auth URL — token stays in argv, never on disk
+   491→    args = ["push", auth_repo_url]
+   492→    if force:
+   493→        args.append("--force")
+   494→    args.append(branch)
+   495→    try:
+   496→        _run_git(sandbox, *args)
+   497→    except RuntimeError as exc:
+   498→        raise RuntimeError(f"git push failed: {_sanitize_git_error(str(exc))}")
+   499→    sha = _run_git(sandbox, "rev-parse", "HEAD")
+   500→    # log the push
+   501→    db.log_push(
+   502→        user_id, workspace_id,
+   503→        target_repo=ws["source_repo"],
+   504→        target_branch=branch,
+   505→        commit_sha=sha,
+   506→        push_type="direct",
+   507→        approved_by_user=True,
+   508→    )
+   509→    return sha
+   510→
+   511→
+   512→def fetch_from_remote(user_id: str, workspace_id: str, branch: str = "") -> str:
+   513→    """Fetch from the source repo's remote into the workspace sandbox.
+   514→
+   515→    Like ``push_to_remote``, fetches against an authenticated URL passed on
+   516→    the command line so the token is never persisted to ``.git/config``.
+   517→    If ``branch`` is given, also checks it out (creating a local tracking
+   518→    branch from FETCH_HEAD if it doesn't exist yet).
+   519→    """
+   520→    ws = db.get_workspace(workspace_id)
+   521→    if not ws:
+   522→        raise RuntimeError("Workspace not found")
+   523→    if not ws.get("source_repo"):
+   524→        raise RuntimeError("Workspace has no source repo configured")
+   525→    token = _token_for_user(user_id)
+   526→    sandbox = ws["sandbox_path"]
+   527→    from urllib.parse import urlparse
+   528→    parsed = urlparse(ws["source_repo"])
+   529→    clean_repo_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+   530→    auth_repo_url = f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
+   531→    # keep on-disk remote token-free
+   532→    try:
+   533→        _run_git(sandbox, "remote", "set-url", "origin", clean_repo_url)
+   534→    except RuntimeError:
+   535→        _run_git(sandbox, "remote", "add", "origin", clean_repo_url)
+   536→    args = ["fetch", auth_repo_url]
+   537→    if branch:
+   538→        args.append(branch)
+   539→    try:
+   540→        _run_git(sandbox, *args)
+   541→    except RuntimeError as exc:
+   542→        raise RuntimeError(f"git fetch failed: {_sanitize_git_error(str(exc))}")
+   543→    if branch:
+   544→        # fetch into a bare URL stores the tip in FETCH_HEAD; create/update
+   545→        # the local branch from it so a subsequent checkout lands on the
+   546→        # freshly-fetched commit.
+   547→        try:
+   548→            _run_git(sandbox, "checkout", branch)
+   549→        except RuntimeError:
+   550→            _run_git(sandbox, "checkout", "-b", branch, "FETCH_HEAD")
+   551→    return _run_git(sandbox, "rev-parse", "HEAD")
+   552→
+   553→
+   554→def create_pull_request(user_id: str, workspace_id: str, *,
+   555→                        title: str, body: str = "",
+   556→                        head_branch: str = "main",
+   557→                        base_branch: str = "main") -> dict:
+   558→    """Push branch + create a PR on the source repo via GitHub API.
+   559→    Returns PR dict with 'number', 'html_url', etc."""
+   560→    ws = db.get_workspace(workspace_id)
+   561→    if not ws:
+   562→        raise RuntimeError("Workspace not found")
+   563→    if not ws.get("source_repo"):
+   564→        raise RuntimeError("Workspace has no source repo configured")
+   565→    token = _token_for_user(user_id)
+   566→    sandbox = ws["sandbox_path"]
+   567→    # push first
+   568→    push_to_remote(user_id, workspace_id, head_branch)
+   569→    # extract owner/repo from source_repo URL
+   570→    source = ws["source_repo"]
+   571→    # https://github.com/owner/repo.git or /owner/repo
+   572→    parts = source.rstrip("/").replace(".git", "").split("/")
+   573→    owner_repo = "/".join(parts[-2:])
+   574→    # create PR via API
+   575→    pr_body = {
+   576→        "title": title,
+   577→        "body": body,
+   578→        "head": head_branch,
+   579→        "base": base_branch,
+   580→    }
+   581→    result = _github_api(f"/repos/{owner_repo}/pulls", token=token, body=pr_body)
+   582→    # log
+   583→    db.log_push(
+   584→        user_id, workspace_id,
+   585→        target_repo=source,
+   586→        target_branch=base_branch,
+   587→        commit_sha=_run_git(sandbox, "rev-parse", "HEAD"),
+   588→        commit_message=title,
+   589→        push_type="pr",
+   590→        pr_number=result.get("number"),
+   591→        pr_url=result.get("html_url"),
+   592→        approved_by_user=True,
+   593→    )
+   594→    return {
+   595→        "number": result.get("number"),
+   596→        "html_url": result.get("html_url"),
+   597→        "state": result.get("state"),
+   598→        "title": result.get("title"),
+   599→    }
+   600→
+   601→
+   602→# ---------------------------------------------------------------------------
+   603→# Public workspace registry
+   604→# ---------------------------------------------------------------------------
+   605→
+   606→def publish_workspace(user_id: str, workspace_id: str) -> dict:
+   607→    """Register a workspace as public in the registry."""
+   608→    ws = db.get_workspace(workspace_id)
+   609→    if not ws:
+   610→        raise RuntimeError("Workspace not found")
+   611→    user = db.get_user(user_id)
+   612→    gh_user = user.get("github_username", "") if user else ""
+   613→    return db.register_public_workspace(
+   614→        workspace_id,
+   615→        owner_username=gh_user,
+   616→        title=ws.get("title", ""),
+   617→        description=ws.get("description", ""),
+   618→        source_repo=ws.get("source_repo"),
+   619→    )
+   620→
+   621→
+   622→def unpublish_workspace(workspace_id: str) -> None:
+   623→    db.unregister_public_workspace(workspace_id)
+   624→
+   625→
+   626→def list_registry(*, page: int = 1, per_page: int = 20,
+   627→                  sort: str = "recent", search: str = "") -> dict:
+   628→    return db.list_public_workspaces(page=page, per_page=per_page,
+   629→                                     sort=sort, search=search)
+   630→
+   631→
+   632→# ---------------------------------------------------------------------------
+   633→# Push approval queue (for the frontend approval flow)
+   634→# ---------------------------------------------------------------------------
+   635→
+   636→# In-memory approval queue: request_id -> {user_id, workspace_id, action, ...}
+   637→_approval_queue: dict[str, dict] = {}
+   638→_approval_lock = __import__("threading").Lock()
+   639→
+   640→
+   641→def enqueue_push_request(user_id: str, workspace_id: str, action: str,
+   642→                         **extra) -> str:
+   643→    """Create a push approval request.  Returns request_id."""
+   644→    rid = secrets.token_urlsafe(16)
+   645→    with _approval_lock:
+   646→        _approval_queue[rid] = {
+   647→            "user_id": user_id,
+   648→            "workspace_id": workspace_id,
+   649→            "action": action,
+   650→            "created_at": time.time(),
+   651→            **extra,
+   652→        }
+   653→    return rid
+   654→
+   655→
+   656→# Push requests expire after 1 hour.
+   657→_PUSH_REQUEST_TTL_S = 3600
+   658→
+   659→
+   660→def resolve_push_request(request_id: str, approved: bool, user_id: str = "") -> dict | None:
+   661→    """Approve or reject a queued push request.  Executes the action if approved.
+   662→    If user_id is provided, verifies ownership before resolving."""
+   663→    with _approval_lock:
+   664→        req = _approval_queue.get(request_id)
+   665→        if req is None:
+   666→            return None
+   667→        if user_id and req["user_id"] != user_id:
+   668→            return None  # ownership mismatch — don't reveal existence
+   669→        # check TTL
+   670→        if time.time() - req["created_at"] > _PUSH_REQUEST_TTL_S:
+   671→            del _approval_queue[request_id]
+   672→            return None  # expired
+   673→        # only pop if we're going to act on it
+   674→        del _approval_queue[request_id]
+   675→    if not approved:
+   676→        return {"status": "rejected", "action": req["action"]}
+   677→    # execute the approved action
+   678→    action = req["action"]
+   679→    user_id = req["user_id"]
+   680→    workspace_id = req["workspace_id"]
+   681→    try:
+   682→        if action == "git_push":
+   683→            branch = req.get("branch", "main")
+   684→            sha = push_to_remote(user_id, workspace_id, branch)
+   685→            return {"status": "pushed", "commit_sha": sha, "branch": branch}
+   686→        elif action == "git_force_push":
+   687→            branch = req.get("branch", "main")
+   688→            sha = push_to_remote(user_id, workspace_id, branch, force=True)
+   689→            return {"status": "force_pushed", "commit_sha": sha, "branch": branch}
+   690→        elif action == "gh_pr_create":
+   691→            result = create_pull_request(
+   692→                user_id, workspace_id,
+   693→                title=req.get("title", "Agent changes"),
+   694→                body=req.get("body", ""),
+   695→                head_branch=req.get("head_branch", "main"),
+   696→                base_branch=req.get("base_branch", "main"))
+   697→            return {"status": "pr_created", **result}
+   698→        else:
+   699→            return {"status": "error", "message": f"Unknown action: {action}"}
+   700→    except Exception as exc:
+   701→        return {"status": "error", "message": str(exc)}
+   702→
