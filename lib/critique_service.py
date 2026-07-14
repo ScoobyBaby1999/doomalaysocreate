@@ -646,7 +646,10 @@ def _ensure_auth_secret() -> None:
     import secrets as _secrets
     val = _secrets.token_hex(32)
     try:
-        with open(secret_path, "w") as f:
+        # SECURITY: write with 0o600 permissions (owner-only read/write)
+        # so other processes in the container can't read the secret.
+        fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.write(val)
         os.environ["CRITIQUE_ROTATION_SECRET"] = val
         log_event("auth_secret", source="generated", path=secret_path)
@@ -681,7 +684,9 @@ def _ensure_encryption_key() -> None:
     raw = _secrets.token_bytes(32)
     val = base64.urlsafe_b64encode(raw).decode()
     try:
-        with open(key_path, "w") as f:
+        # SECURITY: write with 0o600 permissions (owner-only read/write)
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.write(val)
         os.environ["ENCRYPTION_KEY"] = val
         log_event("encryption_key", source="generated", path=key_path)

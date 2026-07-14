@@ -888,6 +888,27 @@ class StrandsAdapter(BaseAdapter):
                 workdir = str(getattr(_thread_local, "workspace", Path.cwd()))
                 stripped = command.strip()
 
+                # SECURITY: strip all secrets from the subprocess environment
+                # so the agent can't read API keys, tokens, or encryption keys
+                # via `env`, `printenv`, or Python's os.environ.
+                # Only pass through safe, non-secret environment variables.
+                _SECRET_SUFFIXES = ("_API_KEY", "_SECRET", "_TOKEN", "_PASSWORD",
+                                    "_KEY", "_ROTATION_SECRET", "_ENCRYPTION_KEY")
+                safe_env = {}
+                for k, v in os.environ.items():
+                    if any(k.upper().endswith(s) for s in _SECRET_SUFFIXES):
+                        continue  # strip secrets
+                    if k.upper() in ("CRITIQUE_TOKEN", "CRITIQUE_ROTATION_SECRET",
+                                     "ENCRYPTION_KEY", "APP_SECRET",
+                                     "HF_CLIENT_SECRET", "GITHUB_CLIENT_SECRET",
+                                     "HF_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+                        continue  # strip known sensitive vars
+                    safe_env[k] = v
+                # Keep PATH, HOME, LANG, etc. but strip secrets
+                safe_env.setdefault("PATH", os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"))
+                safe_env.setdefault("HOME", "/tmp")
+                safe_env.setdefault("TERM", "dumb")
+
                 # Intercept network git operations for security
                 workspace_id = getattr(_thread_local, "workspace_id", None)
                 if workspace_id and (
@@ -906,6 +927,7 @@ class StrandsAdapter(BaseAdapter):
                     result = subprocess.run(
                         stripped, shell=True, cwd=workdir,
                         capture_output=True, text=True, timeout=300,
+                        env=safe_env,  # SECURITY: stripped env (no secrets)
                     )
                     output = result.stdout
                     if result.stderr:
