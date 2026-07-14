@@ -1,7 +1,7 @@
 // Memory panel — displays the .pied sanity log state for the active workspace.
 // Shows: goal, plan, pending/completed tasks, recent events, blackboard entries.
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { AgentClient } from "../api/agent";
 import { useChatStore } from "../state/chatStore";
 import type { Settings } from "../api/panel";
@@ -34,7 +34,7 @@ export function MemoryScreen({ settings }: { settings: Settings }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const client = new AgentClient(settings);
+  const client = useMemo(() => new AgentClient(settings), [settings]);
 
   const fetchMemory = useCallback(async () => {
     if (!workspaceId) {

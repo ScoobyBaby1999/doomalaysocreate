@@ -23,9 +23,13 @@ export function BenchmarksScreen({ settings }: { settings: Settings }) {
   const [freeOnly, setFreeOnly] = useState(false);
   const [sortBy, setSortBy] = useState<"name" | "context" | "price">("context");
 
-  const client = new AgentClient(settings);
+  const client = useMemo(() => new AgentClient(settings), [settings]);
 
   const fetchBenchmarks = useCallback(async () => {
+    if (!settings.token && !settings.rotationSecret) {
+      setError("No auth token configured. Set one in Settings first.");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
@@ -36,7 +40,7 @@ export function BenchmarksScreen({ settings }: { settings: Settings }) {
     } finally {
       setLoading(false);
     }
-  }, [settings]);
+  }, [client, settings.token, settings.rotationSecret]);
 
   useEffect(() => {
     fetchBenchmarks();
