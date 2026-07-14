@@ -1154,6 +1154,7 @@ class Handler(BaseHTTPRequestHandler):
                     "DELETE /api/debug/clear?cat=": "clear debug log ring buffer (auth-gated)",
                     "GET /api/memory?workspace_id=": "workspace memory layer state (.pied sanity log)",
                     "GET /api/benchmarks": "live model benchmarks from OpenRouter (pricing, context, caps)",
+                    "GET /api/workspace/files?workspace_id=": "list files in a workspace sandbox",
                     "GET /api/roster": "per-model benchmark + hosts + privacy-safe routability + frontier guarantee",
                     "GET /oauth/login": "start HF OAuth flow (redirects to HF authorize)",
                     "GET /oauth/callback": "HF OAuth callback — provisions user Space",
