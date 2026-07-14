@@ -363,12 +363,30 @@ export function AgentChat({ settings }: { settings: Settings }) {
           )}
         </div>
 
-        {/* Status pill */}
-        {running && (
-          <div className="flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
-            <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
-            <span className="capitalize">{status}</span>
+        {/* Status indicator — shows what the agent is doing */}
+        {running ? (
+          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            <span className="flex gap-0.5">
+              <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "0ms" }} />
+              <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "120ms" }} />
+              <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "240ms" }} />
+            </span>
+            <span className="capitalize status-pulse">{status === "starting" ? "starting…" : "working…"}</span>
           </div>
+        ) : status === "error" ? (
+          <div className="flex items-center gap-1 text-[10px] text-rose-400">
+            <span className="size-1 rounded-full bg-rose-400" />
+            <span>error</span>
+          </div>
+        ) : null}
+
+        {/* Context usage circle — shows how much of the model's context is used */}
+        {lastUsage && (
+          <ContextCircle
+            used={lastUsage.total_tokens}
+            max={128000}
+            title={`Context: ${lastUsage.total_tokens.toLocaleString()} / 128,000 tokens (${Math.round(lastUsage.total_tokens / 128000 * 100)}%)`}
+          />
         )}
 
         {/* Files */}
@@ -875,6 +893,32 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
           <span>Queue messages while agent works</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Context usage circle — fills clockwise as the model's context window fills up
+function ContextCircle({ used, max, title }: { used: number; max: number; title: string }) {
+  const pct = Math.min(1, used / max);
+  const deg = Math.round(pct * 360);
+  const color = pct > 0.85 ? "#f59e0b" : pct > 0.7 ? "#eab308" : "#5b8cff";
+  return (
+    <div
+      className="relative size-4 shrink-0 cursor-help"
+      title={title}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" className="-rotate-90">
+        <circle cx="8" cy="8" r="6" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="2" />
+        <circle
+          cx="8" cy="8" r="6" fill="none" stroke={color} strokeWidth="2"
+          strokeDasharray={`${deg / 360 * 37.7} 37.7`}
+          strokeLinecap="round"
+          style={{ transition: "stroke-dasharray 0.3s ease" }}
+        />
+      </svg>
+      {pct > 0.85 && (
+        <span className="absolute -top-1 -right-1 size-1.5 rounded-full bg-amber-400 animate-pulse" />
+      )}
     </div>
   );
 }
