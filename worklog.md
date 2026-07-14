@@ -336,3 +336,23 @@ Stage Summary:
 - Judge panel: WORKING end-to-end. Real fan-out + merge with specific security critique.
 - New CRITIQUE_ROTATION_SECRET set on the Space (user has it in /home/z/new-rotation-secret.txt).
 - The HF Space is fully functional for real users.
+
+---
+Task ID: 6
+Agent: glm (main)
+Task: Fix litellm.BadRequestError "LLM Provider NOT provided" for agent models.
+
+Work Log:
+- User reported: "litellm.BadRequestError: LLM Provider NOT provided. Pass in the LLM provider you are trying to call. You passed model=privatemodeai/kimi-k2.6"
+- Root cause found in critique_service.py _handle_agent_post: when the frontend sent a logical model ID (e.g. "kimi-k2.6"), the code resolved it via the panel's logical_models mapping and constructed f"{provider}/{model_id}" = "privatemodeai/kimi-k2.6" (panel provider/model format). This was passed directly to LiteLLM, which doesn't recognize "privatemodeai" as a provider prefix → BadRequestError.
+- Fix (pushed to c branch, commit 4626841, auto-deployed): route ALL model resolution through agent_sessions._resolve_open_model() which searches the full open-models list (built from providers_catalog + synced models) and returns the correct litellm format (openai/<model_id>) with the matching base_url. The logical_models fallback now also re-resolves through _resolve_open_model instead of passing provider/model directly.
+- Re-set CRITIQUE_ROTATION_SECRET on the Space (had been cleared during rebuild).
+- End-to-end verification:
+  * POST /api/agent {"model":"deepseek-v4-flash"} (logical ID, previously would fail) → 202, model correctly resolved to "openai/deepseek-ai/deepseek-v4-flash"
+  * Polled transcript: [THINKING] "The user wants me to say hello..." → [ASSISTANT] "Hello! I'm your doomalaysocreate agent, ready to help you in this Space." → status: idle. REAL LLM response, no BadRequestError.
+  * POST /api/agent {"model":"kimi-k2.6"} → 202, model correctly resolved to "openai/kimi-k2.6" (was "privatemodeai/kimi-k2.6" before fix). The remaining 401 is a PrivateMode AI proxy auth issue (provider-side), not a code bug.
+
+Stage Summary:
+- litellm.BadRequestError FIXED and DEPLOYED. All models now resolve to the correct openai/ litellm prefix.
+- Agent chat works with logical model IDs (the condensed model picker format) AND full litellm model strings.
+- The remaining kimi-k2.6 401 is a PrivateMode AI proxy authentication issue (the proxy at localhost:8080 returns 401), not a model resolution bug. The user's PrivateMode AI key may need refreshing.
