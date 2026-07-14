@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GitHubClient, type Workspace, type Repo, type Branch, type PushLog, type RegistryEntry } from "../api/github";
 import { GithubConnect } from "../components/GithubConnect";
+import { useChatStore } from "../state/chatStore";
 import type { Settings } from "../api/panel";
 
 type View = "list" | "create" | "detail" | "registry";
@@ -700,12 +701,22 @@ function WorkspaceDetail({
         <span className="px-1.5 py-0.5 rounded bg-surface2 text-[10px]">
           {ws.current_branch}
         </span>
+        <button
+          onClick={() => {
+            useChatStore.getState().setWorkspaceId(ws.id);
+            setSuccess("Workspace set for chat! Switch to the Chat tab.");
+            setTimeout(() => setSuccess(""), 3000);
+          }}
+          className="ml-auto px-2 py-0.5 rounded bg-accent text-white text-[10px] font-medium hover:bg-accent/80 transition-colors"
+        >
+          Use for chat
+        </button>
         {ws.source_repo && (
           <a
             href={ws.source_repo}
             target="_blank"
             rel="noreferrer noopener"
-            className="text-accent underline ml-auto"
+            className="text-accent underline"
           >
             repo ↗
           </a>

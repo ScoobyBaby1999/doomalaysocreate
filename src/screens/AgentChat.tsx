@@ -61,6 +61,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const panelInvocations = useChatStore((s) => s.panelInvocations);
   const sidebarOpen = useChatStore((s) => s.sidebarOpen);
   const cost = useChatStore((s) => s.cost);
+  const lastUsage = useChatStore((s) => s.lastUsage);
   const queue = useChatStore((s) => s.queue);
   const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
   // Model verification fields
@@ -297,12 +298,19 @@ export function AgentChat({ settings }: { settings: Settings }) {
           </div>
         )}
 
-        {/* Cost indicator */}
-        {cost != null && cost > 0 && (
-          <span className="text-[10px] text-muted-foreground tabular-nums">
-            ${cost.toFixed(4)}
-          </span>
-        )}
+        {/* Cost + token usage indicator */}
+        <div className="flex items-center gap-2 text-[10px] text-muted-foreground tabular-nums">
+          {cost != null && cost > 0 && (
+            <span title={`Cost: $${cost.toFixed(4)}`}>
+              ${cost.toFixed(4)}
+            </span>
+          )}
+          {lastUsage && (
+            <span title={`Tokens: ${lastUsage.input_tokens} in → ${lastUsage.output_tokens} out (${lastUsage.total_tokens} total)`}>
+              {lastUsage.total_tokens.toLocaleString()} tok
+            </span>
+          )}
+        </div>
 
         {/* Status pill */}
         {running && (
