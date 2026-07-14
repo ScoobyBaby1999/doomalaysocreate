@@ -703,19 +703,32 @@ def _route_network_git(cmd: str, workspace_id: str) -> dict:
             "content": [{"text": f"unsupported git command: {cmd}"}]}
 
 
-def _guarded_shell(**kwargs):
+def _guarded_shell(tool_use=None, **kwargs):
     """Execute a bash command in the session workspace with FULL output capture.
 
     This is a REAL bash shell — the agent can run any command (git, npm, pip,
     python3, make, curl, etc.). Output (stdout + stderr) is captured and
     returned in the Strands tool result format.
 
+    Strands calls this as: _guarded_shell(tool_use, **invocation_state)
+    where tool_use is a TypedDict with "input", "name", "toolUseId".
+    The command is in tool_use["input"]["command"].
+
     Network git operations (push/pull/fetch) are routed through the backend
     git functions so the GitHub token never lands in .git/config.
     """
     import subprocess
 
-    cmd = kwargs.get("command", "")
+    # Extract the command from the tool_use input (Strands format) or
+    # from kwargs (direct call format for backwards compat).
+    cmd = ""
+    if tool_use and isinstance(tool_use, dict):
+        inp = tool_use.get("input", {})
+        if isinstance(inp, dict):
+            cmd = inp.get("command", "")
+    if not cmd:
+        cmd = kwargs.get("command", "")
+
     if not isinstance(cmd, str) or not cmd.strip():
         return {"status": "error",
                 "content": [{"text": "command (non-empty string) is required"}]}
@@ -909,9 +922,15 @@ class StrandsAdapter(BaseAdapter):
             import conscious_tools
             sess = self._session_ref()
             if sess is not None:
-                def _panel_tool_wrapper(**kwargs):
+                def _panel_tool_wrapper(tool_use=None, **kwargs):
                     """Invoke the judge panel for a critique."""
-                    result = conscious_tools._agent_panel(sess, kwargs)
+                    # Extract args from tool_use (Strands format) or kwargs
+                    args = {}
+                    if tool_use and isinstance(tool_use, dict):
+                        args = tool_use.get("input", {}) or {}
+                    if not args:
+                        args = kwargs
+                    result = conscious_tools._agent_panel(sess, args)
                     return result
                 panel_mod = _types.ModuleType("agent_panel")
                 panel_mod.__file__ = __file__
