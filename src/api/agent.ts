@@ -272,6 +272,18 @@ export class AgentClient {
     }>(`/api/memory?workspace_id=${workspaceId}`);
   }
 
+  /** Get live model benchmarks from OpenRouter (pricing, context, capabilities). */
+  getBenchmarks() {
+    return this.req<{
+      models: {
+        id: string; name: string; context_length: number;
+        prompt_price: string; completion_price: string; is_free: boolean;
+        description: string; architecture: any;
+      }[];
+      count: number;
+    }>("/api/benchmarks");
+  }
+
   // -- chat session persistence -------------------------------------------
 
   listChatSessions() {
