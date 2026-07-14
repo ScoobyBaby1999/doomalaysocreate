@@ -155,6 +155,44 @@ export function AgentChat({ settings }: { settings: Settings }) {
     inputRef.current?.focus();
   }, [createSession, effectiveModelId]);
 
+  // Export conversation as markdown
+  const handleExport = useCallback(() => {
+    const lines: string[] = [];
+    lines.push(`# doomalaysocreate Conversation Export`);
+    lines.push(`Date: ${new Date().toISOString()}`);
+    lines.push(`Model: ${resolvedModel || effectiveModelId || "unknown"}`);
+    lines.push(`Provider: ${resolvedProvider || "unknown"}`);
+    lines.push("");
+    for (const msg of messages) {
+      if (msg.role === "user") {
+        lines.push(`## User`);
+        lines.push(msg.content);
+        lines.push("");
+      } else if (msg.role === "assistant") {
+        lines.push(`## Assistant`);
+        lines.push(msg.content);
+        lines.push("");
+      } else if (msg.role === "thinking") {
+        lines.push(`### Thinking`);
+        lines.push(msg.content);
+        lines.push("");
+      } else if (msg.role === "tool") {
+        lines.push(`### Tool: ${msg.toolName || "unknown"}`);
+        lines.push("```");
+        lines.push(msg.content);
+        lines.push("```");
+        lines.push("");
+      }
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `chat-${new Date().toISOString().slice(0, 10)}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [messages, resolvedModel, resolvedProvider, effectiveModelId]);
+
   // Handle keydown — Enter sends, Shift+Enter newlines. While busy, Enter
   // queues instead of being disabled.
   const handleKeyDown = useCallback(
@@ -382,6 +420,19 @@ export function AgentChat({ settings }: { settings: Settings }) {
               <line x1="5" y1="12" x2="19" y2="12" />
             </svg>
             New
+          </button>
+        )}
+        {messages.length > 0 && (
+          <button
+            onClick={handleExport}
+            className="flex items-center gap-1 text-[11px] px-2 py-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors shrink-0"
+            title="Export conversation as markdown"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
           </button>
         )}
       </header>
