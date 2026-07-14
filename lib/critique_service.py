@@ -1357,7 +1357,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 import urllib.request
-                # Fetch live model data from OpenRouter's public API
                 req = urllib.request.Request(
                     "https://openrouter.ai/api/v1/models",
                     headers={"Accept": "application/json"})
@@ -1366,17 +1365,51 @@ class Handler(BaseHTTPRequestHandler):
                 models = []
                 for m in data.get("data", []):
                     pricing = m.get("pricing", {})
+                    arch = m.get("architecture", {})
+                    model_id = m.get("id", "")
+                    name = m.get("name", "")
+                    desc = (m.get("description", "") or "")[:300]
+                    modality = arch.get("modality", "text->text")
+                    name_lower = (name + " " + model_id + " " + desc).lower()
+                    caps = []
+                    if "vision" in name_lower or "image" in modality:
+                        caps.append("vision")
+                    if "cod" in name_lower or "program" in name_lower:
+                        caps.append("coding")
+                    if "reason" in name_lower or "think" in name_lower:
+                        caps.append("reasoning")
+                    if "agent" in name_lower:
+                        caps.append("agentic")
+                    if "tool" in name_lower:
+                        caps.append("tools")
+                    prompt_cost = float(pricing.get("prompt", "0") or "0")
+                    completion_cost = float(pricing.get("completion", "0") or "0")
+                    cost_per_1m = round((prompt_cost + completion_cost) * 1000000, 4)
                     models.append({
-                        "id": m.get("id", ""),
-                        "name": m.get("name", ""),
+                        "id": model_id, "name": name,
                         "context_length": m.get("context_length", 0),
                         "prompt_price": pricing.get("prompt", "0"),
                         "completion_price": pricing.get("completion", "0"),
+                        "cost_per_1m": cost_per_1m,
                         "is_free": pricing.get("prompt") == "0" and pricing.get("completion") == "0",
-                        "description": (m.get("description", "") or "")[:200],
-                        "architecture": m.get("architecture", {}),
+                        "description": desc, "modality": modality,
+                        "capabilities": caps,
+                        "input_modalities": arch.get("input_modalities", ["text"]),
+                        "output_modalities": arch.get("output_modalities", ["text"]),
+                        "tokenizer": arch.get("tokenizer", ""),
+                        "knowledge_cutoff": m.get("knowledge_cutoff", ""),
+                        "supported_params": [p for p in m.get("supported_parameters", []) if p in
+                                            ["temperature", "top_p", "max_tokens", "stream", "tools",
+                                             "response_format", "reasoning", "tool_choice"]],
                     })
-                self._send_json(200, {"models": models, "count": len(models)})
+                models.sort(key=lambda m: (not m["is_free"], -m["context_length"]))
+                self._send_json(200, {
+                    "models": models, "count": len(models),
+                    "free_count": sum(1 for m in models if m["is_free"]),
+                    "vision_count": sum(1 for m in models if "vision" in m["capabilities"]),
+                    "coding_count": sum(1 for m in models if "coding" in m["capabilities"]),
+                    "agentic_count": sum(1 for m in models if "agentic" in m["capabilities"]),
+                })
             except Exception as e:
                 self._send_json(500, {"error": f"failed to fetch benchmarks: {str(e)[:200]}"})
             return
