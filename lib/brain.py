@@ -36,6 +36,17 @@ from pathlib import Path
 from typing import Any
 
 # Built-in blackboard sections. Custom sections land in blackboard/custom/.
+
+def _sanitize_path_component(name):
+    """Sanitize a user-supplied path component to prevent path traversal.
+    Only allow alphanumeric, hyphens, underscores, and dots."""
+    import re
+    if not re.match(r'^[A-Za-z0-9._-]+$', str(name)):
+        raise ValueError(f"invalid path component: {name!r}")
+    if '..' in str(name):
+        raise ValueError(f"invalid path component: {name!r}")
+    return str(name)
+
 BUILTIN_SECTIONS = {"goal", "plan", "decision", "finding", "question", "artifact", "event"}
 
 # Per-brain-path lock registry — serializes .jsonl appends.
@@ -261,9 +272,9 @@ def read_agents(brain_path: Path) -> list[str]:
 
 def _blackboard_file(brain_path: Path, section: str) -> Path:
     if section in BUILTIN_SECTIONS:
-        return brain_path / "blackboard" / f"{section}.jsonl"
+        return brain_path / "blackboard" / f"{_sanitize_path_component(section)}.jsonl"
     (brain_path / "blackboard" / "custom").mkdir(parents=True, exist_ok=True)
-    return brain_path / "blackboard" / "custom" / f"{section}.jsonl"
+    return brain_path / "blackboard" / "custom" / f"{_sanitize_path_component(section)}.jsonl"
 
 
 def append_blackboard(brain_path: Path, section: str, key: str, value: str,
@@ -424,7 +435,7 @@ def write_agent_profile(brain_path: Path, agent: dict) -> None:
 
 def append_agent_log(brain_path: Path, agent_id: str, entry: str) -> None:
     """Append a line to agents/<id>.log."""
-    p = brain_path / "agents" / f"{agent_id}.log"
+    p = brain_path / "agents" / f"{_sanitize_path_component(agent_id)}.log"
     p.parent.mkdir(parents=True, exist_ok=True)
     lk = _lock_for(brain_path)
     with lk:
@@ -438,7 +449,7 @@ def append_agent_log(brain_path: Path, agent_id: str, entry: str) -> None:
 
 def create_drawer_entry(brain_path: Path, invoke_id: str, request: dict) -> Path:
     """Create drawer/<invoke-id>/ with request.json, empty result.md, files/, status.json."""
-    d = brain_path / "drawer" / invoke_id
+    d = brain_path / "drawer" / _sanitize_path_component(invoke_id)
     (d / "files").mkdir(parents=True, exist_ok=True)
     (d / "request.json").write_text(_pretty_json(request), encoding="utf-8")
     (d / "result.md").write_text("(pending)", encoding="utf-8")
@@ -455,7 +466,7 @@ def create_drawer_entry(brain_path: Path, invoke_id: str, request: dict) -> Path
 def complete_drawer_entry(brain_path: Path, invoke_id: str, result: str,
                           status: str, error: str | None = None) -> None:
     """Write result.md and update status.json for a drawer entry."""
-    d = brain_path / "drawer" / invoke_id
+    d = brain_path / "drawer" / _sanitize_path_component(invoke_id)
     if not d.is_dir():
         return
     (d / "result.md").write_text(result if result else "(no output)", encoding="utf-8")
@@ -470,7 +481,7 @@ def complete_drawer_entry(brain_path: Path, invoke_id: str, result: str,
 
 def read_drawer(brain_path: Path, invoke_id: str) -> dict | None:
     """Read a single drawer entry; returns None if missing."""
-    d = brain_path / "drawer" / invoke_id
+    d = brain_path / "drawer" / _sanitize_path_component(invoke_id)
     if not d.is_dir():
         return None
     out: dict[str, Any] = {"invoke_id": invoke_id}

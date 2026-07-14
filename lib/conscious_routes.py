@@ -160,6 +160,39 @@ def _ensure_default_user() -> str:
 # conscious lifecycle
 # ---------------------------------------------------------------------------
 
+
+def _validate_workspace_id(workspace_id: str) -> str:
+    """Validate workspace_id to prevent path traversal. Only allow alphanumeric,
+    hyphens, and underscores (max 64 chars)."""
+    import re
+    if not re.match(r'^[A-Za-z0-9_-]{1,64}$', workspace_id):
+        raise ValueError(f"invalid workspace_id: {workspace_id!r}")
+    # Double-check no path components
+    if "/" in workspace_id or chr(92) in workspace_id or ".." in workspace_id:
+        raise ValueError(f"invalid workspace_id: {workspace_id!r}")
+    return workspace_id
+
+
+import re as _re_module
+
+def _validate_workspace_id(workspace_id):
+    """Validate workspace_id to prevent path traversal."""
+    if not _re_module.match(r'^[A-Za-z0-9_-]{1,64}$', workspace_id):
+        raise ValueError("invalid workspace_id")
+    if "/" in workspace_id or chr(92) in workspace_id or ".." in workspace_id:
+        raise ValueError("invalid workspace_id")
+    return workspace_id
+
+import re as _re_module
+
+def _validate_workspace_id(workspace_id):
+    """Validate workspace_id to prevent path traversal."""
+    if not _re_module.match(r'^[A-Za-z0-9_-]{1,64}$', workspace_id):
+        raise ValueError("invalid workspace_id")
+    if "/" in workspace_id or chr(92) in workspace_id or ".." in workspace_id:
+        raise ValueError("invalid workspace_id")
+    return workspace_id
+
 def _resolve_workspace(user_id: str, workspace_id: str) -> tuple[str, dict | None]:
     """Find or create a workspace by id (or title).  Returns (resolved_id, ws_dict)."""
     from pathlib import Path as _Path
@@ -175,7 +208,7 @@ def _resolve_workspace(user_id: str, workspace_id: str) -> tuple[str, dict | Non
     ws = _dbmod.create_workspace(
         user_id,
         title=workspace_id,
-        sandbox_path=str(sandbox_base / workspace_id),
+        sandbox_path=str(sandbox_base / _validate_workspace_id(workspace_id)),
     )
     return ws["id"], ws
 

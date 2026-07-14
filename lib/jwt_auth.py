@@ -173,21 +173,3 @@ def verify_jwt(token: str, expected_aud: str | None = None,
 # ---------------------------------------------------------------------------
 # Refresh helper
 # ---------------------------------------------------------------------------
-def refresh_jwt(token: str, exp_hours: int = DEFAULT_EXP_HOURS) -> str | None:
-    """Re-sign an existing JWT with a new expiry.  Returns new JWT or None."""
-    payload = verify_jwt(token)
-    if not payload:
-        return None
-    # strip old exp/iat so they don't collide
-    for k in ("exp", "iat"):
-        payload.pop(k, None)
-    return generate_jwt(
-        user_id=payload["sub"],
-        github_id=payload.get("github_id", 0),
-        github_username=payload.get("github_username", ""),
-        github_token_encrypted=payload.get("github_token_enc", ""),
-        hf_id=payload.get("hf_id", ""),
-        hf_token_encrypted=payload.get("hf_token_enc", ""),
-        exp_hours=exp_hours,
-        audience=payload.get("aud", ""),
-    )

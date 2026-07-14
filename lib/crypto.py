@@ -46,8 +46,3 @@ def decrypt_token(ciphertext: str) -> str:
     return f.decrypt(ciphertext.encode("ascii")).decode("utf-8")
 
 
-def mask_token(token: str) -> str:
-    """Return a masked version of a token for safe logging: ``ghp_****abcd``."""
-    if len(token) <= 8:
-        return "****"
-    return token[:4] + "****" + token[-4:]
