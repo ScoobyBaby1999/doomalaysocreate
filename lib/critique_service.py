@@ -1568,7 +1568,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if agent_sessions.agent_tier() is None:
             self._send_json(503, {"error": "no agent tier configured — set ANTHROPIC_API_KEY "
-                                           "(Claude agent) or any free provider key (open agent)"})
+                                           "(Claude agent), any free provider key (open agent), "
+                                           "or AGENT_FORCE_TIER=mock (echo test agent). "
+                                           "On a duplicated Space, add a key via the onboarding wizard."})
             return
         session_id = payload.get("session_id")
         session_id = session_id.strip() if isinstance(session_id, str) else None

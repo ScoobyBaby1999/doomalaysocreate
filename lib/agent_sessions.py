@@ -258,10 +258,15 @@ def _model_base_url(model: str) -> str | None:
 
 
 def agent_tier() -> str | None:
-    """Which agent tier this Space can actually run: "claude" | "open" | None.
+    """Which agent tier this Space can actually run: "claude" | "open" | "mock".
 
-    Requires BOTH a key and the matching SDK installed — so /health never
-    advertises a tier the worker can't start.
+    Requires BOTH a key and the matching SDK installed for a real tier — so
+    /health never advertises a tier the worker can't start.  Falls back to
+    "mock" when no real tier is available so duplicated Spaces (which start
+    with zero provider keys) still let users dogfood the agent UI instead of
+    hitting a 503.  Once a user adds a provider key via the onboarding wizard,
+    HF restarts the Space and the real tier takes over automatically.
+    Set AGENT_FORCE_TIER=none to disable the mock fallback (old behaviour).
     """
     forced = os.environ.get("AGENT_FORCE_TIER", "").strip().lower()
     if forced in ("claude", "open", "mock"):
@@ -270,6 +275,10 @@ def agent_tier() -> str | None:
         return "claude"
     if _pick_open_llm() is not None and _open_sdk_installed():
         return "open"
+    # Auto-fallback: mock tier so the agent UI is always usable on fresh
+    # duplicated Spaces that have no provider keys yet.
+    if forced != "none":
+        return "mock"
     return None
 
 
@@ -856,15 +865,22 @@ def _make_adapter(tier: str, workspace: Path, model: str | None = None,
 
 
 def tier_for_model(model: str | None) -> str | None:
-    """Resolve which tier a chosen model belongs to (None → auto/default)."""
+    """Resolve which tier a chosen model belongs to (None → auto/default).
+
+    Falls back to agent_tier() (which itself falls back to "mock") so an
+    unknown model never hard-fails — the user gets a mock response and a
+    clear path to add a real provider key.
+    """
     if not model:
         return agent_tier()
     if model.startswith("claude"):
         return "claude" if (os.environ.get("ANTHROPIC_API_KEY", "").strip()
-                            and _installed("claude_agent_sdk")) else None
+                            and _installed("claude_agent_sdk")) else agent_tier()
     if any(m["model"] == model for m in agent_models()):
         return "open"
-    return None
+    # Unknown model — fall back to whatever tier is available (mock if nothing
+    # else) instead of returning None (which would raise RuntimeError).
+    return agent_tier()
 
 
 # --------------------------------------------------------------------------
