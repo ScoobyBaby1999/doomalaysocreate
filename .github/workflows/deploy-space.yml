@@ -48,7 +48,7 @@ jobs:
       - name: Assemble Space tree
         run: |
           mkdir space
-          cp -r backend/critique-service/. space/
+          cp -r backend/lib/. space/
           mkdir space/app
           cp -r frontend/. space/app/
           rm -rf space/app/.git space/app/node_modules space/app/dist

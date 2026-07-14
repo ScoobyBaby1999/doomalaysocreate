@@ -319,7 +319,7 @@ fix the string and you're done.
 ## Run locally
 
 ```bash
-cd critique-service
+cd lib
 cp .env.example .env          # fill in CRITIQUE_TOKEN + the provider keys you use
 pip install -r requirements.txt
 python critique_service.py    # listens on 0.0.0.0:7860 (override with $PORT)
@@ -333,7 +333,7 @@ curl -sS -X POST http://127.0.0.1:7860/api/critique \
 ## Deploy on Hugging Face Spaces (free)
 
 1. Create a new **Space** → SDK **Docker** → hardware **CPU basic (free)**.
-2. Push the **contents of this `critique-service/` directory** to the Space repo
+2. Push the **contents of this `lib/` directory** to the Space repo
    (the `Dockerfile` must be at the Space root).
 3. In **Space → Settings → Secrets**, add:
    - `CRITIQUE_TOKEN` — your bearer token
@@ -396,7 +396,7 @@ evaluation — is in **[`docs/DESIGN.md`](docs/DESIGN.md)**.
 ## Files
 
 ```
-critique-service/
+lib/
 ├── critique_service.py   # HTTP server: endpoints, profiles, effort, /api/stats + /api/metrics
 ├── providers.py          # catalog-driven provider/slot registry (reads the *_catalog.json)
 ├── providers_catalog.json# provider pool + published free-tier limits (core + opt-in)

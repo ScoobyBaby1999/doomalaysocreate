@@ -1,6 +1,6 @@
 # Hugging Face Spaces (Docker SDK) image for the FULL doomalaysocreate product: the panel gateway
 # plus the web app served at /. Built from the tree the deploy-space GitHub Action
-# assembles: backend (critique-service/*) at the root, frontend source under app/.
+# assembles: backend (lib/*) at the root, frontend source under app/.
 # CPU basic / free is plenty - all real work is I/O-bound on the LLM provider APIs.
 
 # --- stage 0: privatemode proxy binary (static Go binary, extracted at build time) ---

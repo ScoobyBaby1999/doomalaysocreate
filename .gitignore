@@ -11,7 +11,7 @@ tsconfig.tsbuildinfo
 __pycache__
 *.pyc
 *.pyo
-critique-service/data/
+lib/data/
 app/
 .rotation_secret
 *.db

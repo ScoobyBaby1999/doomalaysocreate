@@ -60,7 +60,7 @@ Now `/critique` (and "critique this plan" / "run my judge panel") work in every 
 Nothing else from this repo is needed — the skill is a self-contained HTTPS client.
 
 For the full panel/template/repo-budgeting playbook, see the backend's
-`critique-service/docs/USAGE.md`.
+`lib/docs/USAGE.md`.
 
 ## What counts as "the plan"
 
@@ -96,7 +96,7 @@ else
   TOK="$CRITIQUE_TOKEN"
 fi
 # If this repo is checked out you can equivalently run:
-#   TOK=$(CRITIQUE_ROTATION_SECRET=$CRITIQUE_ROTATION_SECRET python critique-service/tools/gen_token.py)
+#   TOK=$(CRITIQUE_ROTATION_SECRET=$CRITIQUE_ROTATION_SECRET python lib/tools/gen_token.py)
 ```
 
 Then write the plan to a temp file first (avoids shell-quoting/escaping bugs with long

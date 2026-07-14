@@ -105,7 +105,7 @@ OUTPUT_RULES = (
 CRITIQUE_MAX_TOKENS = int(os.environ.get("CRITIQUE_MAX_TOKENS", "16384"))
 JUDGE_TIMEOUT_S = float(os.environ.get("JUDGE_TIMEOUT_S", "1800"))  # frontier reasoning models are slow; async mode makes long waits free
 #   8MB default: a whole-repo "files" pack is far larger than a typical prompt (the
-#   full critique-service source is ~0.5MB; leaves headroom for real projects).
+#   full lib/ source is ~0.5MB; leaves headroom for real projects).
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", str(8_000_000)))
 REPO_MAX_BYTES = int(os.environ.get("REPO_MAX_BYTES", str(50_000_000)))
 #   server concurrency bounds (free multi-user safety). MAX_WORKERS caps simultaneous

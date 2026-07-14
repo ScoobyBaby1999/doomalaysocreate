@@ -3,13 +3,13 @@ AI 10x Productivity Loop Forward Deployed Engineer Prompt Orchestration Agentic 
 
 ## Repo layout — backend here, frontend on its own branch
 
-- **`c` branch (this one)** — the backend: `critique-service/` (the judge-panel gateway).
+- **`c` branch (this one)** — the backend: `lib/` (the judge-panel gateway).
 - **`frontend` branch** — the mobile-first client app (own root, own `package.json`).
   `git checkout frontend`. The two are connected **only** by the HTTP API; the frontend's
   `API-CONTRACT.md` documents exactly what it calls. Full usage playbook:
-  `critique-service/docs/USAGE.md`.
+  `lib/docs/USAGE.md`.
 
-## `critique-service/` — loom's judge panel, as a hosted endpoint
+## `lib/` — loom's judge panel, as a hosted endpoint
 
 A slim, token-guarded `POST /api/critique` service ported from **loom**. It fans a
 plan (markdown *or* a loom JSON schematic) out to a diverse panel of judge LLMs —
@@ -22,8 +22,8 @@ judge being rate-limited never fails the request.
 - **Invoke from Android (or any repo)** via the `.claude/skills/critique/` skill —
   a thin client over the hosted endpoint. The phone is the client; the Space is the
   backbone.
-- **Editable panel:** judges live in `critique-service/panel.json`; any
+- **Editable panel:** judges live in `lib/panel.json`; any
   `provider/model` named there is registered on the fly against that provider's key.
 
-See **[`critique-service/README.md`](critique-service/README.md)** for the full API
+See **[`lib/README.md`](lib/README.md)** for the full API
 contract, deployment steps, and security notes.

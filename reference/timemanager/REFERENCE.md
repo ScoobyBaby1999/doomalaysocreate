@@ -2,12 +2,12 @@
 
 Extracted from `timemanager.rar` (origin/pied) for future use. Lives at repo root so it
 persists in git but is **never** part of the HF Space deploy (the workflow only ships
-`critique-service/`). The original `backend/.env` (live API keys) was removed before commit.
+`lib/`). The original `backend/.env` (live API keys) was removed before commit.
 
 ## Why it's here — prior art for job persistence (Roadmap P0)
 
 This older sibling app already solved checkpoint/resume, which our current
-`critique-service` lacks (no `atomic_write_json`, no checkpoint module). Port these:
+`lib` lacks (no `atomic_write_json`, no checkpoint module). Port these:
 
 - **`backend/oplog.py:atomic_write_json`** — write `<path>.tmp` then `os.replace` so a
   kill mid-write never leaves a half-file. Use for all job/state snapshots.
