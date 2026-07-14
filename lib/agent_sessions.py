@@ -66,6 +66,7 @@ AGENT_SYSTEM_PROMPT = (
     "- glob: find files by pattern (e.g. **/*.py)\n"
     "- calculator: math calculations\n"
     "- agent_panel: invoke the multi-model judge panel for critiques\n"
+    "- memory: read/write the workspace memory layer (.pied sanity log)\n"
     "- load_tool: dynamically load more tools at runtime\n\n"
     "CRITICAL: ALWAYS use the `shell` tool for ANY command-line operation. "
     "The `shell` tool gives you a REAL bash shell with full output capture. "
@@ -1170,13 +1171,14 @@ class AgentSession:
     def __init__(self, tier: str, model: str | None = None,
                  workspace_path: Path | None = None, workspace_id: str | None = None,
                  conscious_id: str | None = None, agent_id: str | None = None,
-                 chat_session_id: str | None = None):
+                 chat_session_id: str | None = None, mode: str = "auto"):
         self.id = uuid.uuid4().hex[:16]
         self.chat_session_id = chat_session_id
         self.persisted_seq = 0
         self.tier = tier
         self.model = model
         self.workspace_id = workspace_id  # links to user's workspace, if any
+        self.mode = mode  # "auto" (default), "build", "plan"
         # Tier 3 — Conscious binding. Set when an agent is spawned against a
         # Conscious. Existing non-Conscious agents have both as None; the
         # conscious_* tool handlers no-op with an error in that case.
@@ -1185,6 +1187,27 @@ class AgentSession:
         # Build a context-rich system prompt when the agent is bound to a
         # cloned workspace, so the model knows it can run git commands.
         self.system_prompt = AGENT_SYSTEM_PROMPT
+        # Mode-specific prompt additions
+        if mode == "plan":
+            self.system_prompt += (
+                "\n\nMODE: PLAN. Do NOT execute or make changes. Instead, "
+                "decompose the task into steps, outline the approach, and "
+                "present the plan for user approval. Use the memory tool to "
+                "save the plan. Wait for user confirmation before executing."
+            )
+        elif mode == "build":
+            self.system_prompt += (
+                "\n\nMODE: BUILD. Execute the task step by step. After each "
+                "step, report the outcome and wait for user confirmation "
+                "before proceeding to the next step."
+            )
+        else:  # auto
+            self.system_prompt += (
+                "\n\nMODE: AUTO. Execute the full task autonomously. Make "
+                "decisions independently, use tools freely, and report the "
+                "final outcome. Only pause if you encounter an error you "
+                "can't resolve or if you need user input."
+            )
         if self.workspace_id:
             try:
                 import db
@@ -1485,7 +1508,8 @@ def get_or_create(session_id: str | None = None,
                   workspace_id: str | None = None,
                   conscious_id: str | None = None,
                   agent_id: str | None = None,
-                  chat_session_id: str | None = None) -> AgentSession:
+                  chat_session_id: str | None = None,
+                  mode: str = "auto") -> AgentSession:
     """Reuse a live session by id, or start a new one (CapacityError if full).
     `model` (optional) selects which model/tier drives a NEW session.
     `workspace_id` (optional) links the session to a user workspace sandbox.
@@ -1538,7 +1562,7 @@ def get_or_create(session_id: str | None = None,
         s = AgentSession(tier, model, workspace_path=workspace_path,
                          workspace_id=workspace_id,
                          conscious_id=conscious_id, agent_id=agent_id,
-                         chat_session_id=chat_session_id)
+                         chat_session_id=chat_session_id, mode=mode)
         _sessions[s.id] = s
         return s
 

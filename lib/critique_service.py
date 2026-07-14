@@ -1666,9 +1666,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 chat_session_id = None
         try:
+            mode = str(payload.get("mode", "auto")).strip().lower()
+            if mode not in ("auto", "build", "plan"):
+                mode = "auto"
             session = agent_sessions.get_or_create(session_id, model,
                                                    workspace_id=workspace_id,
-                                                   chat_session_id=chat_session_id)
+                                                   chat_session_id=chat_session_id,
+                                                   mode=mode)
         except agent_sessions.CapacityError as e:
             self._send_json(429, {"error": str(e)}, headers={"Retry-After": "30"})
             return
