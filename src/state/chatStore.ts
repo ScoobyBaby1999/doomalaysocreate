@@ -230,13 +230,28 @@ export function eventsToMessages(events: AgentEvent[]): ChatMessage[] {
         break;
       }
       case "thinking": {
-        messages.push({
-          id: genMsgId(),
-          role: "thinking",
-          content: ev.text || "",
-          timestamp: ts,
-          seq,
-        });
+        // Merge consecutive thinking events into one bubble.
+        // The backend accumulates thinking text in one event (same seq),
+        // but the post-turn walk may emit a separate one. Merge by checking
+        // if the last message is a thinking bubble.
+        if (messages.length > 0 && messages[messages.length - 1].role === "thinking") {
+          const last = messages[messages.length - 1];
+          const newText = ev.text || "";
+          const oldText = last.content || "";
+          if (newText.length >= oldText.length && newText.startsWith(oldText)) {
+            messages[messages.length - 1] = { ...last, content: newText, seq };
+          } else if (!oldText.startsWith(newText)) {
+            messages[messages.length - 1] = { ...last, content: oldText + newText, seq };
+          }
+        } else {
+          messages.push({
+            id: genMsgId(),
+            role: "thinking",
+            content: ev.text || "",
+            timestamp: ts,
+            seq,
+          });
+        }
         streamingThinkingIdx = -1;
         streamingAssistantIdx = -1;
         break;
@@ -434,26 +449,27 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
     }
     case "thinking": {
       // The backend emits multiple "thinking" events as reasoning streams in.
-      // The backend's emit() REPLACES the text of the last thinking event
-      // (so snapshot/poll returns the latest full text). But the SSE stream
-      // sends each raw thinking event. We MERGE consecutive thinking events
-      // into the same bubble (matching the backend's stored behavior) so the
-      // UI shows one growing thinking block, not many fragments.
+      // emit() ACCUMULATES the text (appends fragments) and sends the
+      // accumulated text with the SAME seq (i) to SSE. So consecutive thinking
+      // events with the same seq should MERGE into one growing bubble.
+      // We also merge by position: if the last thinking bubble is streaming,
+      // merge into it. This handles both same-seq and positional merging.
       for (let i = out.length - 1; i >= 0; i--) {
-        if (out[i].role === "thinking" && out[i].isStreaming) {
-          // Merge: replace the text (backend sends the full accumulated text
-          // in each thinking event via the streaming callback's reasoningText,
-          // OR sends a fragment via the post-turn walk). If the new text is
-          // longer, it's the accumulated version — replace. If shorter, it's
-          // a fragment — append. This handles both emit patterns.
+        if (out[i].role === "thinking") {
+          // Found a thinking bubble — merge into it.
           const newText = ev.text || "";
-          const oldText = out[i].content;
+          const oldText = out[i].content || "";
+          // The backend sends accumulated text (growing). If the new text
+          // starts with the old text, it's the accumulated version — replace.
+          // Otherwise append (fragment mode).
           if (newText.length >= oldText.length && newText.startsWith(oldText)) {
-            // Accumulated version — replace.
-            out[i] = { ...out[i], content: newText, seq, timestamp: ts };
+            out[i] = { ...out[i], content: newText, seq, timestamp: ts, isStreaming: true };
+          } else if (oldText.startsWith(newText)) {
+            // New text is a prefix of old — ignore (stale/duplicate)
+            return out;
           } else {
-            // Fragment — append.
-            out[i] = { ...out[i], content: oldText + newText, seq, timestamp: ts };
+            // Fragment — append
+            out[i] = { ...out[i], content: oldText + newText, seq, timestamp: ts, isStreaming: true };
           }
           return out;
         }
@@ -462,7 +478,7 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
           break;
         }
       }
-      // No existing streaming thinking — start a new one.
+      // No existing thinking bubble — start a new one.
       out.push({
         id: genMsgId(),
         role: "thinking",
