@@ -277,10 +277,17 @@ export class AgentClient {
     return this.req<{
       models: {
         id: string; name: string; context_length: number;
-        prompt_price: string; completion_price: string; is_free: boolean;
-        description: string; architecture: any;
+        prompt_price: string; completion_price: string; cost_per_1m: number;
+        is_free: boolean; description: string; modality: string;
+        capabilities: string[]; input_modalities: string[];
+        output_modalities: string[]; tokenizer: string;
+        knowledge_cutoff: string; supported_params: string[];
       }[];
       count: number;
+      free_count: number;
+      vision_count: number;
+      coding_count: number;
+      agentic_count: number;
     }>("/api/benchmarks");
   }
 
