@@ -2081,6 +2081,10 @@ class Handler(BaseHTTPRequestHandler):
         if token:
             payload = jwt_auth.verify_jwt(token, expected_aud=self._space_host())
             if not payload:
+                # SECURITY (C5): Fallback to allow_any_aud for multi-Space deployments
+                # where JWTs are minted by the main Space and claimed by user Spaces.
+                # TODO: Replace with iss/kid verification against an allowlist.
+                log_event("jwt_aud_fallback", source="bearer")
                 payload = jwt_auth.verify_jwt(token, allow_any_aud=True)
 
         # Fallback: try X-JWT header (ConsciousClient sends wire-token bearer + JWT here)
@@ -2089,6 +2093,8 @@ class Handler(BaseHTTPRequestHandler):
             if x_jwt:
                 payload = jwt_auth.verify_jwt(x_jwt, expected_aud=self._space_host())
                 if not payload:
+                    # SECURITY (C5): Same fallback as above.
+                    log_event("jwt_aud_fallback", source="x-jwt")
                     payload = jwt_auth.verify_jwt(x_jwt, allow_any_aud=True)
 
         if not payload:
@@ -2155,10 +2161,13 @@ class Handler(BaseHTTPRequestHandler):
         # Strict audience checks first (try both SPACE_HOST and SPACE_ID), then
         # fall back to allow_any_aud so a JWT minted by the main doomalaysocreate Space is
         # accepted by user Spaces in the proxy flow. Signature is still verified.
+        # SECURITY (C5): This fallback is logged for observability. TODO: Replace
+        # with iss/kid verification against an allowlist of trusted Space IDs.
         payload = jwt_auth.verify_jwt(jwt, expected_aud=os.environ.get("SPACE_HOST", ""))
         if not payload:
             payload = jwt_auth.verify_jwt(jwt, expected_aud=os.environ.get("SPACE_ID", ""))
         if not payload:
+            log_event("jwt_aud_fallback", source="_require_user_from_jwt")
             payload = jwt_auth.verify_jwt(jwt, allow_any_aud=True)
         if not payload:
             return None  # caller decides the response for failed auth
