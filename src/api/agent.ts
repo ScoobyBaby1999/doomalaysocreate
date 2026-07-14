@@ -48,14 +48,6 @@ export type AgentEvent =
 
 export type AgentStatus = "starting" | "idle" | "running" | "error";
 
-export interface AgentModel {
-  tier: "claude" | "open";
-  provider: string;
-  model: string;
-  label: string;
-  default: boolean;
-}
-
 export interface AgentSnapshot {
   session_id: string;
   tier: "claude" | "open" | "mock";
@@ -147,11 +139,6 @@ export class AgentClient {
   /** Optional X-JWT header for GitHub-identity routes (workspace ownership). */
   private jwtHeaders(): Record<string, string> {
     return this.settings.githubSessionId ? { "X-JWT": this.settings.githubSessionId } : {};
-  }
-
-  /** List models this Space can actually run (for the picker). */
-  models() {
-    return this.req<{ tier: string | null; models: AgentModel[] }>("/api/agent/models");
   }
 
   /**
@@ -270,32 +257,6 @@ export class AgentClient {
 
   files(sessionId: string) {
     return this.req<{ session_id: string; files: AgentFile[] }>(`/api/agent/${sessionId}/files`);
-  }
-
-  // -- workspace / git operations -----------------------------------------
-
-  workspaceStatus(wsId: string) {
-    return this.req<{ branch: string; files: { status: string; path: string }[]; dirty: boolean }>(
-      `/api/workspaces/${wsId}/status`,
-    );
-  }
-
-  workspaceDiff(wsId: string) {
-    return this.req<{ diff: string; has_changes: boolean }>(`/api/workspaces/${wsId}/diff`);
-  }
-
-  workspaceCommit(wsId: string, message: string) {
-    return this.req<{ commit_sha: string }>(`/api/workspaces/${wsId}/commit`, {
-      method: "POST",
-      body: JSON.stringify({ message }),
-    });
-  }
-
-  workspacePush(wsId: string, opts?: { branch?: string; force?: boolean; auto_approve?: boolean }) {
-    return this.req<{ commit_sha?: string; branch?: string; status?: string }>(
-      `/api/workspaces/${wsId}/push`,
-      { method: "POST", body: JSON.stringify(opts || {}) },
-    );
   }
 
   // -- chat session persistence -------------------------------------------

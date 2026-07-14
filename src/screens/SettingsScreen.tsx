@@ -43,8 +43,6 @@ export function SettingsScreen({
     // Clear all stored credentials and reload
     localStorage.removeItem("doomalaysocreate.settings.v1");
     localStorage.removeItem("doomalaysocreate.settings.expiry");
-    localStorage.removeItem("doomalaysocreate.agent.session");
-    localStorage.removeItem("doomalaysocreate.agent.model");
     sessionStorage.clear();
     window.location.reload();
   }
