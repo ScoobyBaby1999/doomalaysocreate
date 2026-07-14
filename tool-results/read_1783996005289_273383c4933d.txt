@@ -1,0 +1,1170 @@
+     1→import { useEffect, useMemo, useCallback, useRef, useState } from "react";
+     2→import { motion, AnimatePresence } from "framer-motion";
+     3→import { useModelStore, type ProviderGroup, type ProviderModel, type ModelAttributes, type CondensedHost, type CondensedModel } from "../lib/model-store";
+     4→
+     5→function IcoX() {
+     6→  return (
+     7→    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+     8→  );
+     9→}
+    10→function IcoSearch() {
+    11→  return (
+    12→    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+    13→  );
+    14→}
+    15→function IcoCheck() {
+    16→  return (
+    17→    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    18→  );
+    19→}
+    20→function IcoDot() {
+    21→  return (
+    22→    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="1"/></svg>
+    23→  );
+    24→}
+    25→function IcoSettings() {
+    26→  return (
+    27→    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+    28→  );
+    29→}
+    30→function IcoShield() {
+    31→  return (
+    32→    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
+    33→  );
+    34→}
+    35→function IcoRefresh({ spinning }: { spinning?: boolean }) {
+    36→  return (
+    37→    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={spinning ? "animate-spin" : ""}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+    38→  );
+    39→}
+    40→
+    41→function fmtCtx(k: number): string {
+    42→  if (!k) return "\u2014";
+    43→  if (k >= 1_000_000) return `${(k / 1_000_000).toFixed(k % 1_000_000 === 0 ? 0 : 1)}M`;
+    44→  if (k >= 1_000) return `${(k / 1_000).toFixed(0)}K`;
+    45→  return String(k);
+    46→}
+    47→
+    48→function confidenceDotColor(c: "high" | "medium" | "low"): string {
+    49→  if (c === "high") return "#22c55e";
+    50→  if (c === "medium") return "#f59e0b";
+    51→  return "#ef4444";
+    52→}
+    53→
+    54→function syncedAgoLabel(iso: string | null): string {
+    55→  if (!iso) return "";
+    56→  const then = new Date(iso).getTime();
+    57→  if (Number.isNaN(then)) return "";
+    58→  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+    59→  if (secs < 5) return "synced just now";
+    60→  if (secs < 60) return `synced ${secs}s ago`;
+    61→  const mins = Math.round(secs / 60);
+    62→  if (mins < 60) return `synced ${mins}m ago`;
+    63→  const hrs = Math.round(mins / 60);
+    64→  return `synced ${hrs}h ago`;
+    65→}
+    66→
+    67→function scoreColor(s: number): string {
+    68→  if (s >= 70) return "#22c55e";
+    69→  if (s >= 40) return "#f59e0b";
+    70→  return "#ef4444";
+    71→}
+    72→
+    73→const CAP_COLORS: Record<string, string> = {
+    74→  reasoning: "#f97316",
+    75→  code: "#3b82f6",
+    76→  tools: "#8b5cf6",
+    77→  vision: "#22c55e",
+    78→  speech: "#ec4899",
+    79→  audio: "#ec4899",
+    80→};
+    81→
+    82→function capColor(cap: string): string | undefined {
+    83→  const key = cap.toLowerCase();
+    84→  return CAP_COLORS[key] ?? undefined;
+    85→}
+    86→
+    87→function modelMatchesFilters(model: ProviderModel, activeFilters: string[], contextMin: number): boolean {
+    88→  const caps = model.attributes?.capabilities ?? [];
+    89→  const bm = model.attributes?.benchmarks;
+    90→
+    91→  if (contextMin > 0 && model.contextLength < contextMin) return false;
+    92→  if (activeFilters.length === 0) return true;
+    93→
+    94→  return activeFilters.some((filter) => {
+    95→    if (filter === "reasoning") {
+    96→      if (caps.includes("reasoning")) return true;
+    97→      if ((bm?.intelligence ?? 0) >= 20) return true;
+    98→    }
+    99→    if (filter === "code") {
+   100→      if (caps.includes("code")) return true;
+   101→      if ((bm?.coding ?? 0) >= 20 || (bm?.aaCoding ?? 0) >= 20) return true;
+   102→    }
+   103→    if (filter === "tools") {
+   104→      if (caps.includes("tools") || caps.includes("tool use") || caps.includes("function calling")) return true;
+   105→      if ((bm?.agentic ?? 0) >= 20) return true;
+   106→    }
+   107→    if (filter === "vision") {
+   108→      if (caps.includes("vision")) return true;
+   109→    }
+   110→    if (filter === "speech") {
+   111→      if (caps.includes("speech") || caps.includes("audio")) return true;
+   112→    }
+   113→    return false;
+   114→  });
+   115→}
+   116→
+   117→function isReasoningModel(model: { displayName: string; id?: string; logical?: string; attributes?: ModelAttributes }): boolean {
+   118→  const caps = model.attributes?.capabilities ?? [];
+   119→  if (caps.includes("reasoning")) return true;
+   120→  const name = [model.displayName, model.id ?? model.logical ?? ""].join(" ").toLowerCase();
+   121→  return /\breasoning\b/.test(name);
+   122→}
+   123→
+   124→function bestFilterScore(model: ProviderModel, activeFilters: string[]): number {
+   125→  const bm = model.attributes?.benchmarks;
+   126→  let best = 0;
+   127→  for (const filter of activeFilters) {
+   128→    if (filter === "reasoning") best = Math.max(best, isReasoningModel(model) ? 1 : 0);
+   129→    if (filter === "intelligence") best = Math.max(best, bm?.intelligence ?? 0);
+   130→    if (filter === "code") best = Math.max(best, bm?.coding ?? 0, bm?.aaCoding ?? 0);
+   131→    if (filter === "agent") best = Math.max(best, bm?.agentic ?? 0);
+   132→    if (filter === "tools") best = Math.max(best, bm?.agentic ?? 0);
+   133→  }
+   134→  return best;
+   135→}
+   136→
+   137→function sortByFilterScore(models: ProviderModel[], activeFilters: string[]): ProviderModel[] {
+   138→  if (activeFilters.length === 0) return models;
+   139→  return [...models].sort((a, b) => bestFilterScore(b, activeFilters) - bestFilterScore(a, activeFilters));
+   140→}
+   141→
+   142→function avgRank(attrs: ModelAttributes | undefined): number {
+   143→  const ranks = attrs?.ranks;
+   144→  if (!ranks || ranks.length === 0) return Infinity;
+   145→  return ranks.reduce((s, r) => s + r.rank, 0) / ranks.length;
+   146→}
+   147→
+   148→function defaultSort(models: ProviderModel[]): ProviderModel[] {
+   149→  return [...models].sort((a, b) => {
+   150→    const aAvg = avgRank(a.attributes);
+   151→    const bAvg = avgRank(b.attributes);
+   152→    if (aAvg !== bAvg) return aAvg === Infinity ? 1 : bAvg === Infinity ? -1 : aAvg - bAvg;
+   153→
+   154→    const aIntel = a.attributes?.benchmarks?.intelligence ?? 0;
+   155→    const bIntel = b.attributes?.benchmarks?.intelligence ?? 0;
+   156→    if (aIntel !== bIntel) return bIntel - aIntel;
+   157→
+   158→    const aCode = a.attributes?.benchmarks?.coding ?? 0;
+   159→    const bCode = b.attributes?.benchmarks?.coding ?? 0;
+   160→    if (aCode !== bCode) return bCode - aCode;
+   161→
+   162→    return 0;
+   163→  });
+   164→}
+   165→
+   166→const FILTER_PILLS = [
+   167→  { id: "reasoning", label: "Reasoning", color: "#f97316" },
+   168→  { id: "intelligence", label: "Intelligence", color: "#a855f7" },
+   169→  { id: "code", label: "Code", color: "#3b82f6" },
+   170→  { id: "agent", label: "Agent", color: "#14b8a6" },
+   171→  { id: "tools", label: "Tools", color: "#8b5cf6" },
+   172→  { id: "vision", label: "Vision", color: "#22c55e" },
+   173→  { id: "speech", label: "Speech", color: "#ec4899" },
+   174→] as const;
+   175→
+   176→const CONTEXT_OPTIONS = [
+   177→  { value: 0, label: "Any" },
+   178→  { value: 32000, label: "32K" },
+   179→  { value: 128000, label: "128K" },
+   180→  { value: 1000000, label: "1M" },
+   181→] as const;
+   182→
+   183→interface AttrSegment {
+   184→  text: string;
+   185→  color?: string;
+   186→}
+   187→
+   188→function attributeSegments(a: ModelAttributes | undefined): AttrSegment[] | null {
+   189→  if (!a) return null;
+   190→  const segs: AttrSegment[] = [];
+   191→  const b = a.benchmarks;
+   192→  if (b) {
+   193→    if (typeof b.intelligence === "number") {
+   194→      if (segs.length) segs.push({ text: " \u00b7 " });
+   195→      segs.push({ text: `AA ${b.intelligence}`, color: scoreColor(b.intelligence) });
+   196→    }
+   197→    if (typeof b.coding === "number") {
+   198→      if (segs.length) segs.push({ text: " \u00b7 " });
+   199→      segs.push({ text: `code ${b.coding}`, color: scoreColor(b.coding) });
+   200→    }
+   201→    if (typeof b.agentic === "number") {
+   202→      if (segs.length) segs.push({ text: " \u00b7 " });
+   203→      segs.push({ text: `agent ${b.agentic}`, color: scoreColor(b.agentic) });
+   204→    }
+   205→    if (typeof b.sweBench === "number") {
+   206→      if (segs.length) segs.push({ text: " \u00b7 " });
+   207→      segs.push({ text: `SWE ${b.sweBench}`, color: scoreColor(b.sweBench) });
+   208→    }
+   209→    if (typeof b.aaCoding === "number" && typeof b.sweBench === "undefined") {
+   210→      if (segs.length) segs.push({ text: " \u00b7 " });
+   211→      segs.push({ text: `AA-coding ${b.aaCoding}`, color: scoreColor(b.aaCoding) });
+   212→    }
+   213→  }
+   214→  if (a.ranks && a.ranks.length > 0) {
+   215→    const top = a.ranks.slice(0, 3).map((r) => `${r.label} #${r.rank}`).join(" \u00b7 ");
+   216→    if (segs.length) segs.push({ text: " \u00b7 " });
+   217→    segs.push({ text: top });
+   218→  }
+   219→  if (a.capabilities && a.capabilities.length > 0) {
+   220→    for (const cap of a.capabilities) {
+   221→      if (segs.length) segs.push({ text: " \u00b7 " });
+   222→      segs.push({ text: cap, color: capColor(cap) });
+   223→    }
+   224→  }
+   225→  if (a.pricing) {
+   226→    if (segs.length) segs.push({ text: " \u00b7 " });
+   227→    segs.push({ text: a.pricing });
+   228→  }
+   229→
+   230→  if (segs.length === 0 && !a.note) return null;
+   231→  return segs;
+   232→}
+   233→
+   234→function ModelRow({
+   235→  model,
+   236→  isSelected,
+   237→  onSelect,
+   238→  dimmed,
+   239→}: {
+   240→  model: ProviderModel;
+   241→  isSelected: boolean;
+   242→  onSelect: () => void;
+   243→  dimmed?: boolean;
+   244→}) {
+   245→  const segs = model.attributes ? attributeSegments(model.attributes) : null;
+   246→  const note = model.attributes?.note;
+   247→  const hasSub = !!(segs || note);
+   248→
+   249→  return (
+   250→    <button
+   251→      onClick={onSelect}
+   252→      className={`
+   253→        flex flex-col w-full text-left rounded px-1.5 transition-colors duration-100 cursor-pointer
+   254→        ${isSelected ? "bg-primary/10" : dimmed ? "" : "hover:bg-muted/60"}
+   255→        ${dimmed && !isSelected ? "opacity-35" : ""}
+   256→      `}
+   257→      style={{ paddingTop: 3, paddingBottom: hasSub ? 3 : 3 }}
+   258→    >
+   259→      <span className="flex items-center w-full" style={{ height: 20 }}>
+   260→        <span
+   261→          className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
+   262→          style={{
+   263→            width: 14,
+   264→            height: 14,
+   265→            fontSize: 0,
+   266→            border: isSelected ? "none" : "1.5px solid var(--border)",
+   267→            backgroundColor: isSelected ? "var(--primary)" : "transparent",
+   268→          }}
+   269→        >
+   270→          {isSelected && <IcoCheck />}
+   271→        </span>
+   272→
+   273→        <span
+   274→          className={`text-[11px] leading-none truncate flex-1 ${isSelected ? "text-primary font-medium" : "text-foreground"}`}
+   275→          title={model.id}
+   276→        >
+   277→          {model.displayName}
+   278→        </span>
+   279→
+   280→        <span className="flex-shrink-0 ml-1.5 text-[9px] text-muted-foreground tabular-nums">
+   281→          {fmtCtx(model.contextLength)}
+   282→        </span>
+   283→      </span>
+   284→
+   285→      {hasSub && (
+   286→        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-6 pr-1">
+   287→          {segs && segs.map((s, i) =>
+   288→            s.text === " \u00b7 " ? null : (
+   289→              <span
+   290→                key={i}
+   291→                className="text-[9px] leading-none px-1 py-px rounded-sm"
+   292→                style={s.color ? { color: dimmed ? undefined : s.color, backgroundColor: `${s.color}12` } : { color: dimmed ? undefined : "var(--muted-foreground)" }}
+   293→              >
+   294→                {s.text}
+   295→              </span>
+   296→            )
+   297→          )}
+   298→          {note && (
+   299→            <span
+   300→              className={`text-[9px] leading-none px-1 py-px rounded-sm ${note.startsWith("\u26a0") ? "text-amber-600 dark:text-amber-500 bg-amber-500/10" : "text-muted-foreground/70 bg-muted/30"}`}
+   301→            >
+   302→              {note}
+   303→            </span>
+   304→          )}
+   305→        </div>
+   306→      )}
+   307→    </button>
+   308→  );
+   309→}
+   310→
+   311→function ProviderBox({
+   312→  provider,
+   313→  selectedModelId,
+   314→  selectedProviderName,
+   315→  condensedView,
+   316→  onSelect,
+   317→  searchQuery,
+   318→  activeFilters,
+   319→  contextMin,
+   320→}: {
+   321→  provider: ProviderGroup;
+   322→  selectedModelId: string | null;
+   323→  selectedProviderName: string | null;
+   324→  condensedView: boolean;
+   325→  onSelect: (model: ProviderModel, providerName: string) => void;
+   326→  searchQuery: string;
+   327→  activeFilters: string[];
+   328→  contextMin: number;
+   329→}) {
+   330→  const [showDimmed, setShowDimmed] = useState(false);
+   331→
+   332→  const { matched, dimmed } = useMemo(() => {
+   333→    const allModels = provider.models;
+   334→    const searched = !searchQuery.trim()
+   335→      ? allModels
+   336→      : allModels.filter((m) => {
+   337→          const q = searchQuery.toLowerCase();
+   338→          return (
+   339→            m.displayName.toLowerCase().includes(q) ||
+   340→            m.id.toLowerCase().includes(q) ||
+   341→            (m.family?.toLowerCase().includes(q) ?? false)
+   342→          );
+   343→        });
+   344→    const m: ProviderModel[] = [];
+   345→    const d: ProviderModel[] = [];
+   346→    for (const mdl of searched) {
+   347→      if (modelMatchesFilters(mdl, activeFilters, contextMin)) {
+   348→        m.push(mdl);
+   349→      } else {
+   350→        d.push(mdl);
+   351→      }
+   352→    }
+   353→    return {
+   354→      matched: activeFilters.length > 0 || contextMin > 0 ? sortByFilterScore(m, activeFilters) : defaultSort(m),
+   355→      dimmed: d,
+   356→    };
+   357→  }, [provider.models, searchQuery, activeFilters, contextMin]);
+   358→
+   359→  const openSettings = useCallback(() => {
+   360→    useModelStore.getState().openProvidersDialog(provider.name);
+   361→  }, [provider.name]);
+   362→
+   363→  const hasDimmed = dimmed.length > 0;
+   364→  const empty = matched.length === 0 && !hasDimmed;
+   365→
+   366→  return (
+   367→    <div
+   368→      className="flex flex-col rounded-lg border overflow-hidden"
+   369→      style={{ borderColor: `${provider.color}30` }}
+   370→    >
+   371→      <div
+   372→        className="flex items-center gap-2 px-2.5 shrink-0"
+   373→        style={{ height: 26, backgroundColor: `${provider.color}0d`, borderBottom: `1px solid ${provider.color}1f` }}
+   374→      >
+   375→        <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: provider.color }} />
+   376→        <span className="text-[11px] font-semibold text-foreground leading-none truncate">{provider.displayName}</span>
+   377→        <span
+   378→          className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+   379→          style={{ backgroundColor: provider.syncedLive ? "#22c55e" : "#f59e0b" }}
+   380→          title={provider.syncedLive ? "synced live from provider API" : "config-sourced (no public live API)"}
+   381→        />
+   382→        <span className="text-[10px] text-muted-foreground leading-none ml-auto tabular-nums">{provider.models.length}</span>
+   383→        <button
+   384→          onClick={openSettings}
+   385→          className="flex items-center justify-center size-5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+   386→          aria-label={`Manage ${provider.displayName} privacy & keys`}
+   387→          title={`${provider.manageLabel} \u2197`}
+   388→        >
+   389→          <IcoSettings />
+   390→        </button>
+   391→      </div>
+   392→
+   393→      <button
+   394→        onClick={openSettings}
+   395→        className="flex items-center gap-1.5 px-2.5 shrink-0 text-left hover:brightness-95 dark:hover:brightness-110 transition-all"
+   396→        style={{
+   397→          height: 24,
+   398→          borderBottom: `1px solid ${confidenceDotColor(provider.privacy.confidence)}25`,
+   399→          backgroundColor: `${confidenceDotColor(provider.privacy.confidence)}0d`,
+   400→        }}
+   401→        title={provider.privacy.notice}
+   402→      >
+   403→        <span className="shrink-0" style={{ color: confidenceDotColor(provider.privacy.confidence) }}>
+   404→          <IcoShield />
+   405→        </span>
+   406→        <span className="text-[9px] leading-none text-muted-foreground truncate flex-1">
+   407→          {provider.privacy.notice}
+   408→        </span>
+   409→      </button>
+   410→
+   411→      <div className="flex flex-col gap-px p-1 max-h-[340px] overflow-y-auto">
+   412→        {empty ? (
+   413→          <div className="flex items-center justify-center h-10 text-[10px] text-muted-foreground/50">
+   414→            no models synced
+   415→          </div>
+   416→        ) : (
+   417→          <>
+   418→{matched.map((m) => (
+   419→              <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id && (!condensedView ? selectedProviderName === provider.name : true)} onSelect={() => onSelect(m, provider.name)} />
+   420→            ))}
+   421→            {hasDimmed && (
+   422→              <>
+   423→                <button
+   424→                  onClick={() => setShowDimmed((v) => !v)}
+   425→                  className="flex items-center gap-1.5 px-1.5 py-1 mt-0.5 border-t border-border/30 text-[9px] text-muted-foreground/50 hover:text-muted-foreground/80 transition-colors cursor-pointer select-none"
+   426→                >
+   427→                  <span
+   428→                    className="text-[10px] leading-none transition-transform duration-150"
+   429→                    style={{ transform: showDimmed ? "rotate(90deg)" : "rotate(0deg)" }}
+   430→                  >
+   431→                    {"\u25b8"}
+   432→                  </span>
+   433→                  <span className="text=[9px] leading-none">
+   434→                    {showDimmed ? `Hide ${dimmed.length} dimmed` : `Show ${dimmed.length} dimmed`}
+   435→                  </span>
+   436→                </button>
+   437→                {showDimmed && dimmed.map((m) => (
+   438→                  <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id && (!condensedView ? selectedProviderName === provider.name : true)} onSelect={() => onSelect(m, provider.name)} dimmed />
+   439→                ))}
+   440→              </>
+   441→            )}
+   442→          </>
+   443→        )}
+   444→      </div>
+   445→    </div>
+   446→  );
+   447→}
+   448→
+   449→function CondensedModelRow({
+   450→  model,
+   451→  isSelected,
+   452→  onSelect,
+   453→  expanded,
+   454→  onToggleExpand,
+   455→  dimmed,
+   456→}: {
+   457→  model: CondensedModel;
+   458→  isSelected: boolean;
+   459→  onSelect: () => void;
+   460→  expanded: boolean;
+   461→  onToggleExpand: () => void;
+   462→  dimmed?: boolean;
+   463→}) {
+   464→  const segs = model.attributes ? attributeSegments(model.attributes) : null;
+   465→  const note = model.attributes?.note;
+   466→  const hasSub = !!(segs || note);
+   467→  const [localOrder, setLocalOrder] = useState<CondensedHost[]>(() =>
+   468→    useModelStore.getState().getOrderedHosts(model.logical, model.hosts)
+   469→  );
+   470→
+   471→  useEffect(() => {
+   472→    const current = useModelStore.getState().getOrderedHosts(model.logical, model.hosts);
+   473→    setLocalOrder(current);
+   474→  }, [model.logical, model.hosts]);
+   475→
+   476→  function moveUp(idx: number) {
+   477→    if (idx <= 0) return;
+   478→    const next = [...localOrder];
+   479→    [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+   480→    setLocalOrder(next);
+   481→    useModelStore.getState().setProviderPriority(model.logical, next.map((h) => h.provider));
+   482→  }
+   483→
+   484→  function moveDown(idx: number) {
+   485→    if (idx >= localOrder.length - 1) return;
+   486→    const next = [...localOrder];
+   487→    [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+   488→    setLocalOrder(next);
+   489→    useModelStore.getState().setProviderPriority(model.logical, next.map((h) => h.provider));
+   490→  }
+   491→
+   492→  const topHost = localOrder[0];
+   493→
+   494→  return (
+   495→    <div className="flex flex-col w-full text-left rounded px-1.5 transition-colors duration-100"
+   496→      style={{ paddingTop: 3, paddingBottom: hasSub ? 3 : 3 }}
+   497→    >
+   498→      <span className="flex items-center w-full" style={{ height: 20 }}>
+   499→        <button onClick={onSelect} className="flex items-center flex-1 min-w-0 cursor-pointer text-left">
+   500→          <span
+   501→            className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
+   502→            style={{ width: 14, height: 14, fontSize: 0, border: isSelected ? "none" : "1.5px solid var(--border)", backgroundColor: isSelected ? "var(--primary)" : "transparent" }}
+   503→          >
+   504→            {isSelected && <IcoCheck />}
+   505→          </span>
+   506→          <span
+   507→            className={`text-[11px] leading-none truncate flex-1 ${isSelected ? "text-primary font-medium" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
+   508→            title={model.logical}
+   509→          >
+   510→            {model.displayName}
+   511→          </span>
+   512→          <span className="flex-shrink-0 mr-2 text-[9px] text-muted-foreground tabular-nums">
+   513→            {fmtCtx(model.contextLength)}
+   514→          </span>
+   515→        </button>
+   516→      </span>
+   517→
+   518→      {topHost && !expanded && (
+   519→        <button onClick={onToggleExpand}
+   520→          className="flex items-center gap-1.5 w-full pl-6 pr-1 py-0.5 rounded text-[10px] transition-colors hover:bg-muted/30 cursor-pointer text-left"
+   521→          title={localOrder.length > 1 ? "Click to show all provider options" : "Only one provider available"}
+   522→        >
+   523→          <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: topHost.color }} />
+   524→          <span className="truncate text-foreground/80 min-w-0">{topHost.modelId}</span>
+   525→          <span className="tabular-nums text-muted-foreground/60 shrink-0">{fmtCtx(topHost.contextLength)}</span>
+   526→          <span className="text-muted-foreground/50 shrink-0">{topHost.providerDisplayName}</span>
+   527→          {localOrder.length > 1 && <span className="ml-auto text-muted-foreground/40 text-[9px] shrink-0">{"\u25be"}</span>}
+   528→        </button>
+   529→      )}
+   530→
+   531→      {expanded && (
+   532→        <div className="flex flex-col gap-0.5 pl-6 pr-1 mt-0.5">
+   533→          {localOrder.map((host, i) => (
+   534→            <div key={`${host.provider}-${host.modelId}`}
+   535→              className="flex items-center gap-1.5 py-0.5 rounded text-[10px]"
+   536→              style={{ opacity: host.hasApiKey ? 1 : 0.4 }}
+   537→            >
+   538→              <span className="inline-flex items-center justify-center size-3.5 rounded-full text-[7px] font-bold shrink-0"
+   539→                style={{ backgroundColor: `${host.color}30`, color: host.color }}>
+   540→                {i + 1}
+   541→              </span>
+   542→              <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: host.color }} />
+   543→              <span className="truncate text-foreground/80 flex-1 min-w-0">{host.modelId}</span>
+   544→              <span className="tabular-nums text-muted-foreground/60 shrink-0 mr-1">{fmtCtx(host.contextLength)}</span>
+   545→              <span className="text-muted-foreground/50 shrink-0">{host.providerDisplayName}</span>
+   546→              <div className="flex gap-px ml-1 shrink-0">
+   547→                <button
+   548→                  onClick={(e) => { e.stopPropagation(); moveUp(i); }}
+   549→                  disabled={i === 0}
+   550→                  className="size-4 flex items-center justify-center rounded text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+   551→                  title="Higher priority"
+   552→                >
+   553→                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
+   554→                </button>
+   555→                <button
+   556→                  onClick={(e) => { e.stopPropagation(); moveDown(i); }}
+   557→                  disabled={i === localOrder.length - 1}
+   558→                  className="size-4 flex items-center justify-center rounded text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+   559→                  title="Lower priority"
+   560→                >
+   561→                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
+   562→                </button>
+   563→              </div>
+   564→            </div>
+   565→          ))}
+   566→        </div>
+   567→      )}
+   568→
+   569→      {hasSub && (
+   570→        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-6 pr-1">
+   571→          {segs && segs.map((s, i) =>
+   572→            s.text === " \u00b7 " ? null : (
+   573→              <span key={i} className="text-[9px] leading-none px-1 py-px rounded-sm"
+   574→                style={s.color ? { color: dimmed ? undefined : s.color, backgroundColor: `${s.color}12` } : { color: dimmed ? undefined : "var(--muted-foreground)" }}>
+   575→                {s.text}
+   576→              </span>
+   577→            )
+   578→          )}
+   579→          {note && (
+   580→            <span className={`text-[9px] leading-none px-1 py-px rounded-sm ${note.startsWith("\u26a0") ? "text-amber-600 dark:text-amber-500 bg-amber-500/10" : "text-muted-foreground/70 bg-muted/30"}`}>
+   581→              {note}
+   582→            </span>
+   583→          )}
+   584→        </div>
+   585→      )}
+   586→    </div>
+   587→  );
+   588→}
+   589→
+   590→function condensedModelMatchesFilters(model: CondensedModel, activeFilters: string[], contextMin: number): boolean {
+   591→  if (contextMin > 0 && model.contextLength < contextMin) return false;
+   592→  if (activeFilters.length === 0) return true;
+   593→  const caps = model.attributes?.capabilities ?? [];
+   594→  const bm = model.attributes?.benchmarks;
+   595→  return activeFilters.some((filter) => {
+   596→    if (filter === "reasoning") return isReasoningModel(model);
+   597→    if (filter === "intelligence") return (bm?.intelligence ?? 0) >= 20;
+   598→    if (filter === "code") return caps.includes("code") || (bm?.coding ?? 0) >= 20 || (bm?.aaCoding ?? 0) >= 20;
+   599→    if (filter === "agent") return (bm?.agentic ?? 0) >= 20;
+   600→    if (filter === "tools") return caps.includes("tools") || caps.includes("tool use") || (bm?.agentic ?? 0) >= 20;
+   601→    if (filter === "vision") return caps.includes("vision");
+   602→    if (filter === "speech") return caps.includes("speech") || caps.includes("audio");
+   603→    return false;
+   604→  });
+   605→}
+   606→
+   607→function CondensedList({
+   608→  models,
+   609→  searchQuery,
+   610→  activeFilters,
+   611→  contextMin,
+   612→  hideUnavailable,
+   613→  selectedModelId,
+   614→  onSelect,
+   615→  expandedLogical,
+   616→  onToggleExpand,
+   617→}: {
+   618→  models: CondensedModel[];
+   619→  searchQuery: string;
+   620→  activeFilters: string[];
+   621→  contextMin: number;
+   622→  hideUnavailable: boolean;
+   623→  selectedModelId: string | null;
+   624→  onSelect: (model: CondensedModel) => void;
+   625→  expandedLogical: string | null;
+   626→  onToggleExpand: (logical: string | null) => void;
+   627→}) {
+   628→  const [showHidden, setShowHidden] = useState(false);
+   629→  const [showUnavailable, setShowUnavailable] = useState(false);
+   630→
+   631→  const { visible, hiddenByFilter } = useMemo(() => {
+   632→    const searched = !searchQuery.trim()
+   633→      ? models
+   634→      : models.filter((m) => {
+   635→          const q = searchQuery.toLowerCase();
+   636→          return (
+   637→            m.displayName.toLowerCase().includes(q) ||
+   638→            m.logical.toLowerCase().includes(q) ||
+   639→            (m.family?.toLowerCase().includes(q) ?? false) ||
+   640→            m.hosts.some((h) => h.providerDisplayName.toLowerCase().includes(q))
+   641→          );
+   642→        });
+   643→
+   644→    const filtMatch: CondensedModel[] = [];
+   645→    const filtMiss: CondensedModel[] = [];
+   646→    for (const m of searched) {
+   647→      if (condensedModelMatchesFilters(m, activeFilters, contextMin)) {
+   648→        filtMatch.push(m);
+   649→      } else {
+   650→        filtMiss.push(m);
+   651→      }
+   652→    }
+   653→
+   654→    const sorted = activeFilters.length > 0 || contextMin > 0
+   655→      ? [...filtMatch].sort((a, b) => {
+   656→          const sa = bestFilterScore({ id: a.logical, displayName: a.displayName, contextLength: a.contextLength, attributes: a.attributes } as ProviderModel, activeFilters);
+   657→          const sb = bestFilterScore({ id: b.logical, displayName: b.displayName, contextLength: b.contextLength, attributes: b.attributes } as ProviderModel, activeFilters);
+   658→          return sb - sa;
+   659→        })
+   660→      : defaultSort(filtMatch.map((m) => ({ id: m.logical, displayName: m.displayName, contextLength: m.contextLength, attributes: m.attributes } as ProviderModel))).map((pm) => filtMatch.find((m) => m.logical === pm.id)!).filter(Boolean);
+   661→
+   662→    return {
+   663→      visible: sorted,
+   664→      hiddenByFilter: filtMiss,
+   665→    };
+   666→  }, [models, searchQuery, activeFilters, contextMin]);
+   667→
+   668→  const selectedLogical = useMemo(() => {
+   669→    if (!selectedModelId) return null;
+   670→    for (const model of models) {
+   671→      if (model.logical === selectedModelId) return model.logical;
+   672→      if (model.hosts.some((h) => h.modelId === selectedModelId)) return model.logical;
+   673→    }
+   674→    return null;
+   675→  }, [selectedModelId, models]);
+   676→
+   677→  const available = useMemo(() => visible.filter((m) => m.hosts.some((h) => h.hasApiKey)), [visible]);
+   678→  const unavailable = useMemo(() => visible.filter((m) => !m.hosts.some((h) => h.hasApiKey)), [visible]);
+   679→
+   680→  return (
+   681→    <div className="flex flex-col gap-px p-1">
+   682→      {visible.length === 0 && hiddenByFilter.length === 0 && (
+   683→        <div className="flex items-center justify-center h-16 text-[10px] text-muted-foreground/50">
+   684→          no models match
+   685→        </div>
+   686→      )}
+   687→
+   688→      {(hideUnavailable ? available : visible).map((m) => (
+   689→        <CondensedModelRow
+   690→          key={m.logical}
+   691→          model={m}
+   692→          isSelected={selectedLogical === m.logical}
+   693→          onSelect={() => onSelect(m)}
+   694→          expanded={expandedLogical === m.logical}
+   695→          onToggleExpand={() => onToggleExpand(expandedLogical === m.logical ? null : m.logical)}
+   696→          dimmed={!m.hosts.some((h) => h.hasApiKey)}
+   697→        />
+   698→      ))}
+   699→
+   700→      {hideUnavailable && unavailable.length > 0 && (
+   701→        <>
+   702→          <button
+   703→            onClick={() => setShowUnavailable((v) => !v)}
+   704→            className="flex items-center gap-1.5 px-1.5 py-1 mt-1 border-t border-border/30 text-[9px] text-muted-foreground/50 hover:text-muted-foreground/80 transition-colors cursor-pointer select-none"
+   705→          >
+   706→            <span
+   707→              className="text-[10px] leading-none transition-transform duration-150"
+   708→              style={{ transform: showUnavailable ? "rotate(90deg)" : "rotate(0deg)" }}
+   709→            >
+   710→              {"\u25b8"}
+   711→            </span>
+   712→            <span className="text-[9px] leading-none">
+   713→              {showUnavailable ? `Hide unavailable (${unavailable.length})` : `Unavailable models (${unavailable.length})`}
+   714→            </span>
+   715→          </button>
+   716→          {showUnavailable && unavailable.map((m) => (
+   717→            <CondensedModelRow
+   718→              key={m.logical}
+   719→              model={m}
+   720→              isSelected={selectedLogical === m.logical}
+   721→              onSelect={() => onSelect(m)}
+   722→              expanded={expandedLogical === m.logical}
+   723→              onToggleExpand={() => onToggleExpand(expandedLogical === m.logical ? null : m.logical)}
+   724→              dimmed
+   725→            />
+   726→          ))}
+   727→        </>
+   728→      )}
+   729→
+   730→      {hiddenByFilter.length > 0 && (
+   731→        <>
+   732→          <button
+   733→            onClick={() => setShowHidden((v) => !v)}
+   734→            className="flex items-center gap-1.5 px-1.5 py-1 mt-1 border-t border-border/30 text-[9px] text-muted-foreground/50 hover:text-muted-foreground/80 transition-colors cursor-pointer select-none"
+   735→          >
+   736→            <span
+   737→              className="text-[10px] leading-none transition-transform duration-150"
+   738→              style={{ transform: showHidden ? "rotate(90deg)" : "rotate(0deg)" }}
+   739→            >
+   740→              {"\u25b8"}
+   741→            </span>
+   742→            <span className="text-[9px] leading-none">
+   743→              {showHidden ? `Hide ${hiddenByFilter.length} hidden` : `Hidden models (${hiddenByFilter.length})`}
+   744→            </span>
+   745→          </button>
+   746→          {showHidden && hiddenByFilter.map((m) => (
+   747→            <CondensedModelRow
+   748→              key={m.logical}
+   749→              model={m}
+   750→              isSelected={selectedLogical === m.logical}
+   751→              onSelect={() => onSelect(m)}
+   752→              expanded={expandedLogical === m.logical}
+   753→              onToggleExpand={() => onToggleExpand(expandedLogical === m.logical ? null : m.logical)}
+   754→              dimmed
+   755→            />
+   756→          ))}
+   757→        </>
+   758→      )}
+   759→    </div>
+   760→  );
+   761→}
+   762→
+   763→export function ModelSelectOverlay() {
+   764→  const {
+   765→    providers,
+   766→    loading,
+   767→    refreshing,
+   768→    error,
+   769→    totalModels,
+   770→    syncedAt,
+   771→    syncStatus,
+   772→    selectedModelId,
+   773→    selectedProviderName,
+   774→    overlayOpen,
+   775→    searchQuery,
+   776→    activeFilters,
+   777→    contextMin,
+   778→    hideUnavailable,
+   779→    pricingFilter,
+   780→    condensedModels,
+   781→    condensedView,
+   782→    fetchProviders,
+   783→    fetchCondensedModels,
+   784→    refreshProviders,
+   785→    selectModel,
+   786→    condensedSelect,
+   787→    closeOverlay,
+   788→    setSearchQuery,
+   789→    toggleFilter,
+   790→    setHideUnavailable,
+   791→    setPricingFilter,
+   792→    setContextMin,
+   793→    openProvidersDialog,
+   794→    setCondensedView,
+   795→  } = useModelStore();
+   796→
+   797→  const liveCount = syncStatus.filter((s) => s.live).length;
+   798→  const totalCount = syncStatus.length;
+   799→  const syncedLabel = syncedAgoLabel(syncedAt);
+   800→
+   801→  const inputRef = useRef<HTMLInputElement>(null);
+   802→  const [expandedLogical, setExpandedLogical] = useState<string | null>(null);
+   803→
+   804→  useEffect(() => {
+   805→    if (providers.length === 0 && !loading) fetchProviders();
+   806→  }, [providers.length, loading, fetchProviders]);
+   807→
+   808→  useEffect(() => {
+   809→    if (!overlayOpen) return;
+   810→    const handler = (e: KeyboardEvent) => {
+   811→      if (e.key === "Escape") {
+   812→        if (expandedLogical) { setExpandedLogical(null); return; }
+   813→        closeOverlay();
+   814→      }
+   815→    };
+   816→    window.addEventListener("keydown", handler);
+   817→    return () => window.removeEventListener("keydown", handler);
+   818→  }, [overlayOpen, closeOverlay, expandedLogical]);
+   819→
+   820→  useEffect(() => {
+   821→    if (!overlayOpen) setExpandedLogical(null);
+   822→  }, [overlayOpen]);
+   823→
+   824→  const handleSelect = useCallback(
+   825→    (model: ProviderModel, providerName: string) => {
+   826→      selectModel(model.id, providerName, model.slotId);
+   827→    },
+   828→    [selectModel]
+   829→  );
+   830→
+   831→  const handleCondensedSelect = useCallback(
+   832→    (model: CondensedModel) => {
+   833→      condensedSelect(model.logical);
+   834→    },
+   835→    [condensedSelect]
+   836→  );
+   837→
+   838→  const visibleProviders = useMemo(() => {
+   839→    if (pricingFilter === "free")
+   840→      return providers.filter((p) => p.name !== "opencode-go");
+   841→    return providers;
+   842→  }, [providers, pricingFilter]);
+   843→
+   844→  const filteredCount = useMemo(() => {
+   845→    const target = pricingFilter === "free" ? visibleProviders : providers;
+   846→    if (!searchQuery.trim() && activeFilters.length === 0 && contextMin === 0)
+   847→      return target.reduce((s, p) => s + p.models.length, 0);
+   848→    let count = 0;
+   849→    const q = searchQuery.toLowerCase().trim();
+   850→    for (const p of target) {
+   851→      for (const m of p.models) {
+   852→        const matchesSearch =
+   853→          !q ||
+   854→          m.displayName.toLowerCase().includes(q) ||
+   855→          m.id.toLowerCase().includes(q) ||
+   856→          (m.family?.toLowerCase().includes(q) ?? false);
+   857→        if (!matchesSearch) continue;
+   858→        if (modelMatchesFilters(m, activeFilters, contextMin)) count++;
+   859→      }
+   860→    }
+   861→    return count;
+   862→  }, [providers, visibleProviders, searchQuery, totalModels, activeFilters, contextMin, pricingFilter]);
+   863→
+   864→  const selectedDisplayName = useMemo(() => {
+   865→    if (!selectedModelId) return null;
+   866→    for (const p of providers) {
+   867→      const m = p.models.find((m) => m.id === selectedModelId);
+   868→      if (m) return m.displayName;
+   869→    }
+   870→    for (const m of condensedModels) {
+   871→      if (m.logical === selectedModelId) return m.displayName;
+   872→      if (m.hosts.some((h) => h.modelId === selectedModelId)) return m.displayName;
+   873→    }
+   874→    return null;
+   875→  }, [selectedModelId, providers, condensedModels]);
+   876→
+   877→  const anyFilterActive = activeFilters.length > 0 || contextMin > 0;
+   878→
+   879→  return (
+   880→    <AnimatePresence>
+   881→      {overlayOpen && (
+   882→        <>
+   883→          <motion.div
+   884→            initial={{ opacity: 0 }}
+   885→            animate={{ opacity: 1 }}
+   886→            exit={{ opacity: 0 }}
+   887→            transition={{ duration: 0.15 }}
+   888→            className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm"
+   889→            onClick={() => { if (expandedLogical) setExpandedLogical(null); else closeOverlay(); }}
+   890→            aria-hidden="true"
+   891→          />
+   892→
+   893→          <motion.div
+   894→            initial={{ opacity: 0, scale: 0.97, y: 8 }}
+   895→            animate={{ opacity: 1, scale: 1, y: 0 }}
+   896→            exit={{ opacity: 0, scale: 0.97, y: 8 }}
+   897→            transition={{ duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
+   898→            className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 pointer-events-none"
+   899→          >
+   900→            <div
+   901→              className="pointer-events-auto w-full max-w-3xl flex flex-col rounded-xl border border-border/70 bg-background/95 backdrop-blur-xl shadow-2xl shadow-black/20 overflow-hidden"
+   902→              style={{ height: "min(82vh, 640px)" }}
+   903→              onClick={(e) => e.stopPropagation()}
+   904→              role="dialog"
+   905→              aria-modal="true"
+   906→              aria-label="Select a model"
+   907→            >
+   908→              <div className="flex items-center justify-between gap-3 px-3.5 shrink-0" style={{ height: 40, borderBottom: "1px solid var(--border)" }}>
+   909→                <div className="flex items-center gap-1.5 min-w-0">
+   910→                  <span className="text-[12px] font-semibold text-foreground shrink-0">Select</span>
+   911→                  <button
+   912→                    onClick={() => setCondensedView(false)}
+   913→                    className={`text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors shrink-0 ${!condensedView ? "bg-foreground/10 border-foreground/30 text-foreground font-medium" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+   914→                  >
+   915→                    Providers
+   916→                  </button>
+   917→                  <button
+   918→                    onClick={() => setCondensedView(true)}
+   919→                    className={`text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors shrink-0 ${condensedView ? "bg-foreground/10 border-foreground/30 text-foreground font-medium" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+   920→                  >
+   921→                    Models
+   922→                  </button>
+   923→                  {!condensedView && !loading && providers.length > 0 && (
+   924→                    <>
+   925→                      <button
+   926→                        onClick={() => openProvidersDialog()}
+   927→                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+   928→                        title="Providers & privacy settings"
+   929→                      >
+   930→                        <IcoSettings />
+   931→                        <span className="hidden sm:inline">Privacy</span>
+   932→                      </button>
+   933→                      <button
+   934→                        onClick={() => refreshProviders()}
+   935→                        disabled={refreshing}
+   936→                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-60 shrink-0"
+   937→                         title={refreshing ? "syncing" : `${syncedLabel} \u00b7 ${liveCount}/${totalCount} providers live \u00b7 click to re-sync`}
+   938→                      >
+   939→                        <IcoRefresh spinning={refreshing} />
+   940→                        <span className="hidden md:inline">{refreshing ? "syncing" : syncedLabel || "sync"}</span>
+   941→                      </button>
+   942→                    </>
+   943→                  )}
+   944→                  {condensedView && (
+   945→                    <>
+   946→                      <button
+   947→                        onClick={() => openProvidersDialog()}
+   948→                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+   949→                        title="Providers & privacy settings"
+   950→                      >
+   951→                        <IcoSettings />
+   952→                        <span className="hidden sm:inline">Privacy</span>
+   953→                      </button>
+   954→                      <button
+   955→                        onClick={() => fetchCondensedModels(true)}
+   956→                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+   957→                        title="Refresh condensed catalog"
+   958→                      >
+   959→                        <IcoRefresh />
+   960→                        <span className="hidden md:inline">refresh</span>
+   961→                      </button>
+   962→                    </>
+   963→                  )}
+   964→                  {!loading && providers.length > 0 && (
+   965→                    <>
+   966→                      <span className="w-px h-3 bg-border/40 mx-0.5 shrink-0" />
+   967→                      <button
+   968→                        onClick={() => setPricingFilter("free")}
+   969→                        className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+   970→                        style={{
+   971→                          borderColor: pricingFilter === "free" ? "#22c55e50" : "var(--border)",
+   972→                          backgroundColor: pricingFilter === "free" ? "#22c55e15" : "transparent",
+   973→                          color: pricingFilter === "free" ? "#22c55e" : "var(--muted-foreground)",
+   974→                        }}
+   975→                        aria-pressed={pricingFilter === "free"}
+   976→                      >
+   977→                        Free
+   978→                      </button>
+   979→                      <button
+   980→                        onClick={() => setPricingFilter("paid")}
+   981→                        className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+   982→                        style={{
+   983→                          borderColor: pricingFilter === "paid" ? "#f59e0b50" : "var(--border)",
+   984→                          backgroundColor: pricingFilter === "paid" ? "#f59e0b15" : "transparent",
+   985→                          color: pricingFilter === "paid" ? "#f59e0b" : "var(--muted-foreground)",
+   986→                        }}
+   987→                        aria-pressed={pricingFilter === "paid"}
+   988→                      >
+   989→                        Paid
+   990→                      </button>
+   991→                    </>
+   992→                  )}
+   993→                </div>
+   994→
+   995→                <div className="flex items-center gap-2">
+   996→                  <div className="relative">
+   997→                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/60">
+   998→                      <IcoSearch />
+   999→                    </span>
+  1000→                    <input
+  1001→                      ref={inputRef}
+  1002→                      value={searchQuery}
+  1003→                      onChange={(e) => setSearchQuery(e.target.value)}
+  1004→                      placeholder="search"
+  1005→                      className="pl-8 pr-3 h-7 w-32 sm:w-44 text-[12px] bg-muted/20 border border-border/50 rounded-lg outline-none focus:border-ring/40 focus:bg-muted/40 transition-colors placeholder:text-muted-foreground/50"
+  1006→                    />
+  1007→                  </div>
+  1008→
+  1009→                  <button
+  1010→                    onClick={closeOverlay}
+  1011→                    className="flex items-center justify-center size-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+  1012→                    aria-label="Close"
+  1013→                  >
+  1014→                    <IcoX />
+  1015→                  </button>
+  1016→                </div>
+  1017→              </div>
+  1018→
+  1019→              {providers.length > 0 && (
+  1020→                <div className="flex items-center gap-1.5 px-3.5 py-1 shrink-0 overflow-x-auto border-b border-border/30" style={{ height: 30 }}>
+  1021→                  {FILTER_PILLS.map((f) => (
+  1022→                    <button
+  1023→                      key={f.id}
+  1024→                      onClick={() => toggleFilter(f.id)}
+  1025→                      className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+  1026→                      style={{
+  1027→                        borderColor: activeFilters.includes(f.id) ? `${f.color}50` : "var(--border)",
+  1028→                        backgroundColor: activeFilters.includes(f.id) ? `${f.color}15` : "transparent",
+  1029→                        color: activeFilters.includes(f.id) ? f.color : "var(--muted-foreground)",
+  1030→                      }}
+  1031→                      aria-pressed={activeFilters.includes(f.id)}
+  1032→                    >
+  1033→                      {f.label}
+  1034→                    </button>
+  1035→                  ))}
+  1036→                  <span className="w-px h-3 bg-border/40 mx-0.5 shrink-0" />
+  1037→                  {CONTEXT_OPTIONS.map((c) => (
+  1038→                    <button
+  1039→                      key={c.value}
+  1040→                      onClick={() => setContextMin(c.value)}
+  1041→                      className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+  1042→                      style={{
+  1043→                        borderColor: contextMin === c.value ? "#14b8a680" : "var(--border)",
+  1044→                        backgroundColor: contextMin === c.value ? "#14b8a615" : "transparent",
+  1045→                        color: contextMin === c.value ? "#14b8a6" : "var(--muted-foreground)",
+  1046→                      }}
+  1047→                      aria-pressed={contextMin === c.value}
+  1048→                    >
+  1049→                      {c.label}
+  1050→                    </button>
+  1051→                  ))}
+  1052→                  {anyFilterActive && (
+  1053→                    <button
+  1054→                      onClick={() => { activeFilters.forEach((f) => toggleFilter(f)); setContextMin(0); }}
+  1055→                      className="shrink-0 text-[9px] leading-none px-1.5 py-0.5 rounded text-muted-foreground/60 hover:text-foreground hover:bg-muted/40 transition-colors ml-auto"
+  1056→                    >
+  1057→                      clear
+  1058→                    </button>
+  1059→                  )}
+  1060→                  {condensedView && (
+  1061→                    <>
+  1062→                      <button
+  1063→                        onClick={() => setHideUnavailable(!hideUnavailable)}
+  1064→                        className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+  1065→                        style={{
+  1066→                          borderColor: hideUnavailable ? "#22c55e50" : "var(--border)",
+  1067→                          backgroundColor: hideUnavailable ? "#22c55e15" : "transparent",
+  1068→                          color: hideUnavailable ? "#22c55e" : "var(--muted-foreground)",
+  1069→                        }}
+  1070→                        aria-pressed={hideUnavailable}
+  1071→                      >
+  1072→                        {hideUnavailable ? "Available" : "All models"}
+  1073→                      </button>
+  1074→                      <span className="text-[9px] text-muted-foreground/50 shrink-0 tabular-nums ml-auto">
+  1075→                        {condensedModels.length} models
+  1076→                      </span>
+  1077→                    </>
+  1078→                  )}
+  1079→                  {!condensedView && !loading && (
+  1080→                    <span className="text-[9px] text-muted-foreground/50 ml-auto shrink-0 tabular-nums">
+  1081→                      {filteredCount} models
+  1082→                    </span>
+  1083→                  )}
+  1084→                </div>
+  1085→              )}
+  1086→
+  1087→              <div className="flex-1 min-h-0 overflow-y-auto">
+  1088→                {!condensedView && loading && (
+  1089→                  <div className="flex items-center justify-center h-full">
+  1090→                    <span className="inline-block size-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
+  1091→                    <span className="ml-2 text-[11px] text-muted-foreground">fetching</span>
+  1092→                  </div>
+  1093→                )}
+  1094→
+  1095→                {condensedView && loading && (
+  1096→                  <div className="flex items-center justify-center h-full">
+  1097→                    <span className="inline-block size-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
+  1098→                    <span className="ml-2 text-[11px] text-muted-foreground">fetching</span>
+  1099→                  </div>
+  1100→                )}
+  1101→
+  1102→                {!condensedView && error && (
+  1103→                  <div className="flex flex-col items-center justify-center h-full gap-2">
+  1104→                    <span className="text-[11px] text-destructive">{error}</span>
+  1105→                    <button
+  1106→                      onClick={fetchProviders}
+  1107→                      className="text-[11px] text-foreground underline underline-offset-2 hover:text-primary"
+  1108→                    >
+  1109→                      retry
+  1110→                    </button>
+  1111→                  </div>
+  1112→                )}
+  1113→
+  1114→                {!condensedView && !loading && !error && (
+  1115→                  <div className="p-3 overflow-y-auto max-h-full">
+  1116→                    <div className="sm:columns-2 columns-1" style={{ columnGap: '0.75rem' }}>
+  1117→                      {visibleProviders.map((p) => (
+  1118→                        <div key={p.name} className="break-inside-avoid mb-3 min-w-0">
+  1119→                          <ProviderBox
+  1120→                            provider={p}
+  1121→                            selectedModelId={selectedModelId}
+  1122→                            selectedProviderName={selectedProviderName}
+  1123→                            condensedView={condensedView}
+  1124→                            onSelect={handleSelect}
+  1125→                            searchQuery={searchQuery}
+  1126→                            activeFilters={activeFilters}
+  1127→                            contextMin={contextMin}
+  1128→                          />
+  1129→                        </div>
+  1130→                      ))}
+  1131→                    </div>
+  1132→                  </div>
+  1133→                )}
+  1134→
+  1135→                {condensedView && !loading && (
+  1136→                  <div className="p-3 relative">
+  1137→                    <CondensedList
+  1138→                      models={condensedModels}
+  1139→                      searchQuery={searchQuery}
+  1140→                      activeFilters={activeFilters}
+  1141→                      contextMin={contextMin}
+  1142→                      hideUnavailable={hideUnavailable}
+  1143→                      selectedModelId={selectedModelId}
+  1144→                      onSelect={handleCondensedSelect}
+  1145→                      expandedLogical={expandedLogical}
+  1146→                      onToggleExpand={setExpandedLogical}
+  1147→                    />
+  1148→                  </div>
+  1149→                )}
+  1150→              </div>
+  1151→
+  1152→              <div className="flex items-center justify-between px-3.5 shrink-0" style={{ height: 30, borderTop: "1px solid var(--border)" }}>
+  1153→                <span className="text-[10px] text-muted-foreground truncate">
+  1154→                  click to select &nbsp;<kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close{totalCount > 0 ? ` &nbsp;${totalCount} provider${totalCount === 1 ? "" : "s"} &nbsp;synced ${liveCount}/${totalCount}` : ""}
+  1155→                </span>
+  1156→                {selectedDisplayName && (
+  1157→                  <span className="text-[10px] text-primary font-medium flex items-center gap-1">
+  1158→                    <IcoDot />
+  1159→                    {selectedDisplayName}
+  1160→                  </span>
+  1161→                )}
+  1162→              </div>
+  1163→            </div>
+  1164→          </motion.div>
+  1165→        </>
+  1166→      )}
+  1167→    </AnimatePresence>
+  1168→  );
+  1169→}
+  1170→

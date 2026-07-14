@@ -1,0 +1,740 @@
+     1→"""Build the provider catalog JSON for GET /api/models.
+     2→
+     3→Assembles the SyncResult shape the frontend expects (mirrors the TypeScript
+     4→sync.ts orchestrator in temporaryshidy). Combines live-synced model data with
+     5→host-policy config from providers_catalog.json + privacy/display fields.
+     6→
+     7→All model data comes from live provider API syncs — no static model lists.
+     8→
+     9→Usage:
+    10→    from provider_sync.catalog import build_provider_catalog
+    11→    result = build_provider_catalog(force_refresh=True)
+    12→"""
+    13→
+    14→from __future__ import annotations
+    15→
+    16→import json
+    17→import os
+    18→import re
+    19→import threading
+    20→import time
+    21→import urllib.error
+    22→import urllib.request
+    23→from pathlib import Path
+    24→from typing import Any
+    25→
+    26→from oplog import log_event
+    27→
+    28→HERE = Path(__file__).resolve().parent.parent
+    29→CATALOG_PATH = HERE / "providers_catalog.json"
+    30→
+    31→_FETCH_TIMEOUT = 15
+    32→_USER_AGENT = "doomalaysocreate/1.0"
+    33→_CACHE_TTL_S = 600  # 10 minutes
+    34→
+    35→_cache: dict[str, Any] | None = None
+    36→_cache_at: float = 0
+    37→_cache_lock = threading.Lock()
+    38→
+    39→# ---------------------------------------------------------------------------
+    40→# Family key normalisation — mirrors TypeScript family.ts
+    41→# ---------------------------------------------------------------------------
+    42→_FAMILY_SUFFIXES = sorted([
+    43→    ":free", "-instruct-2507", "-instruct-fp8-fast", "-instruct-fast",
+    44→    "-fp8-fast", "-instruct", "-versatile", "-it", "-chat", "-preview",
+    45→    "-free",
+    46→], key=len, reverse=True)
+    47→
+    48→_ACRONYMS = {"glm", "gpt", "oss", "llm", "mimo", "api", "fp8"}
+    49→
+    50→
+    51→def make_family(model_id: str) -> str:
+    52→    m = model_id.lower().strip()
+    53→    slash = m.rfind("/")
+    54→    if slash >= 0:
+    55→        m = m[slash + 1:]
+    56→    if m.startswith("@"):
+    57→        m = m[1:]
+    58→    changed = True
+    59→    while changed:
+    60→        changed = False
+    61→        for s in _FAMILY_SUFFIXES:
+    62→            if m.endswith(s):
+    63→                m = m[:-len(s)]
+    64→                changed = True
+    65→                break
+    66→    # After suffix stripping, if a prefix path remains (e.g. "meta/llama-3.3-70b"),
+    67→    # strip everything before the last "/" so models share the same family key
+    68→    # regardless of the provider serving them.
+    69→    slash = m.rfind("/")
+    70→    if slash >= 0:
+    71→        m = m[slash + 1:]
+    72→    return m
+    73→
+    74→
+    75→def derive_display_name(model_id: str) -> str:
+    76→    fam = make_family(model_id)
+    77→    tokens = [t for t in fam.split("-") if t]
+    78→    pretty = []
+    79→    for t in tokens:
+    80→        if re.fullmatch(r"\d+(\.\d+)*", t):
+    81→            pretty.append(t)
+    82→        elif t.lower() in _ACRONYMS:
+    83→            pretty.append(t.upper())
+    84→        else:
+    85→            pretty.append(t[0].upper() + t[1:])
+    86→    name = " ".join(pretty)
+    87→    if re.search(r"(?:^|[/:-])free$", model_id.lower()) or "-free" in model_id.lower():
+    88→        name += " (Free)"
+    89→    return name
+    90→
+    91→
+    92→def derive_capabilities_from_name(model_id: str) -> list[str]:
+    93→    fam = make_family(model_id)
+    94→    caps: list[str] = []
+    95→    if re.search(r"\b(gemma|kimi|llama-4|qwen3|glm-5|step)\b", fam) or "vision" in fam:
+    96→        caps.append("vision")
+    97→    return caps
+    98→
+    99→
+   100→def is_free_model(model_id: str, prompt_price: float | None = None, completion_price: float | None = None) -> bool:
+   101→    if re.search(r":free$", model_id.lower()) or "-free" in model_id.lower():
+   102→        return True
+   103→    if prompt_price is not None and completion_price is not None:
+   104→        return prompt_price == 0 and completion_price == 0
+   105→    return False
+   106→
+   107→
+   108→# ---------------------------------------------------------------------------
+   109→# Static display config per provider (from Ts config.ts)
+   110→# ---------------------------------------------------------------------------
+   111→_PROVIDER_DISPLAY: dict[str, dict[str, Any]] = {
+   112→    "openrouter": {
+   113→        "displayName": "OpenRouter",
+   114→        "pool": "core",
+   115→        "region": "us",
+   116→        "icon": "Route",
+   117→        "color": "#f59e0b",
+   118→        "usageLimits": "Pay-as-you-go credits. Free (:free) models = $0 in/out. ~300 req/min typical. Per-request ZDR via provider.data_collection=deny.",
+   119→        "settingsUrl": "https://openrouter.ai/settings/privacy",
+   120→        "manageLabel": "Manage OpenRouter privacy & keys",
+   121→        "privacy": {
+   122→            "notice": "✓ Free (:free) models may log prompts for provider training. Opt out in Privacy settings. OpenRouter stores no prompts unless you opt in.",
+   123→            "confidence": "high",
+   124→            "retention": 'OpenRouter itself has a ZDR policy — prompts/responses NOT stored unless you opt in to Input & Output Logging (off by default; if on, retained ≥3 mo encrypted). Metadata (token counts, latency) always stored. Free (:free) models: "Prompts and completions may be logged by the provider and used to improve the model" (verbatim).',
+   125→            "training": 'OpenRouter does not train its own models. Free-model PROVIDERS may log & train on prompts (see notice). Opt out: disable "allow providers that may train on your data" (separate paid/free toggles) + per-model-group ZDR toggles at /settings/privacy. Per-request: pass provider.data_collection=deny.',
+   126→            "sources": [
+   127→                "https://openrouter.ai/collections/free-models",
+   128→                "https://openrouter.ai/docs/guides/privacy/data-collection",
+   129→                "https://openrouter.ai/docs/guides/privacy/provider-logging",
+   130→                "https://openrouter.ai/docs/guides/features/zdr",
+   131→            ],
+   132→        },
+   133→    },
+   134→    "nvidia": {
+   135→        "displayName": "NVIDIA",
+   136→        "pool": "core",
+   137→        "region": "us",
+   138→        "icon": "Cpu",
+   139→        "color": "#76b900",
+   140→        "usageLimits": "Free dev tier (build.nvidia.com): 1,000 credits (1,000 req/model). No published concurrency cap. Partner endpoints (DeepInfra, GMI, Vultr) billed separately.",
+   141→        "settingsUrl": "https://build.nvidia.com/settings/api-keys",
+   142→        "manageLabel": "Manage NVIDIA API keys",
+   143→        "privacy": {
+   144→            "notice": '✓ Default: prompts/outputs not stored after session (ToS §2.3). ⚠ NVIDIA may use them to improve its AI (§3.3) — no opt-out on free tier.',
+   145→            "confidence": "high",
+   146→            "retention": 'Default (free dev tier): prompts/completions NOT stored after the API session ends (NVIDIA API Trial ToS §2.3). Exceptions: Fine-Tuning API stores User Content 30 days, generated content 90 days (§2.4); security/fraud/abuse logs retained with no explicit cap. Enterprise (paid): Customer Data deleted within 90 days of termination (Cloud Services DPA). NOTE: the "5 years" figure in NVIDIA\'s Privacy Policy applies ONLY to account/contact personal data, NOT to model inputs/outputs.',
+   147→            "training": 'Per Trial ToS §3.3(iv): NVIDIA may use User Content & Generated Content "to improve NVIDIA products and services, including AI models." Training is contractually permitted on the free dev tier with NO documented opt-out. Enterprise tier governed by separate DPA.',
+   148→            "sources": [
+   149→                "https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf",
+   150→                "https://www.nvidia.com/en-us/about-nvidia/privacy-policy",
+   151→                "https://www.nvidia.com/en-us/agreements/data-processing-addendum/nvidia-cloud-services-data-processing-addendum",
+   152→            ],
+   153→        },
+   154→    },
+   155→    "cloudflare": {
+   156→        "displayName": "Cloudflare Workers AI",
+   157→        "pool": "core",
+   158→        "region": "global",
+   159→        "icon": "Cloud",
+   160→        "color": "#f97316",
+   161→        "usageLimits": "Free: 10,000 Neurons/day (resets 00:00 UTC). Paid: $0.011 / 1K Neurons above free. Text-gen rate limit: 300 req/min. Privacy identical on free & paid.",
+   162→        "settingsUrl": "https://dash.cloudflare.com/?to=/:account/ai/workers-ai",
+   163→        "manageLabel": "Manage Cloudflare Workers AI",
+   164→        "privacy": {
+   165→            "notice": "✓ Cloudflare stores no prompts/completions & never trains on them (per official Workers AI data-usage docs).",
+   166→            "confidence": "high",
+   167→            "retention": "Cloudflare does NOT store Workers AI prompts/completions. Storage only if you explicitly wire up R2/KV/Durable Objects/Vectorize. No abuse-monitoring retention window. Caveat: separate AI Gateway product (opt-in proxy) DOES log full request/response payloads — only if you route through it.",
+   168→            "training": 'Verbatim: "Cloudflare does not use your Customer Content to (1) train any AI models made available on Workers AI or (2) improve any Cloudflare or third-party services" without explicit consent. Cloudflare also does not create/train the models themselves (third-party open-source).',
+   169→            "sources": [
+   170→                "https://developers.cloudflare.com/workers-ai/platform/data-usage/",
+   171→                "https://developers.cloudflare.com/workers-ai/platform/pricing/",
+   172→                "https://developers.cloudflare.com/workers-ai/platform/limits/",
+   173→            ],
+   174→        },
+   175→    },
+   176→    "opencode-zen": {
+   177→        "displayName": "OpenCode Zen",
+   178→        "pool": "core",
+   179→        "region": "us",
+   180→        "icon": "Code",
+   181→        "color": "#10b981",
+   182→        "usageLimits": "Free tier (100 req/day) + pay-as-you-go. Free models have $0 inference. Paid models billed per-token via Zen account.",
+   183→        "settingsUrl": "https://opencode.ai/zen/keys",
+   184→        "manageLabel": "Manage OpenCode Zen keys",
+   185→        "privacy": {
+   186→            "notice": "✓ Go providers: zero-retention, no training. ⚠ Free Zen models (Big Pickle, Nemotron Free, MiMo/North Free) may train on data.",
+   187→            "confidence": "high",
+   188→            "retention": 'Upstream model providers (Go plan) follow a zero-retention policy — verbatim: "Our providers follow a zero-retention policy and do not use your data for model training." OpenCode itself (Anomaly) retains prompts as Personal Data "as long as necessary" (no fixed period published).',
+   189→            "training": 'Go-plan + paid Zen upstream providers do NOT train on your data. EXCEPTIONS (Zen free-tier only): Big Pickle, DeepSeek V4 Flash Free, MiMo V2.5 Free, North Mini Code Free — "collected data may be used to improve the model." Nemotron 3 Ultra Free is logged by NVIDIA for security & product improvement (not linked to identity).',
+   190→            "sources": [
+   191→                "https://opencode.ai/docs/go",
+   192→                "https://opencode.ai/docs/zen",
+   193→                "https://opencode.ai/legal/privacy-policy",
+   194→            ],
+   195→        },
+   196→    },
+   197→    "opencode-go": {
+   198→        "displayName": "OpenCode Go",
+   199→        "pool": "core",
+   200→        "region": "global (US · EU · SG)",
+   201→        "icon": "Code",
+   202→        "color": "#10b981",
+   203→        "usageLimits": "$5 first mo → $10/mo. Rolling caps: $12 / 5hr · $30 / wk · $60 / mo (limits in $, not requests). Cheaper models = more requests. Free models still usable when capped.",
+   204→        "settingsUrl": "https://console.opencode.ai",
+   205→        "manageLabel": "Manage on OpenCode Console",
+   206→        "privacy": {
+   207→            "notice": "✓ Zero-retention, no training on all Go-plan models.",
+   208→            "confidence": "high",
+   209→            "retention": 'OpenCode Go upstream providers follow a zero-retention policy. OpenCode retains prompts as Personal Data "as long as necessary" (no fixed period published).',
+   210→            "training": "Go-plan upstream providers do NOT train on your data per the OpenCode Go data-usage policy.",
+   211→            "sources": [
+   212→                "https://opencode.ai/docs/go",
+   213→                "https://opencode.ai/legal/privacy-policy",
+   214→            ],
+   215→        },
+   216→    },
+   217→    "github-models": {
+   218→        "displayName": "GitHub Models",
+   219→        "pool": "core",
+   220→        "region": "us",
+   221→        "icon": "GitBranch",
+   222→        "color": "#6e40c9",
+   223→        "usageLimits": "Free (low-tier rate limits). ~15 req/min, ~150 req/day. 4,000 max output tokens per request.",
+   224→        "settingsUrl": "https://github.com/marketplace/models",
+   225→        "manageLabel": "Manage GitHub Models",
+   226→        "privacy": {
+   227→            "notice": "✓ GitHub Models is free for prototyping. Prompts may be shared with model providers. See GitHub Models preview terms.",
+   228→            "confidence": "medium",
+   229→            "retention": "GitHub may retain prompts/outputs for abuse monitoring. Model providers have their own retention policies.",
+   230→            "training": "GitHub does not train on your prompts. Third-party model providers may have separate data usage policies.",
+   231→            "sources": [
+   232→                "https://docs.github.com/en/github-models/use-github-models/prototyping-with-ai-models#about-data-privacy",
+   233→            ],
+   234→        },
+   235→    },
+   236→    "privatemodeai": {
+   237→        "displayName": "PrivateMode AI",
+   238→        "pool": "core",
+   239→        "region": "eu",
+   240→        "icon": "Shield",
+   241→        "color": "#4f46e5",
+   242→        "usageLimits": "Free: 5M initial tokens, then 1M prompt + 1M completion/mo. 20 req/min, 200K TPM, 20K TPD.",
+   243→        "settingsUrl": "https://portal.privatemode.ai",
+   244→        "manageLabel": "Manage PrivateMode account & keys",
+   245→        "privacy": {
+   246→            "notice": "✓ Hardware-enforced E2EE: prompts/responses never stored or trained on. Zero-access architecture — no one (not even Edgeless Systems) can see your data.",
+   247→            "confidence": "high",
+   248→            "retention": "Prompts/responses: NOT retained (stateless by design — zero-clear after inference completes). Metadata (API key, request path/method/status code): stored up to 90 days for monitoring. Token usage: permanently stored for billing. Optional prompt caching: cryptographically isolated per tenant (no cross-tenant leakage). Website privacy policy (www.privatemode.ai) is separate from API — covers marketing site cookies & contact forms only.",
+   249→            "training": "ZERO training — architecturally enforced via confidential computing (AMD SEV-SNP + Intel TDX + NVIDIA CC). Verbatim: 'We can never access your prompts, thus we can't train our models on your data.' No human review possible — prompts encrypted client-side with AES-256-GCM, decrypted only inside hardware-isolated enclaves. Public source code + reproducible builds enable independent verification.",
+   250→            "sources": [
+   251→                "https://docs.privatemode.ai/security/",
+   252→                "https://docs.privatemode.ai/getting-started/faq/",
+   253→                "https://docs.privatemode.ai/architecture/overview/",
+   254→                "https://docs.privatemode.ai/architecture/encryption/",
+   255→                "https://www.privatemode.ai/security-and-encryption",
+   256→                "https://www.privatemode.ai/privacy-policy",
+   257→            ],
+   258→        },
+   259→    },
+   260→}
+   261→
+   262→
+   263→# ---------------------------------------------------------------------------
+   264→# HTTP helper
+   265→# ---------------------------------------------------------------------------
+   266→def _fetch_json(url: str, headers: dict | None = None) -> Any:
+   267→    req_headers = {
+   268→        "User-Agent": _USER_AGENT,
+   269→        "Accept": "application/json",
+   270→    }
+   271→    if headers:
+   272→        req_headers.update(headers)
+   273→    try:
+   274→        req = urllib.request.Request(url, headers=req_headers)
+   275→        with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as resp:
+   276→            return json.loads(resp.read().decode("utf-8"))
+   277→    except (urllib.error.HTTPError, urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+   278→        log_event("catalog_fetch_error", url=url, error=str(e)[:500])
+   279→        return None
+   280→
+   281→
+   282→# ---------------------------------------------------------------------------
+   283→# OpenRouter — richest source, builds the family registry
+   284→# ---------------------------------------------------------------------------
+   285→def _fetch_openrouter_family() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+   286→    """Fetch OpenRouter's full model list.
+   287→
+   288→    Returns (models_list, family_registry) where family_registry maps
+   289→    family_key → {context, capabilities, benchmarks, pricing, ranks}.
+   290→    """
+   291→    url = "https://openrouter.ai/api/v1/models?output_modalities=text"
+   292→    data = _fetch_json(url)
+   293→    if not data:
+   294→        return [], {}
+   295→
+   296→    raw_models: list[dict] = data.get("data", [])
+   297→    registry: dict[str, dict[str, Any]] = {}
+   298→
+   299→    # Pass 1: register every model's family metadata
+   300→    for m in raw_models:
+   301→        mid = m.get("id", "")
+   302→        if not mid:
+   303→            continue
+   304→        family = make_family(mid)
+   305→        meta: dict[str, Any] = {}
+   306→
+   307→        # context
+   308→        ctx = m.get("top_provider", {}) or {}
+   309→        context_length = ctx.get("context_length") or m.get("context_length") or 0
+   310→        if context_length:
+   311→            try:
+   312→                meta["context"] = int(context_length)
+   313→            except (ValueError, TypeError):
+   314→                pass
+   315→
+   316→        # capabilities
+   317→        caps: list[str] = []
+   318→        inputs = m.get("architecture", {}) or {}
+   319→        modalities = inputs.get("input_modalities") or []
+   320→        if "image" in modalities:
+   321→            caps.append("vision")
+   322→        if "video" in modalities:
+   323→            caps.append("video")
+   324→        if "audio" in modalities:
+   325→            caps.append("audio")
+   326→        params = m.get("supported_parameters") or []
+   327→        if "tools" in params:
+   328→            caps.append("tools")
+   329→        if "reasoning" in params or "include_reasoning" in params:
+   330→            caps.append("reasoning")
+   331→        if caps:
+   332→            meta["capabilities"] = caps
+   333→
+   334→        # benchmarks
+   335→        benchmarks = m.get("benchmarks", {}) or {}
+   336→        aa = benchmarks.get("artificial_analysis") or {}
+   337→        bm: dict[str, float] = {}
+   338→        if isinstance(aa.get("intelligence_index"), (int, float)):
+   339→            bm["intelligence"] = float(aa["intelligence_index"])
+   340→        if isinstance(aa.get("coding_index"), (int, float)):
+   341→            bm["coding"] = float(aa["coding_index"])
+   342→        if isinstance(aa.get("agentic_index"), (int, float)):
+   343→            bm["agentic"] = float(aa["agentic_index"])
+   344→        if bm:
+   345→            meta["benchmarks"] = bm
+   346→
+   347→        # pricing
+   348→        pricing = m.get("pricing") or {}
+   349→        pp = pricing.get("prompt")
+   350→        cp = pricing.get("completion")
+   351→        if pp is not None and cp is not None:
+   352→            try:
+   353→                p_in = float(pp) * 1_000_000
+   354→                p_out = float(cp) * 1_000_000
+   355→                if p_in == 0 and p_out == 0:
+   356→                    meta["pricing"] = "$0 / $0 (free)"
+   357→                else:
+   358→                    fmt = lambda n: f"${n:.2f}" if n >= 0.01 else (f"{n:.2e}" if n > 0 else "$0.00")
+   359→                    meta["pricing"] = f"{fmt(p_in)} / {fmt(p_out)} per M"
+   360→            except (ValueError, TypeError):
+   361→                pass
+   362→
+   363→        # ranks (OpenRouter-specific popularity)
+   364→        da = benchmarks.get("design_arena") or []
+   365→        if da and isinstance(da, list):
+   366→            sorted_da = sorted(da, key=lambda x: x.get("rank", 999))
+   367→            top = sorted_da[:3]
+   368→            ranks = [{"label": e.get("category", ""), "rank": e.get("rank", 0)} for e in top]
+   369→            if ranks:
+   370→                meta["ranks"] = ranks
+   371→
+   372→        # free-model note
+   373→        prices = m.get("pricing") or {}
+   374→        prompt_price = prices.get("prompt")
+   375→        completion_price = prices.get("completion")
+   376→        try:
+   377→            pf = float(prompt_price) if prompt_price else None
+   378→            cf = float(completion_price) if completion_price else None
+   379→        except (ValueError, TypeError):
+   380→            pf = cf = None
+   381→        if is_free_model(mid, pf, cf):
+   382→            meta["free_note"] = "Free-model retention: prompts may be logged for provider training."
+   383→
+   384→        if meta:
+   385→            # merge: keep first-defined per field (OpenRouter's metadata should not be
+   386→            # clobbered by a sparser source registering the same family later)
+   387→            if family not in registry:
+   388→                registry[family] = meta
+   389→            else:
+   390→                existing = registry[family]
+   391→                for k in ("context", "capabilities", "benchmarks", "pricing", "ranks"):
+   392→                    if k not in existing and k in meta:
+   393→                        existing[k] = meta[k]
+   394→
+   395→    return raw_models, registry
+   396→
+   397→
+   398→# ---------------------------------------------------------------------------
+   399→# Sync provider model lists
+   400→# ---------------------------------------------------------------------------
+   401→def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[str]], set[str]]:
+   402→    """Get live model ID lists, first trying the Panel's cached sync results
+   403→    (which succeeded at startup), falling back to a fresh sync if unavailable.
+   404→
+   405→    Returns (model_map, live_set) where model_map maps provider_name → model IDs
+   406→    and live_set contains names of providers whose data came from a live sync.
+   407→    """
+   408→    from provider_sync import get_panel_sync_cache, sync_all_providers
+   409→    from providers import make_provider_registry
+   410→
+   411→    # Try Panel's cached sync results first (avoids SSL errors from fresh instances)
+   412→    cached = get_panel_sync_cache()
+   413→    if cached:
+   414→        live = dict(cached)
+   415→        live_set = set(live.keys())
+   416→    else:
+   417→        # Fallback: fresh sync with new provider instances
+   418→        try:
+   419→            reg = make_provider_registry()
+   420→        except Exception:
+   421→            reg = []
+   422→
+   423→        provider_map: dict[str, Any] = {}
+   424→        for p in reg:
+   425→            if hasattr(p, "name"):
+   426→                provider_map[p.name] = p
+   427→
+   428→        live: dict[str, list[str]] = {}
+   429→        try:
+   430→            live = sync_all_providers(provider_map)
+   431→        except Exception as e:
+   432→            log_event("catalog_sync_error", error=str(e)[:500])
+   433→        live_set = set(live.keys())
+   434→
+   435→    # A live sync that returned empty means the sync failed — provider gets no models.
+   436→    # Synced IDs are raw (e.g. "deepseek-ai/deepseek-v4-pro"). We return a dict
+   437→    # mapping {stripped_display_name: raw_id} so _build_provider_models can
+   438→    # construct slot IDs for pinned routing.
+   439→    # Synced IDs are raw (e.g. "deepseek-ai/deepseek-v4-pro"); normalize for display
+   440→    # by stripping the author prefix so models resolve through the logical catalog.
+   441→    result: dict[str, dict[str, str]] = {}
+   442→    actual_live: set[str] = set()
+   443→    for entry in catalog_entries:
+   444→        name = entry["name"]
+   445→        synced = live.get(name)
+   446→        if synced:
+   447→            result[name] = {m.split("/")[-1] if "/" in m else m: m for m in synced}
+   448→            actual_live.add(name)
+   449→
+   450→    # Docs-only fallback for providers whose sync failed but can list models
+   451→    # without an API key (requires_auth=False). Runs a fresh fetch_models()
+   452→    # with api_key=None so the result is independent of registration.
+   453→    for entry in catalog_entries:
+   454→        name = entry["name"]
+   455→        if name in actual_live:
+   456→            continue
+   457→        try:
+   458→            sync_class = get_provider_sync_class(name)
+   459→        except Exception:
+   460→            sync_class = None
+   461→        if not sync_class or getattr(sync_class, "requires_auth", True):
+   462→            continue
+   463→        try:
+   464→            sync_instance = sync_class(api_key=None)
+   465→            models = sync_instance.fetch_models()
+   466→            if models:
+   467→                result[name] = {
+   468→                    m.id.split("/")[-1] if "/" in m.id else m.id: m.id
+   469→                    for m in models
+   470→                }
+   471→                actual_live.add(name)
+   472→        except Exception as e:
+   473→            log_event(f"sync_docs_fallback_error", provider=name, error=str(e)[:500])
+   474→
+   475→    return result, actual_live
+   476→
+   477→
+   478→# ---------------------------------------------------------------------------
+   479→# Assemble per-provider model list with enrichment
+   480→# ---------------------------------------------------------------------------
+   481→def _build_provider_models(
+   482→    provider_name: str,
+   483→    model_ids: dict[str, str],  # {stripped_display: raw_id}
+   484→    registry: dict[str, dict[str, Any]],
+   485→) -> list[dict[str, Any]]:
+   486→    models: list[dict[str, Any]] = []
+   487→    for display_id, raw_id in model_ids.items():
+   488→        if not display_id:
+   489→            continue
+   490→
+   491→        logical_id = display_id
+   492→        family = make_family(raw_id)
+   493→        fam_meta = registry.get(family, {})
+   494→
+   495→        context_length = fam_meta.get("context", 0)
+   496→        if not context_length:
+   497→            context_length = 0
+   498→
+   499→        attributes: dict[str, Any] = {}
+   500→
+   501→        caps = fam_meta.get("capabilities")
+   502→        if caps:
+   503→            attributes["capabilities"] = caps
+   504→        else:
+   505→            dc = derive_capabilities_from_name(raw_id)
+   506→            if dc:
+   507→                attributes["capabilities"] = dc
+   508→
+   509→        bm = fam_meta.get("benchmarks")
+   510→        if bm:
+   511→            attributes["benchmarks"] = bm
+   512→
+   513→        pricing = fam_meta.get("pricing")
+   514→        if pricing:
+   515→            attributes["pricing"] = pricing
+   516→
+   517→        ranks = fam_meta.get("ranks")
+   518→        if ranks:
+   519→            attributes["ranks"] = ranks
+   520→            attributes["note"] = "Ranks = usage/spend-share popularity (not intelligence)."
+   521→
+   522→        free_note = fam_meta.get("free_note")
+   523→        if free_note:
+   524→            existing = attributes.get("note", "")
+   525→            attributes["note"] = f"{existing} {free_note}".strip() if existing else free_note
+   526→
+   527→        if bm and not attributes.get("capabilities"):
+   528→            all_low = all(isinstance(v, (int, float)) and v < 20 for v in bm.values())
+   529→            if all_low:
+   530→                continue
+   531→
+   532→        models.append({
+   533→            "id": logical_id,
+   534→            "displayName": fam_meta.get("display_name") or derive_display_name(logical_id),
+   535→            "contextLength": context_length,
+   536→            "family": family,
+   537→            "slotId": f"{provider_name}/{raw_id}",
+   538→        })
+   539→        if attributes:
+   540→            models[-1]["attributes"] = attributes
+   541→
+   542→    return models
+   543→
+   544→
+   545→# ---------------------------------------------------------------------------
+   546→# Public entry point
+   547→# ---------------------------------------------------------------------------
+   548→def build_provider_catalog(force_refresh: bool = False) -> dict[str, Any]:
+   549→    """Build and return the full SyncResult JSON dict.
+   550→
+   551→    Cache lives 10 minutes in-process. Concurrent callers block on the same
+   552→    build when the cache is being refreshed.
+   553→    """
+   554→    global _cache, _cache_at
+   555→
+   556→    now = time.time()
+   557→    if not force_refresh and _cache is not None and now - _cache_at < _CACHE_TTL_S:
+   558→        return _cache
+   559→
+   560→    with _cache_lock:
+   561→        if _cache is not None and not force_refresh and now - _cache_at < _CACHE_TTL_S:
+   562→            return _cache
+   563→
+   564→        catalog = _load_catalog()
+   565→        display_map = _PROVIDER_DISPLAY
+   566→
+   567→        # 1. Build family registry from OpenRouter
+   568→        or_models, family_registry = _fetch_openrouter_family()
+   569→        or_live = any(or_models)  # True if the fetch succeeded
+   570→
+   571→        # 2. Sync provider model lists
+   572→        provider_models, live_set = _sync_provider_models(catalog)
+   573→
+   574→        # 3. Build ProviderGroup for each catalog entry
+   575→        providers_list: list[dict[str, Any]] = []
+   576→        sync_status: list[dict[str, Any]] = []
+   577→
+   578→        for entry in catalog:
+   579→            name = entry["name"]
+   580→            display = display_map.get(name, entry)
+   581→            model_ids = provider_models.get(name, {})
+   582→            is_live = name in live_set
+   583→
+   584→            models = _build_provider_models(name, model_ids, family_registry)
+   585→
+   586→            provider_group = {
+   587→                "name": name,
+   588→                "displayName": display.get("displayName", name),
+   589→                "pool": display.get("pool", "core"),
+   590→                "region": display.get("region", ""),
+   591→                "icon": display.get("icon", "Box"),
+   592→                "color": display.get("color", "#888"),
+   593→                "models": models,
+   594→                "privacy": display.get("privacy", {
+   595→                    "notice": "Privacy info not yet available.",
+   596→                    "confidence": "low",
+   597→                    "sources": [],
+   598→                }),
+   599→                "usageLimits": display.get("usageLimits", ""),
+   600→                "settingsUrl": display.get("settingsUrl", ""),
+   601→                "manageLabel": display.get("manageLabel", "Manage keys"),
+   602→                "syncedLive": is_live,
+   603→            }
+   604→
+   605→            providers_list.append(provider_group)
+   606→            sync_status.append({
+   607→                "provider": name,
+   608→                "live": is_live,
+   609→                "error": None if is_live else "sync unavailable or returned no models",
+   610→                "modelCount": len(models),
+   611→            })
+   612→
+   613→        total_models = sum(len(p["models"]) for p in providers_list)
+   614→
+   615→        # 4. Build de-duped logical catalog from provider models
+   616→        logical_models = _build_logical_catalog(providers_list, family_registry, catalog)
+   617→
+   618→        result: dict[str, Any] = {
+   619→            "providers": providers_list,
+   620→            "logical": logical_models,
+   621→            "totalModels": total_models,
+   622→            "syncedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+   623→            "syncStatus": sync_status,
+   624→        }
+   625→
+   626→        _cache = result
+   627→        _cache_at = time.time()
+   628→        return result
+   629→
+   630→
+   631→# ---------------------------------------------------------------------------
+   632→# Logical (de-duped) catalog builder
+   633→# ---------------------------------------------------------------------------
+   634→def _build_logical_catalog(
+   635→    provider_groups: list[dict[str, Any]],
+   636→    family_registry: dict[str, dict[str, Any]],
+   637→    catalog_entries: list[dict],
+   638→) -> list[dict[str, Any]]:
+   639→    """Group all provider models by family into de-duped logical entries.
+   640→
+   641→    Each logical entry carries a *hosts* list — every provider that serves
+   642→    this model, with per-host details and the provider's API key status.
+   643→    Attributes (capabilities, benchmarks, pricing) are merged from the
+   644→    OpenRouter family registry.
+   645→    """
+   646→    # Cache API-key presence per provider
+   647→    provider_keys: dict[str, bool] = {}
+   648→    for entry in catalog_entries:
+   649→        name = entry["name"]
+   650→        env_vars = entry.get("env_var", [])
+   651→        if isinstance(env_vars, str):
+   652→            env_vars = [env_vars]
+   653→        has_key = any(os.environ.get(v, "").strip() for v in env_vars if v)
+   654→        provider_keys[name] = has_key
+   655→
+   656→    groups: dict[str, dict[str, Any]] = {}
+   657→
+   658→    for pg in provider_groups:
+   659→        prov_name = pg["name"]
+   660→        disp = pg.get("displayName", prov_name)
+   661→        icon = pg.get("icon", "Box")
+   662→        color = pg.get("color", "#888")
+   663→        has_api_key = provider_keys.get(prov_name, False)
+   664→        synced_live = pg.get("syncedLive", False)
+   665→
+   666→        for model in pg.get("models", []):
+   667→            family = model.get("family") or model["id"]
+   668→            if family not in groups:
+   669→                groups[family] = {
+   670→                    "logical": family,
+   671→                    "displayName": model["displayName"],
+   672→                    "family": family,
+   673→                    "contextLength": 0,
+   674→                    "hosts": [],
+   675→                }
+   676→            group = groups[family]
+   677→
+   678→            group["hosts"].append({
+   679→                "provider": prov_name,
+   680→                "providerDisplayName": disp,
+   681→                "icon": icon,
+   682→                "color": color,
+   683→                "modelId": model["id"],
+   684→                "contextLength": model.get("contextLength", 0) or 0,
+   685→                "hasApiKey": has_api_key,
+   686→                "syncedLive": synced_live,
+   687→                "defaultPriority": len(group["hosts"]) + 1,
+   688→            })
+   689→
+   690→            ctx = model.get("contextLength", 0) or 0
+   691→            if ctx > group["contextLength"]:
+   692→                group["contextLength"] = ctx
+   693→
+   694→    # Merge family-registry attributes per group
+   695→    result: list[dict[str, Any]] = []
+   696→    for family in sorted(groups.keys()):
+   697→        group = groups[family]
+   698→        fam_meta = family_registry.get(family, {})
+   699→        attributes: dict[str, Any] = {}
+   700→
+   701→        caps = fam_meta.get("capabilities")
+   702→        if caps:
+   703→            attributes["capabilities"] = caps
+   704→        bm = fam_meta.get("benchmarks")
+   705→        if bm:
+   706→            attributes["benchmarks"] = bm
+   707→        pricing = fam_meta.get("pricing")
+   708→        if pricing:
+   709→            attributes["pricing"] = pricing
+   710→        ranks = fam_meta.get("ranks")
+   711→        if ranks:
+   712→            attributes["ranks"] = ranks
+   713→        free_note = fam_meta.get("free_note")
+   714→        if free_note:
+   715→            attributes["note"] = free_note
+   716→
+   717→        entry: dict[str, Any] = {
+   718→            "logical": group["logical"],
+   719→            "displayName": group["displayName"],
+   720→            "family": group["family"],
+   721→            "contextLength": group["contextLength"],
+   722→            "hosts": group["hosts"],
+   723→        }
+   724→        if attributes:
+   725→            entry["attributes"] = attributes
+   726→        result.append(entry)
+   727→
+   728→    log_event("logical_catalog_built", count=len(result))
+   729→    return result
+   730→
+   731→
+   732→def _load_catalog() -> list[dict]:
+   733→    try:
+   734→        with open(CATALOG_PATH, encoding="utf-8") as f:
+   735→            data = json.load(f)
+   736→        return data.get("providers", [])
+   737→    except (OSError, json.JSONDecodeError) as e:
+   738→        log_event("catalog_load_error", error=str(e)[:500])
+   739→        return []
+   740→

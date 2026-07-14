@@ -1,0 +1,1006 @@
+     1→/**
+     2→ * Chat Store — Centralized state management for agent chat.
+     3→ *
+     4→ * Key features (the "1-up" philosophy):
+     5→ *  - **Message queue**: users can queue multiple messages while the LLM is
+     6→ *    working. They fire sequentially the moment the previous turn ends.
+     7→ *  - **SSE streaming**: real-time deltas (no 300ms polling pop-in).
+     8→ *  - **Crash-safe persistence**: activeSessionId and workspaceId survive
+     9→ *    refresh. The session list is rehydrated from the backend on mount.
+    10→ *  - **Optimistic UI**: every user action reflects instantly in the UI;
+    11→ *    backend errors are surfaced as inline retries, never as disappearing
+    12→ *    state.
+    13→ *  - **Immutable updates**: no in-place mutation of messages (which caused
+    14→ *    the previous "stack weirdly" bug).
+    15→ *  - **Single source of truth for the agent session**: we track
+    16→ *    `currentAgentSessionId` so Stop actually works.
+    17→ */
+    18→import { create } from "zustand";
+    19→import { persist } from "zustand/middleware";
+    20→import {
+    21→  AgentClient,
+    22→  type AgentEvent,
+    23→  type AgentFile,
+    24→  type AgentStatus,
+    25→  type ChatSession,
+    26→  type AgentStart,
+    27→} from "../api/agent";
+    28→
+    29→// ---------------------------------------------------------------------------
+    30→// Types
+    31→// ---------------------------------------------------------------------------
+    32→
+    33→export type ChatRole =
+    34→  | "user"
+    35→  | "assistant"
+    36→  | "thinking"
+    37→  | "tool"
+    38→  | "status"
+    39→  | "panel";
+    40→
+    41→export interface ChatMessage {
+    42→  id: string;
+    43→  role: ChatRole;
+    44→  content: string;
+    45→  isError?: boolean;
+    46→  isStreaming?: boolean;
+    47→  toolName?: string;
+    48→  toolSummary?: string;
+    49→  panelStatus?: string;
+    50→  costUsd?: number | null;
+    51→  timestamp: number;
+    52→  /** Backend seq number — used for dedupe. Local-only messages use -1. */
+    53→  seq: number;
+    54→  /** True for messages that haven't been ack'd by the backend yet. */
+    55→  pending?: boolean;
+    56→}
+    57→
+    58→export interface QueuedMessage {
+    59→  id: string;
+    60→  text: string;
+    61→  enqueuedAt: number;
+    62→}
+    63→
+    64→export interface PanelInvocation {
+    65→  invoke_id: string;
+    66→  task_name: string;
+    67→  prompt: string;
+    68→  panel: string[];
+    69→  status: string;
+    70→  snapshot?: Record<string, unknown>;
+    71→  error?: string;
+    72→}
+    73→
+    74→export interface ChatState {
+    75→  // Sessions
+    76→  sessions: ChatSession[];
+    77→  activeSessionId: string | null;
+    78→  isLoadingSessions: boolean;
+    79→  sessionError: string | null;
+    80→  /** True while we're restoring the active session's events on mount/switch. */
+    81→  isLoadingMessages: boolean;
+    82→
+    83→  // Messages
+    84→  messages: ChatMessage[];
+    85→  isStreaming: boolean;
+    86→  status: AgentStatus;
+    87→
+    88→  // Input
+    89→  inputText: string;
+    90→  /** True when an agent turn is in flight (UI shows Stop). */
+    91→  isBusy: boolean;
+    92→  error: string | null;
+    93→
+    94→  // Message queue (1-up: send-while-busy)
+    95→  queue: QueuedMessage[];
+    96→
+    97→  // Per-session toggles
+    98→  effort: "low" | "med" | "high" | "max";
+    99→  webSearch: boolean;
+   100→  deepResearch: boolean;
+   101→
+   102→  // Files
+   103→  files: AgentFile[];
+   104→  fileDrawerOpen: boolean;
+   105→
+   106→  // Panel
+   107→  panelInvocations: PanelInvocation[];
+   108→  panelDrawerOpen: boolean;
+   109→
+   110→  // Session sidebar
+   111→  sidebarOpen: boolean;
+   112→
+   113→  // Derived
+   114→  cost: number | null;
+   115→  currentModel: string | null;
+   116→  workspaceId: string | null;
+   117→
+   118→  // Internal: current agent session ID (for Stop and SSE)
+   119→  _agentSessionId: string | null;
+   120→  _streamController: AbortController | null;
+   121→
+   122→  // Actions
+   123→  setInputText: (text: string) => void;
+   124→  setEffort: (effort: "low" | "med" | "high" | "max") => void;
+   125→  toggleWebSearch: () => void;
+   126→  toggleDeepResearch: () => void;
+   127→  setSidebarOpen: (open: boolean) => void;
+   128→  setFileDrawerOpen: (open: boolean) => void;
+   129→  setPanelDrawerOpen: (open: boolean) => void;
+   130→  setWorkspaceId: (id: string | null) => void;
+   131→
+   132→  // Core operations
+   133→  loadSessions: (client: AgentClient) => Promise<void>;
+   134→  createSession: (client: AgentClient, model?: string) => Promise<string>;
+   135→  switchSession: (client: AgentClient, sessionId: string) => Promise<void>;
+   136→  deleteSession: (client: AgentClient, sessionId: string) => Promise<void>;
+   137→  renameSession: (client: AgentClient, sessionId: string, title: string) => Promise<void>;
+   138→  sendMessage: (
+   139→    client: AgentClient,
+   140→    message: string,
+   141→    model?: string
+   142→  ) => Promise<void>;
+   143→  /** Remove a queued message (only if not yet sent). */
+   144→  dequeueMessage: (id: string) => void;
+   145→  stopGeneration: (client: AgentClient) => Promise<void>;
+   146→  refreshFiles: (client: AgentClient) => Promise<void>;
+   147→}
+   148→
+   149→// ---------------------------------------------------------------------------
+   150→// Helpers
+   151→// ---------------------------------------------------------------------------
+   152→
+   153→let nextMsgId = 0;
+   154→function genMsgId(): string {
+   155→  return `m${++nextMsgId}_${Date.now().toString(36)}`;
+   156→}
+   157→
+   158→function genQueueId(): string {
+   159→  return `q${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+   160→}
+   161→
+   162→/** Convert raw AgentEvents into normalized ChatMessages. Pure function. */
+   163→export function eventsToMessages(events: AgentEvent[]): ChatMessage[] {
+   164→  const messages: ChatMessage[] = [];
+   165→  // Track the index of the streaming assistant / thinking message so deltas
+   166→  // merge into it without mutation.
+   167→  let streamingAssistantIdx = -1;
+   168→  let streamingThinkingIdx = -1;
+   169→
+   170→  for (const ev of events) {
+   171→    const ts = (ev.ts || Date.now() / 1000) * 1000;
+   172→    const seq = ev.i ?? messages.length;
+   173→
+   174→    switch (ev.type) {
+   175→      case "user": {
+   176→        messages.push({
+   177→          id: genMsgId(),
+   178→          role: "user",
+   179→          content: ev.text || "",
+   180→          timestamp: ts,
+   181→          seq,
+   182→        });
+   183→        streamingAssistantIdx = -1;
+   184→        streamingThinkingIdx = -1;
+   185→        break;
+   186→      }
+   187→      case "assistant": {
+   188→        messages.push({
+   189→          id: genMsgId(),
+   190→          role: "assistant",
+   191→          content: ev.text || "",
+   192→          timestamp: ts,
+   193→          seq,
+   194→        });
+   195→        streamingAssistantIdx = -1;
+   196→        streamingThinkingIdx = -1;
+   197→        break;
+   198→      }
+   199→      case "assistant_delta": {
+   200→        if (streamingAssistantIdx === -1) {
+   201→          messages.push({
+   202→            id: genMsgId(),
+   203→            role: "assistant",
+   204→            content: ev.text || "",
+   205→            isStreaming: true,
+   206→            timestamp: ts,
+   207→            seq,
+   208→          });
+   209→          streamingAssistantIdx = messages.length - 1;
+   210→        } else {
+   211→          const cur = messages[streamingAssistantIdx];
+   212→          messages[streamingAssistantIdx] = {
+   213→            ...cur,
+   214→            content: cur.content + (ev.text || ""),
+   215→            seq,
+   216→            isStreaming: true,
+   217→          };
+   218→        }
+   219→        streamingThinkingIdx = -1;
+   220→        break;
+   221→      }
+   222→      case "thinking": {
+   223→        messages.push({
+   224→          id: genMsgId(),
+   225→          role: "thinking",
+   226→          content: ev.text || "",
+   227→          timestamp: ts,
+   228→          seq,
+   229→        });
+   230→        streamingThinkingIdx = -1;
+   231→        streamingAssistantIdx = -1;
+   232→        break;
+   233→      }
+   234→      case "thinking_delta": {
+   235→        if (streamingThinkingIdx === -1) {
+   236→          messages.push({
+   237→            id: genMsgId(),
+   238→            role: "thinking",
+   239→            content: ev.text || "",
+   240→            isStreaming: true,
+   241→            timestamp: ts,
+   242→            seq,
+   243→          });
+   244→          streamingThinkingIdx = messages.length - 1;
+   245→        } else {
+   246→          const cur = messages[streamingThinkingIdx];
+   247→          messages[streamingThinkingIdx] = {
+   248→            ...cur,
+   249→            content: cur.content + (ev.text || ""),
+   250→            seq,
+   251→            isStreaming: true,
+   252→          };
+   253→        }
+   254→        streamingAssistantIdx = -1;
+   255→        break;
+   256→      }
+   257→      case "tool_use": {
+   258→        messages.push({
+   259→          id: genMsgId(),
+   260→          role: "tool",
+   261→          content: "",
+   262→          toolName: ev.name || "tool",
+   263→          toolSummary: ev.summary || "",
+   264→          timestamp: ts,
+   265→          seq,
+   266→        });
+   267→        streamingAssistantIdx = -1;
+   268→        streamingThinkingIdx = -1;
+   269→        break;
+   270→      }
+   271→      case "tool_result": {
+   272→        messages.push({
+   273→          id: genMsgId(),
+   274→          role: "tool",
+   275→          content: ev.text || "",
+   276→          isError: ev.is_error,
+   277→          toolName: "result",
+   278→          timestamp: ts,
+   279→          seq,
+   280→        });
+   281→        streamingAssistantIdx = -1;
+   282→        streamingThinkingIdx = -1;
+   283→        break;
+   284→      }
+   285→      case "status": {
+   286→        const st = ev as {
+   287→          state: AgentStatus;
+   288→          detail?: string;
+   289→          cost_usd?: number | null;
+   290→        };
+   291→        if (st.state === "idle" && st.detail === "interrupted") {
+   292→          messages.push({
+   293→            id: genMsgId(),
+   294→            role: "status",
+   295→            content: "— stopped —",
+   296→            timestamp: ts,
+   297→            seq,
+   298→          });
+   299→        } else if (st.state === "error") {
+   300→          messages.push({
+   301→            id: genMsgId(),
+   302→            role: "status",
+   303→            content: st.detail || "Agent error",
+   304→            isError: true,
+   305→            costUsd: st.cost_usd,
+   306→            timestamp: ts,
+   307→            seq,
+   308→          });
+   309→        }
+   310→        // status events don't reset streaming indexes — they wrap a turn.
+   311→        break;
+   312→      }
+   313→      case "panel": {
+   314→        messages.push({
+   315→          id: genMsgId(),
+   316→          role: "panel",
+   317→          content: ev.task_name || "Panel",
+   318→          panelStatus: ev.status || "starting",
+   319→          timestamp: ts,
+   320→          seq,
+   321→        });
+   322→        streamingAssistantIdx = -1;
+   323→        streamingThinkingIdx = -1;
+   324→        break;
+   325→      }
+   326→      // steering events are not rendered as messages (they're routing metadata).
+   327→    }
+   328→  }
+   329→
+   330→  // Mark the last streaming message as no longer streaming (turn ended).
+   331→  if (streamingAssistantIdx !== -1) {
+   332→    messages[streamingAssistantIdx] = { ...messages[streamingAssistantIdx], isStreaming: false };
+   333→  }
+   334→  if (streamingThinkingIdx !== -1) {
+   335→    messages[streamingThinkingIdx] = { ...messages[streamingThinkingIdx], isStreaming: false };
+   336→  }
+   337→
+   338→  return messages;
+   339→}
+   340→
+   341→/** Append a single new event to the existing message list (immutable). */
+   342→function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
+   343→  // The simplest correct merge: re-derive messages from existing events + the
+   344→  // new one. The existing messages were derived from a contiguous event
+   345→  // stream, so we just need their underlying events back... but we don't have
+   346→  // those. Instead, do an efficient targeted update.
+   347→  const ts = (ev.ts || Date.now() / 1000) * 1000;
+   348→  const seq = ev.i ?? existing.length;
+   349→  const out = existing.slice();
+   350→
+   351→  switch (ev.type) {
+   352→    case "user": {
+   353→      // Backend echoes user messages. If we already have a pending user
+   354→      // message with the same content (the optimistic one we added locally),
+   355→      // mark it ack'd instead of duplicating.
+   356→      const idx = out.findIndex(
+   357→        (m) => m.role === "user" && m.pending && m.content === (ev.text || "")
+   358→      );
+   359→      if (idx !== -1) {
+   360→        out[idx] = { ...out[idx], pending: false, seq, timestamp: ts };
+   361→        return out;
+   362→      }
+   363→      // Otherwise, only add if we don't already have this exact seq as a user.
+   364→      if (!out.some((m) => m.role === "user" && m.seq === seq)) {
+   365→        out.push({
+   366→          id: genMsgId(),
+   367→          role: "user",
+   368→          content: ev.text || "",
+   369→          timestamp: ts,
+   370→          seq,
+   371→        });
+   372→      }
+   373→      return out;
+   374→    }
+   375→    case "assistant": {
+   376→      out.push({
+   377→        id: genMsgId(),
+   378→        role: "assistant",
+   379→        content: ev.text || "",
+   380→        timestamp: ts,
+   381→        seq,
+   382→      });
+   383→      return out;
+   384→    }
+   385→    case "assistant_delta": {
+   386→      // Find the last assistant message that is currently streaming.
+   387→      for (let i = out.length - 1; i >= 0; i--) {
+   388→        if (out[i].role === "assistant" && out[i].isStreaming) {
+   389→          out[i] = { ...out[i], content: out[i].content + (ev.text || ""), seq };
+   390→          return out;
+   391→        }
+   392→      }
+   393→      // No streaming assistant — start a new one.
+   394→      out.push({
+   395→        id: genMsgId(),
+   396→        role: "assistant",
+   397→        content: ev.text || "",
+   398→        isStreaming: true,
+   399→        timestamp: ts,
+   400→        seq,
+   401→      });
+   402→      return out;
+   403→    }
+   404→    case "thinking": {
+   405→      out.push({
+   406→        id: genMsgId(),
+   407→        role: "thinking",
+   408→        content: ev.text || "",
+   409→        timestamp: ts,
+   410→        seq,
+   411→      });
+   412→      return out;
+   413→    }
+   414→    case "thinking_delta": {
+   415→      for (let i = out.length - 1; i >= 0; i--) {
+   416→        if (out[i].role === "thinking" && out[i].isStreaming) {
+   417→          out[i] = { ...out[i], content: out[i].content + (ev.text || ""), seq };
+   418→          return out;
+   419→        }
+   420→      }
+   421→      out.push({
+   422→        id: genMsgId(),
+   423→        role: "thinking",
+   424→        content: ev.text || "",
+   425→        isStreaming: true,
+   426→        timestamp: ts,
+   427→        seq,
+   428→      });
+   429→      return out;
+   430→    }
+   431→    case "tool_use": {
+   432→      out.push({
+   433→        id: genMsgId(),
+   434→        role: "tool",
+   435→        content: "",
+   436→        toolName: ev.name || "tool",
+   437→        toolSummary: ev.summary || "",
+   438→        timestamp: ts,
+   439→        seq,
+   440→      });
+   441→      return out;
+   442→    }
+   443→    case "tool_result": {
+   444→      out.push({
+   445→        id: genMsgId(),
+   446→        role: "tool",
+   447→        content: ev.text || "",
+   448→        isError: ev.is_error,
+   449→        toolName: "result",
+   450→        timestamp: ts,
+   451→        seq,
+   452→      });
+   453→      return out;
+   454→    }
+   455→    case "status": {
+   456→      const st = ev as {
+   457→        state: AgentStatus;
+   458→        detail?: string;
+   459→        cost_usd?: number | null;
+   460→      };
+   461→      if (st.state === "idle" && st.detail === "interrupted") {
+   462→        out.push({
+   463→          id: genMsgId(),
+   464→          role: "status",
+   465→          content: "— stopped —",
+   466→          timestamp: ts,
+   467→          seq,
+   468→        });
+   469→      } else if (st.state === "error") {
+   470→        out.push({
+   471→          id: genMsgId(),
+   472→          role: "status",
+   473→          content: st.detail || "Agent error",
+   474→          isError: true,
+   475→          costUsd: st.cost_usd,
+   476→          timestamp: ts,
+   477→          seq,
+   478→        });
+   479→      }
+   480→      return out;
+   481→    }
+   482→    case "panel": {
+   483→      out.push({
+   484→        id: genMsgId(),
+   485→        role: "panel",
+   486→        content: ev.task_name || "Panel",
+   487→        panelStatus: ev.status || "starting",
+   488→        timestamp: ts,
+   489→        seq,
+   490→      });
+   491→      return out;
+   492→    }
+   493→    default:
+   494→      return out;
+   495→  }
+   496→}
+   497→
+   498→/** Mark the last streaming message as done (called when a turn ends). */
+   499→function finalizeStreaming(existing: ChatMessage[]): ChatMessage[] {
+   500→  const out = existing.slice();
+   501→  for (let i = out.length - 1; i >= 0; i--) {
+   502→    if (out[i].isStreaming) {
+   503→      out[i] = { ...out[i], isStreaming: false };
+   504→      break;
+   505→    }
+   506→  }
+   507→  return out;
+   508→}
+   509→
+   510→// ---------------------------------------------------------------------------
+   511→// Store
+   512→// ---------------------------------------------------------------------------
+   513→
+   514→const ACTIVE_SESSION_KEY = "doomalaysocreate.chat.active_session";
+   515→const WORKSPACE_KEY = "doomalaysocreate.chat.workspace_id";
+   516→
+   517→export const useChatStore = create<ChatState>()(
+   518→  persist(
+   519→    (set, get) => ({
+   520→      // -- State --
+   521→      sessions: [],
+   522→      activeSessionId: null,
+   523→      isLoadingSessions: false,
+   524→      sessionError: null,
+   525→      isLoadingMessages: false,
+   526→
+   527→      messages: [],
+   528→      isStreaming: false,
+   529→      status: "idle",
+   530→
+   531→      inputText: "",
+   532→      isBusy: false,
+   533→      error: null,
+   534→
+   535→      queue: [],
+   536→
+   537→      effort: "med",
+   538→      webSearch: false,
+   539→      deepResearch: false,
+   540→
+   541→      files: [],
+   542→      fileDrawerOpen: false,
+   543→
+   544→      panelInvocations: [],
+   545→      panelDrawerOpen: false,
+   546→
+   547→      sidebarOpen: false,
+   548→      cost: null,
+   549→      currentModel: null,
+   550→      workspaceId: null,
+   551→
+   552→      _agentSessionId: null,
+   553→      _streamController: null,
+   554→
+   555→      // -- Simple setters --
+   556→      setInputText: (text) => set({ inputText: text }),
+   557→      setEffort: (effort) => set({ effort }),
+   558→      toggleWebSearch: () => set((s) => ({ webSearch: !s.webSearch })),
+   559→      toggleDeepResearch: () => set((s) => ({ deepResearch: !s.deepResearch })),
+   560→      setSidebarOpen: (open) => set({ sidebarOpen: open }),
+   561→      setFileDrawerOpen: (open) => set({ fileDrawerOpen: open }),
+   562→      setPanelDrawerOpen: (open) => set({ panelDrawerOpen: open }),
+   563→      setWorkspaceId: (id) => {
+   564→        set({ workspaceId: id });
+   565→        try {
+   566→          if (id) localStorage.setItem(WORKSPACE_KEY, id);
+   567→          else localStorage.removeItem(WORKSPACE_KEY);
+   568→        } catch {
+   569→          /* ignore */
+   570→        }
+   571→      },
+   572→
+   573→      // -- Load sessions --
+   574→      loadSessions: async (client) => {
+   575→        set({ isLoadingSessions: true, sessionError: null });
+   576→        try {
+   577→          const { sessions } = await client.listChatSessions();
+   578→          // Restore active session if it still exists.
+   579→          let activeId = get().activeSessionId;
+   580→          try {
+   581→            const stored = localStorage.getItem(ACTIVE_SESSION_KEY);
+   582→            if (stored && !activeId) activeId = stored;
+   583→          } catch {
+   584→            /* ignore */
+   585→          }
+   586→          if (activeId && !sessions.find((s) => s.id === activeId)) {
+   587→            activeId = null;
+   588→            try {
+   589→              localStorage.removeItem(ACTIVE_SESSION_KEY);
+   590→            } catch {
+   591→              /* ignore */
+   592→            }
+   593→          }
+   594→          set({
+   595→            sessions,
+   596→            isLoadingSessions: false,
+   597→            activeSessionId: activeId,
+   598→          });
+   599→
+   600→          // If we have an active session, load its events.
+   601→          if (activeId) {
+   602→            await get().switchSession(client, activeId);
+   603→          }
+   604→        } catch (e) {
+   605→          set({
+   606→            sessionError: e instanceof Error ? e.message : "Failed to load sessions",
+   607→            isLoadingSessions: false,
+   608→          });
+   609→        }
+   610→      },
+   611→
+   612→      // -- Create session --
+   613→      createSession: async (client, model) => {
+   614→        try {
+   615→          const cs = await client.createChatSession(
+   616→            undefined,
+   617→            model,
+   618→            get().workspaceId || undefined,
+   619→          );
+   620→          set((s) => ({
+   621→            sessions: [cs, ...s.sessions],
+   622→            activeSessionId: cs.id,
+   623→            messages: [],
+   624→            status: "idle",
+   625→            isBusy: false,
+   626→            isStreaming: false,
+   627→            error: null,
+   628→            cost: null,
+   629→            panelInvocations: [],
+   630→            files: [],
+   631→            queue: [],
+   632→            _agentSessionId: null,
+   633→            _streamController: null,
+   634→          }));
+   635→          try {
+   636→            localStorage.setItem(ACTIVE_SESSION_KEY, cs.id);
+   637→          } catch {
+   638→            /* ignore */
+   639→          }
+   640→          return cs.id;
+   641→        } catch (e) {
+   642→          set({
+   643→            error: e instanceof Error ? e.message : "Failed to create session",
+   644→          });
+   645→          throw e;
+   646→        }
+   647→      },
+   648→
+   649→      // -- Switch session --
+   650→      switchSession: async (client, sessionId) => {
+   651→        // Abort any in-flight stream first.
+   652→        const ctrl = get()._streamController;
+   653→        if (ctrl) {
+   654→          ctrl.abort();
+   655→        }
+   656→        set({
+   657→          isLoadingMessages: true,
+   658→          activeSessionId: sessionId,
+   659→          messages: [],
+   660→          error: null,
+   661→          status: "idle",
+   662→          isBusy: false,
+   663→          isStreaming: false,
+   664→          panelInvocations: [],
+   665→          queue: [],
+   666→          _agentSessionId: null,
+   667→          _streamController: null,
+   668→        });
+   669→        try {
+   670→          const evData = await client.getChatEvents(sessionId);
+   671→          const messages = eventsToMessages(evData.events);
+   672→          set({ messages, isLoadingMessages: false });
+   673→          try {
+   674→            localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
+   675→          } catch {
+   676→            /* ignore */
+   677→          }
+   678→          // If the session has a workspace_id, sync it.
+   679→          const cs = get().sessions.find((s) => s.id === sessionId);
+   680→          if (cs?.workspace_id && cs.workspace_id !== get().workspaceId) {
+   681→            get().setWorkspaceId(cs.workspace_id);
+   682→          }
+   683→        } catch (e) {
+   684→          set({
+   685→            error: e instanceof Error ? e.message : "Failed to load session",
+   686→            isLoadingMessages: false,
+   687→          });
+   688→        }
+   689→      },
+   690→
+   691→      // -- Delete session --
+   692→      deleteSession: async (client, sessionId) => {
+   693→        // Optimistic: remove from local state immediately.
+   694→        const wasActive = get().activeSessionId === sessionId;
+   695→        set((s) => {
+   696→          const sessions = s.sessions.filter((ses) => ses.id !== sessionId);
+   697→          const updates: Partial<ChatState> = { sessions };
+   698→          if (wasActive) {
+   699→            updates.activeSessionId = null;
+   700→            updates.messages = [];
+   701→            updates.status = "idle";
+   702→            updates.isBusy = false;
+   703→            updates.isStreaming = false;
+   704→            updates.queue = [];
+   705→            updates._agentSessionId = null;
+   706→            updates._streamController = null;
+   707→          }
+   708→          return updates;
+   709→        });
+   710→        if (wasActive) {
+   711→          try {
+   712→            localStorage.removeItem(ACTIVE_SESSION_KEY);
+   713→          } catch {
+   714→            /* ignore */
+   715→          }
+   716→        }
+   717→        try {
+   718→          await client.deleteChatSession(sessionId);
+   719→        } catch (e) {
+   720→          // Restore on failure.
+   721→          set({ error: e instanceof Error ? e.message : "Failed to delete session" });
+   722→          try {
+   723→            const { sessions } = await client.listChatSessions();
+   724→            set({ sessions });
+   725→          } catch {
+   726→            /* ignore */
+   727→          }
+   728→        }
+   729→      },
+   730→
+   731→      // -- Rename session --
+   732→      renameSession: async (client, sessionId, title) => {
+   733→        // Optimistic update.
+   734→        set((s) => ({
+   735→          sessions: s.sessions.map((ses) =>
+   736→            ses.id === sessionId ? { ...ses, title } : ses,
+   737→          ),
+   738→        }));
+   739→        try {
+   740→          await client.updateChatSession(sessionId, { title });
+   741→        } catch {
+   742→          // Revert on failure.
+   743→          try {
+   744→            const { sessions } = await client.listChatSessions();
+   745→            set({ sessions });
+   746→          } catch {
+   747→            /* ignore */
+   748→          }
+   749→        }
+   750→      },
+   751→
+   752→      // -- Dequeue --
+   753→      dequeueMessage: (id) => {
+   754→        set((s) => ({ queue: s.queue.filter((q) => q.id !== id) }));
+   755→      },
+   756→
+   757→      // -- Send message (with queue support) --
+   758→      sendMessage: async (client, message, model) => {
+   759→        const text = message.trim();
+   760→        if (!text) return;
+   761→        const state = get();
+   762→
+   763→        // If busy, enqueue instead of rejecting.
+   764→        if (state.isBusy) {
+   765→          set((s) => ({
+   766→            queue: [...s.queue, { id: genQueueId(), text, enqueuedAt: Date.now() }],
+   767→            inputText: "",
+   768→          }));
+   769→          return;
+   770→        }
+   771→
+   772→        await _runTurn(client, text, model, set, get);
+   773→      },
+   774→
+   775→      // -- Stop generation --
+   776→      stopGeneration: async (client) => {
+   777→        const agentSid = get()._agentSessionId;
+   778→        if (agentSid) {
+   779→          try {
+   780→            await client.interrupt(agentSid);
+   781→          } catch {
+   782→            /* ignore */
+   783→          }
+   784→        }
+   785→        const ctrl = get()._streamController;
+   786→        if (ctrl) {
+   787→          ctrl.abort();
+   788→        }
+   789→        set({
+   790→          status: "idle",
+   791→          isBusy: false,
+   792→          isStreaming: false,
+   793→          messages: finalizeStreaming(get().messages),
+   794→          _streamController: null,
+   795→        });
+   796→      },
+   797→
+   798→      // -- Refresh files --
+   799→      refreshFiles: async (client) => {
+   800→        const agentSid = get()._agentSessionId;
+   801→        if (!agentSid) return;
+   802→        try {
+   803→          const f = await client.files(agentSid);
+   804→          set({ files: f.files });
+   805→        } catch {
+   806→          /* ignore */
+   807→        }
+   808→      },
+   809→    }),
+   810→    {
+   811→      name: "doomalaysocreate.chat.store",
+   812→      partialize: (state) => ({
+   813→        effort: state.effort,
+   814→        webSearch: state.webSearch,
+   815→        deepResearch: state.deepResearch,
+   816→        sidebarOpen: state.sidebarOpen,
+   817→      }),
+   818→    },
+   819→  ),
+   820→);
+   821→
+   822→// ---------------------------------------------------------------------------
+   823→// Internal: run a single agent turn (called by sendMessage and the queue
+   824→// drainer).
+   825→// ---------------------------------------------------------------------------
+   826→
+   827→async function _runTurn(
+   828→  client: AgentClient,
+   829→  text: string,
+   830→  model: string | undefined,
+   831→  set: (partial: Partial<ChatState> | ((s: ChatState) => Partial<ChatState>)) => void,
+   832→  get: () => ChatState,
+   833→): Promise<void> {
+   834→  // Ensure we have an active chat session.
+   835→  let sessionId = get().activeSessionId;
+   836→  if (!sessionId) {
+   837→    try {
+   838→      sessionId = await get().createSession(client, model);
+   839→    } catch (e) {
+   840→      set({
+   841→        error: e instanceof Error ? e.message : "Failed to create session",
+   842→      });
+   843→      return;
+   844→    }
+   845→  }
+   846→
+   847→  // Add user message optimistically (pending until backend echoes it).
+   848→  const userMsg: ChatMessage = {
+   849→    id: genMsgId(),
+   850→    role: "user",
+   851→    content: text,
+   852→    timestamp: Date.now(),
+   853→    seq: -1,
+   854→    pending: true,
+   855→  };
+   856→  set((s) => ({
+   857→    messages: [...s.messages, userMsg],
+   858→    isBusy: true,
+   859→    isStreaming: true,
+   860→    error: null,
+   861→    status: "running",
+   862→    inputText: "",
+   863→  }));
+   864→
+   865→  // Buffer events for batch persistence at turn end.
+   866→  let bufferedEvents: AgentEvent[] = [];
+   867→  let since = 0;
+   868→  let agentSid: string | null = null;
+   869→
+   870→  try {
+   871→    const start: AgentStart = await client.send(
+   872→      text,
+   873→      undefined, // no session_id — the backend reuses by chat_session_id
+   874→      model || undefined,
+   875→      get().workspaceId || undefined,
+   876→      sessionId,
+   877→    );
+   878→    agentSid = start.session_id;
+   879→    since = 0;
+   880→    set({ _agentSessionId: agentSid });
+   881→
+   882→    // Open SSE stream for live events. If SSE fails, fall back to polling.
+   883→    await new Promise<void>((resolve) => {
+   884→      let settled = false;
+   885→      let pollTimer: ReturnType<typeof setInterval> | null = null;
+   886→      const finish = () => {
+   887→        if (settled) return;
+   888→        settled = true;
+   889→        if (pollTimer) clearInterval(pollTimer);
+   890→        resolve();
+   891→      };
+   892→
+   893→      const handleEvent = (ev: AgentEvent) => {
+   894→        bufferedEvents.push(ev);
+   895→        since = Math.max(since, (ev.i ?? 0) + 1);
+   896→        set((s) => ({ messages: appendEvent(s.messages, ev) }));
+   897→
+   898→        // Update status from status events.
+   899→        if (ev.type === "status") {
+   900→          const st = ev as { state: AgentStatus; cost_usd?: number | null };
+   901→          set({ status: st.state });
+   902→          if (typeof st.cost_usd === "number") {
+   903→            set({ cost: st.cost_usd });
+   904→          }
+   905→          if (st.state === "idle" || st.state === "error") {
+   906→            set((s) => ({ messages: finalizeStreaming(s.messages) }));
+   907→            // Give a brief moment for any trailing events, then finish.
+   908→            setTimeout(finish, 200);
+   909→          }
+   910→        }
+   911→      };
+   912→
+   913→      const controller = client.stream(
+   914→        agentSid!,
+   915→        since,
+   916→        handleEvent,
+   917→        () => {
+   918→          // SSE failed — fall back to polling.
+   919→          if (pollTimer) return; // already polling
+   920→          pollTimer = setInterval(async () => {
+   921→            try {
+   922→              const snap = await client.poll(agentSid!, since);
+   923→              for (const ev of snap.events) handleEvent(ev);
+   924→              if (snap.status !== "running" && snap.status !== "starting") {
+   925→                set((s) => ({ messages: finalizeStreaming(s.messages) }));
+   926→                finish();
+   927→              }
+   928→            } catch {
+   929→              /* keep trying */
+   930→            }
+   931→          }, 800);
+   932→        },
+   933→        () => {
+   934→          // Stream closed by server — turn done (or socket dropped).
+   935→          // Do one final poll to catch any missed events.
+   936→          client
+   937→            .poll(agentSid!, since)
+   938→            .then((snap) => {
+   939→              for (const ev of snap.events) handleEvent(ev);
+   940→              set((s) => ({ messages: finalizeStreaming(s.messages) }));
+   941→              finish();
+   942→            })
+   943→            .catch(() => finish());
+   944→        },
+   945→      );
+   946→      set({ _streamController: controller });
+   947→    });
+   948→
+   949→    // Persist all buffered events to the chat session (backend dedupes).
+   950→    if (bufferedEvents.length > 0) {
+   951→      await client.persistEvents(sessionId, bufferedEvents);
+   952→    }
+   953→
+   954→    // Refresh files (best effort).
+   955→    try {
+   956→      const f = await client.files(agentSid);
+   957→      set({ files: f.files });
+   958→    } catch {
+   959→      /* ignore */
+   960→    }
+   961→
+   962→    // Refresh session list to pick up auto-title.
+   963→    try {
+   964→      const { sessions } = await client.listChatSessions();
+   965→      set({ sessions });
+   966→    } catch {
+   967→      /* ignore */
+   968→    }
+   969→
+   970→    set({
+   971→      isBusy: false,
+   972→      isStreaming: false,
+   973→      _agentSessionId: null,
+   974→      _streamController: null,
+   975→    });
+   976→  } catch (e) {
+   977→    set({
+   978→      error: e instanceof Error ? e.message : String(e),
+   979→      isBusy: false,
+   980→      isStreaming: false,
+   981→      status: "error",
+   982→      messages: finalizeStreaming(get().messages),
+   983→      _agentSessionId: null,
+   984→      _streamController: null,
+   985→    });
+   986→    return;
+   987→  }
+   988→
+   989→  // Drain the queue: send the next message if any.
+   990→  const next = get().queue[0];
+   991→  if (next) {
+   992→    set((s) => ({ queue: s.queue.slice(1) }));
+   993→    await _runTurn(client, next.text, model, set, get);
+   994→  }
+   995→}
+   996→
+   997→// On store creation, restore workspaceId from localStorage (best effort).
+   998→try {
+   999→  const stored = localStorage.getItem(WORKSPACE_KEY);
+  1000→  if (stored) {
+  1001→    useChatStore.setState({ workspaceId: stored });
+  1002→  }
+  1003→} catch {
+  1004→  /* ignore */
+  1005→}
+  1006→
