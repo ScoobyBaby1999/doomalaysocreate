@@ -92,15 +92,22 @@ _PROVIDER_AGENT_MAP: dict[str, tuple[str, str]] = {
     "github-models": ("GITHUB_TOKEN", "https://models.github.ai/inference"),
 }
 
-_open_models_cache: list[tuple[str, str, str, str | None]] | None = None
+_open_models_cache: list[tuple[str, str, str, str | None, dict | None]] | None = None
 
 
-def _build_open_models() -> list[tuple[str, str, str, str | None]]:
+# Each entry: (env_var, label, litellm_model, base_url, extra_headers)
+
+
+def _build_open_models() -> list[tuple[str, str, str, str | None, dict | None]]:
     """Build open model entries from providers_catalog.json dynamically.
 
     Each configured provider contributes ALL its models (env-var-gated), so
     every model from NVIDIA, Cloudflare, PrivateMode AI etc. is available in
     the agent without hardcoding model names.
+
+    Returns 5-tuples: (env_var, label, litellm_model, base_url, extra_headers).
+    extra_headers is a dict of HTTP headers the provider requires (e.g.
+    OpenRouter needs HTTP-Referer + X-Title for free models).
     """
     global _open_models_cache
     # Re-probe if the cache is empty — the panel sync may not have completed
@@ -109,7 +116,7 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
     if _open_models_cache is not None and len(_open_models_cache) > 0:
         return _open_models_cache
 
-    entries: list[tuple[str, str, str, str | None]] = []
+    entries: list[tuple[str, str, str, str | None, dict | None]] = []
     catalog_path = HERE / "providers_catalog.json"
     try:
         with open(catalog_path, encoding="utf-8") as f:
@@ -134,20 +141,19 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
         if base_url.endswith("/chat/completions"):
             base_url = base_url[:-len("/chat/completions")]
 
+        # extra_headers (e.g. OpenRouter requires HTTP-Referer + X-Title)
+        extra_headers = prov.get("extra_headers") or None
+
         for model_id in prov.get("models", []):
             litellm_model = f"openai/{model_id}"
-            label = f"{model_id} ({prov.get('displayName', name)})"
-            entries.append((env_var, label, litellm_model, base_url or None))
+            label = f"{model_id} ({name})"
+            entries.append((env_var, label, litellm_model, base_url or None, extra_headers))
 
     # Also include dynamically synced models from providers with sync_config.
-    # The panel syncs models from live /v1/models endpoints at boot; those are
-    # cached in provider_sync._panel_sync_cache.  Providers whose env var is set
-    # contribute ALL their synced models so the agent picker shows everything
-    # the panel can route to, not just the static catalog.
     from provider_sync import get_panel_sync_cache
     sync_cache = get_panel_sync_cache()
     if sync_cache:
-        seen: set[str] = set(m.split("/")[-1] for _, _, m, _ in entries)
+        seen: set[str] = set(m.split("/")[-1] for _, _, m, _, _ in entries)
         for prov in data.get("providers", []):
             name = prov["name"]
             sync_config = prov.get("sync_config")
@@ -166,20 +172,21 @@ def _build_open_models() -> list[tuple[str, str, str, str | None]]:
                 sbase = sbase.replace("{" + var + "}", os.environ.get(var, "").strip())
             if sbase.endswith("/chat/completions"):
                 sbase = sbase[:-len("/chat/completions")]
+            sheaders = prov.get("extra_headers") or None
             for mid in synced:
                 last = mid.split("/")[-1]
                 if last not in seen:
                     seen.add(last)
-                    entries.append((senv, f"{mid} ({prov.get('displayName', name)})",
-                                    f"openai/{mid}", sbase or None))
+                    entries.append((senv, f"{mid} ({name})",
+                                    f"openai/{mid}", sbase or None, sheaders))
 
     _open_models_cache = entries
     return entries
 
 
-def _resolve_open_model(user_model: str) -> tuple[str, str | None, str | None, str | None] | None:
+def _resolve_open_model(user_model: str) -> tuple[str, str | None, str | None, str | None, dict | None] | None:
     """Match a user-provided model name to a litellm model string + base_url +
-    env_var + provider name from the dynamic open-models list.
+    env_var + provider name + extra_headers from the dynamic open-models list.
 
     Handles all input formats:
     - Canonical litellm: ``openai/kimi-k2.6`` (exact match)
@@ -193,7 +200,8 @@ def _resolve_open_model(user_model: str) -> tuple[str, str | None, str | None, s
     specific provider, pass ``provider/model`` — the provider prefix is
     matched against the env_var's provider name.
 
-    Returns ``(litellm_model, base_url, env_var, provider_name)`` or ``None``.
+    Returns ``(litellm_model, base_url, env_var, provider_name, extra_headers)``
+    or ``None``.
     """
     if not user_model:
         return None
@@ -202,12 +210,12 @@ def _resolve_open_model(user_model: str) -> tuple[str, str | None, str | None, s
     user_provider = user_model.split("/")[0] if "/" in user_model else ""
     models = _build_open_models()
     # Pass 1: exact full match (canonical litellm string)
-    for _env, _label, model, base in models:
+    for _env, _label, model, base, extra in models:
         if model == user_model:
-            return (model, base, _env, _label)
+            return (model, base, _env, _label, extra)
     # Pass 2: match by provider hint + last segment (e.g. "privatemodeai/kimi-k2.6")
     if user_provider:
-        for env, label, model, base in models:
+        for env, label, model, base, extra in models:
             model_last = model.split("/")[-1]
             # label looks like "kimi-k2.6 (PrivateMode AI)" — extract provider
             label_provider = ""
@@ -218,11 +226,11 @@ def _resolve_open_model(user_model: str) -> tuple[str, str | None, str | None, s
             if (model_last == user_last and
                 (user_provider.lower() in env_provider or
                  user_provider.lower() in label_provider.lower())):
-                return (model, base, env, label)
+                return (model, base, env, label, extra)
     # Pass 3: last-segment match (bare logical names, partial names)
-    for env, label, model, base in models:
+    for env, label, model, base, extra in models:
         if model.split("/")[-1] == user_last:
-            return (model, base, env, label)
+            return (model, base, env, label, extra)
     return None
 
 
@@ -287,7 +295,7 @@ def agent_models() -> list[dict]:
 def _model_key_env(model: str) -> str | None:
     """Env var name for the API key of a chosen open model."""
     model_last = model.split("/")[-1]
-    for env_key, _label, m, _base in _build_open_models():
+    for env_key, _label, m, _base, _extra in _build_open_models():
         if m == model or m.split("/")[-1] == model_last:
             return env_key
     return None
@@ -295,7 +303,7 @@ def _model_key_env(model: str) -> str | None:
 def _model_base_url(model: str) -> str | None:
     """base_url for a chosen open model (matches the dynamic model list)."""
     model_last = model.split("/")[-1]
-    for _env, _label, m, base in _build_open_models():
+    for _env, _label, m, base, _extra in _build_open_models():
         if m == model or m.split("/")[-1] == model_last:
             return base
     return None
@@ -755,20 +763,20 @@ class StrandsAdapter(BaseAdapter):
         if self.model:
             # CRITICAL: resolve through _resolve_open_model so we get the
             # canonical litellm model string (openai/<model_id>) + the correct
-            # api_base + env_var for this specific model. Without this, a
-            # panel-format string like "privatemodeai/kimi-k2.6" reaches
-            # LiteLLM directly and throws BadRequestError.
+            # api_base + env_var + extra_headers for this specific model.
+            # Without this, a panel-format string like "privatemodeai/kimi-k2.6"
+            # reaches LiteLLM directly and throws BadRequestError. Without
+            # extra_headers, OpenRouter free models fail.
             pair = _resolve_open_model(self.model)
             if pair:
-                model, base_url, key_env, provider_label = pair
+                model, base_url, key_env, provider_label, extra_headers = pair
             else:
                 # Fallback: use the raw model string + best-effort key/base lookup.
-                # This path may fail in LiteLLM if the string isn't a recognized
-                # litellm format, but we keep it for AGENT_OPEN_* overrides.
                 model = self.model
                 key_env = _model_key_env(model) or _os.environ.get("AGENT_OPEN_KEY_ENV", "")
                 base_url = _model_base_url(model)
                 provider_label = None
+                extra_headers = None
             if not key_env or not _os.environ.get(key_env, "").strip():
                 raise RuntimeError(f"no API key for model {model}")
         else:
@@ -777,6 +785,7 @@ class StrandsAdapter(BaseAdapter):
                 raise RuntimeError("no open-tier provider key available")
             key_env, model, base_url = picked
             provider_label = None
+            extra_headers = None
 
         # Record resolved routing for verification (snapshot + /api/agent response)
         self.resolved_model = model
@@ -785,9 +794,12 @@ class StrandsAdapter(BaseAdapter):
 
         # client_args pass straight to litellm.completion (api_base = custom
         # OpenAI-compatible endpoint, e.g. Z.ai for GLM, NVIDIA for Kimi).
+        # extra_headers is REQUIRED for OpenRouter (HTTP-Referer + X-Title).
         client_args: dict = {"api_key": _os.environ[key_env]}
         if base_url:
             client_args["api_base"] = base_url
+        if extra_headers:
+            client_args["extra_headers"] = extra_headers
         llm = LiteLLMModel(client_args=client_args, model_id=model)
 
 
@@ -1093,6 +1105,9 @@ class AgentSession:
                 stream_ev = new_ev
             self.updated = time.time()
             queues = list(self._stream_queues)
+            # Determine the event to persist (for non-thinking events, it's
+            # stream_ev; for thinking merges, we persist the accumulated event)
+            persist_ev = stream_ev
         for q in queues:
             try:
                 q.put_nowait(stream_ev)
@@ -1101,6 +1116,18 @@ class AgentSession:
                     self._stream_queues.remove(q)
                 except ValueError:
                     pass
+        # Persist new events to the DB so chat history survives restarts.
+        # Only persist events with a new seq (not thinking merges which reuse
+        # an existing seq). This is async (fire-and-forget) to avoid blocking
+        # the agent turn.
+        if self.chat_session_id and persist_ev.get("i", -1) > self.persisted_seq:
+            ev_i = persist_ev["i"]
+            self.persisted_seq = ev_i
+            try:
+                import chat_routes
+                chat_routes.append_chat_events(self.chat_session_id, [persist_ev])
+            except Exception:
+                pass  # best-effort — don't block the turn on DB errors
 
     def register_stream_queue(self, q: queue.Queue) -> None:
         with self.lock:
