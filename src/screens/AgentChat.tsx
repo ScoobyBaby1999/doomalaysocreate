@@ -301,16 +301,25 @@ export function AgentChat({ settings }: { settings: Settings }) {
           </div>
         )}
 
-        {/* Cost + token usage indicator */}
-        <div className="flex items-center gap-2 text-[10px] text-muted-foreground tabular-nums">
+        {/* Cost + token usage indicator with hover breakdown */}
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground tabular-nums">
           {cost != null && cost > 0 && (
-            <span title={`Cost: $${cost.toFixed(4)}`}>
-              ${cost.toFixed(4)}
+            <span
+              className="cursor-help"
+              title={`Cost breakdown:\nTotal: $${cost.toFixed(4)}`}
+            >
+              <span className="text-amber-400/80">${cost.toFixed(4)}</span>
             </span>
           )}
           {lastUsage && (
-            <span title={`Tokens: ${lastUsage.input_tokens} in → ${lastUsage.output_tokens} out (${lastUsage.total_tokens} total)`}>
-              {lastUsage.total_tokens.toLocaleString()} tok
+            <span
+              className="cursor-help flex items-center gap-1"
+              title={`Token breakdown:\nInput: ${lastUsage.input_tokens.toLocaleString()}\nOutput: ${lastUsage.output_tokens.toLocaleString()}\nTotal: ${lastUsage.total_tokens.toLocaleString()}`}
+            >
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-60">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+              </svg>
+              {lastUsage.total_tokens.toLocaleString()}
             </span>
           )}
         </div>
