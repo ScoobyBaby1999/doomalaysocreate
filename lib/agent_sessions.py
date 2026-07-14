@@ -811,6 +811,25 @@ class StrandsAdapter(BaseAdapter):
         from strands import Agent
         from strands.models.litellm import LiteLLMModel
 
+        # Subclass LiteLLMModel to use non-streaming mode internally.
+        # Some providers (OpenRouter free, NVIDIA) don't return toolUseId
+        # in streaming tool_use deltas → KeyError in Strands event loop.
+        # Non-streaming mode processes the full response at once and
+        # _process_tool_calls generates UUIDs for missing IDs.
+        class NonStreamingLiteLLMModel(LiteLLMModel):
+            async def stream(self, messages, tool_specs=None, system_prompt=None, *,
+                             tool_choice=None, system_prompt_content=None, **kwargs):
+                litellm_request = self.format_request(
+                    messages=messages,
+                    tool_specs=tool_specs,
+                    system_prompt=system_prompt,
+                    tool_choice=tool_choice,
+                    system_prompt_content=system_prompt_content,
+                    **kwargs,
+                )
+                async for chunk in self._handle_non_streaming_response(litellm_request):
+                    yield chunk
+
         # headless: skip interactive consent prompts (no TTY in the Space container).
         # must be set before importing strands_tools so their module-level checks see it.
         _os.environ["BYPASS_TOOL_CONSENT"] = "true"
@@ -855,12 +874,7 @@ class StrandsAdapter(BaseAdapter):
             client_args["api_base"] = base_url
         if extra_headers:
             client_args["extra_headers"] = extra_headers
-        # Disable streaming for tool calls — some providers (OpenRouter free,
-        # NVIDIA) don't return toolUseId in streaming tool_use deltas, which
-        # causes a KeyError in Strands' event loop. Non-streaming mode
-        # processes the full response at once and handles missing IDs.
-        client_args["stream"] = False
-        llm = LiteLLMModel(client_args=client_args, model_id=model)
+        llm = NonStreamingLiteLLMModel(client_args=client_args, model_id=model)
 
 
         # the agent works in its session workspace; tools are imported defensively
