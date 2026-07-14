@@ -6,6 +6,8 @@ import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
 import { ConsciousScreen } from "./screens/ConsciousScreen";
 import { DebugScreen } from "./screens/DebugScreen";
+import { MemoryScreen } from "./screens/MemoryScreen";
+import { BenchmarksScreen } from "./screens/BenchmarksScreen";
 import { ModelSelectOverlay } from "./components/ModelSelectOverlay";
 import { ProvidersDialog } from "./components/ProvidersDialog";
 import { useModelStore } from "./lib/model-store";
@@ -14,7 +16,7 @@ import { getJWTSub } from "./lib/jwt";
 import { deriveToken } from "./api/token";
 import type { Settings } from "./api/panel";
 
-type Tab = "agentchat" | "conscious" | "workspaces" | "settings" | "debug";
+type Tab = "agentchat" | "conscious" | "workspaces" | "memory" | "benchmarks" | "settings" | "debug";
 
 export default function App() {
   const [settings, setSettings] = useSettings();
@@ -230,6 +232,10 @@ export default function App() {
           <ConsciousScreen settings={settings} />
         ) : tab === "workspaces" ? (
           <WorkspaceScreen settings={settings} onChange={setSettings} />
+        ) : tab === "memory" ? (
+          <MemoryScreen settings={settings} />
+        ) : tab === "benchmarks" ? (
+          <BenchmarksScreen settings={settings} />
         ) : tab === "debug" ? (
           <DebugScreen settings={settings} />
         ) : (
@@ -238,7 +244,7 @@ export default function App() {
       </main>
 
       <nav className="flex border-t border-border overflow-x-auto">
-        {(["agentchat", "conscious", "workspaces", "settings", "debug"] as Tab[]).map((t) => (
+        {(["agentchat", "conscious", "workspaces", "memory", "benchmarks", "settings", "debug"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -260,6 +266,22 @@ export default function App() {
                   <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
                 </svg>
                 <span className="text-[10px]">Mind</span>
+              </>
+            ) : t === "memory" ? (
+              <>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2v20M2 12h20M5 5l14 14M19 5L5 19" opacity="0.4"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+                <span className="text-[10px]">Memory</span>
+              </>
+            ) : t === "benchmarks" ? (
+              <>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 3v18h18"/>
+                  <path d="M7 14l4-4 4 4 5-5"/>
+                </svg>
+                <span className="text-[10px]">Models</span>
               </>
             ) : t === "debug" ? (
               <>
