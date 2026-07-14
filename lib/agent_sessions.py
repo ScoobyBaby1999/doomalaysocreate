@@ -861,41 +861,77 @@ class StrandsAdapter(BaseAdapter):
         # the agent works in its session workspace; tools are imported defensively
         # so a renamed/missing tool never blocks startup.
         # Tool suite — FULL capabilities for a cloud-hosted virtual PC.
-        # shell is FIRST (highest priority) and has a proper TOOL_SPEC so
-        # Strands registers it correctly + the LLM knows how to use it.
-        # python_repl is REMOVED — it has output capture issues in this
-        # environment and the shell tool can run python3 anyway.
+        # shell is FIRST (highest priority) and uses the @tool decorator which
+        # handles ALL Strands format requirements (toolUseId, inputSchema, etc.)
+        # automatically. The module-based approach had too many format issues.
         import types as _types
         tools = []
 
         # 1. shell (FIRST — primary tool for all command-line operations)
-        # CRITICAL: Strands' load_tools_from_module requires:
-        #   a) The module has __file__ (otherwise it's not recognized as a module)
-        #   b) The function name matches the module name (module "shell" → function "shell")
-        # Without these, Strands silently drops the tool ("unrecognized tool specification").
-        shell_mod = _types.ModuleType("shell")
-        shell_mod.__file__ = __file__  # required for Strands module detection
-        shell_mod.shell = _guarded_shell  # function name MUST match module name
-        shell_mod.TOOL_SPEC = {
-            "name": "shell",
-            "description": (
+        # Use the @tool decorator which handles all Strands format requirements.
+        try:
+            from strands import tool as strands_tool_decorator
+
+            @strands_tool_decorator(name="shell", description=(
                 "Execute a bash command in the workspace sandbox. Returns "
                 "stdout + stderr. Use this for ALL command-line operations: "
                 "ls, cat, grep, find, git, python3, pip, npm, make, curl, etc. "
                 "This is a REAL bash shell with full output capture."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The bash command to execute",
-                    },
+            ))
+            def shell(command: str) -> str:
+                """Execute a bash command and return stdout + stderr."""
+                import subprocess
+                workdir = str(getattr(_thread_local, "workspace", Path.cwd()))
+                stripped = command.strip()
+
+                # Intercept network git operations for security
+                workspace_id = getattr(_thread_local, "workspace_id", None)
+                if workspace_id and (
+                    stripped.startswith("git push")
+                    or stripped.startswith("git pull")
+                    or stripped.startswith("git fetch")
+                ):
+                    is_force = stripped.startswith("git push") and (
+                        "-f " in stripped or "--force" in stripped)
+                    if not is_force:
+                        result = _route_network_git(stripped, workspace_id)
+                        parts = [c.get("text", "") for c in result.get("content", [])]
+                        return "\n".join(parts) or "(no output)"
+
+                try:
+                    result = subprocess.run(
+                        stripped, shell=True, cwd=workdir,
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    output = result.stdout
+                    if result.stderr:
+                        output = (output + "\n" if output else "") + result.stderr
+                    if not output.strip():
+                        output = "(no output)"
+                    if result.returncode != 0:
+                        output = f"Exit code: {result.returncode}\n{output}"
+                    return output[:50000]
+                except subprocess.TimeoutExpired:
+                    return f"Command timed out after 300s: {stripped[:200]}"
+                except Exception as exc:
+                    return f"Shell error: {exc}"
+
+            tools.append(shell)
+        except Exception:
+            # Fallback: module-based approach (less reliable but better than nothing)
+            shell_mod = _types.ModuleType("shell")
+            shell_mod.__file__ = __file__
+            shell_mod.shell = _guarded_shell
+            shell_mod.TOOL_SPEC = {
+                "name": "shell",
+                "description": "Execute a bash command in the workspace sandbox.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
                 },
-                "required": ["command"],
-            },
-        }
-        tools.append(shell_mod)
+            }
+            tools.append(shell_mod)
 
         # 2. File operations
         for mod_name in ("file_read", "file_write", "editor"):
@@ -923,51 +959,32 @@ class StrandsAdapter(BaseAdapter):
             except Exception:
                 continue
 
-        # Register the agent_panel tool so the agent can invoke the judge
-        # panel directly from chat. Same module registration pattern as shell:
-        # __file__ required + function name matches module name.
+        # Register the agent_panel tool using @tool decorator (same as shell).
+        # The decorator handles all Strands format requirements automatically.
         try:
             import conscious_tools
             sess = self._session_ref()
-            if sess is not None:
-                def _panel_tool_wrapper(tool_use=None, **kwargs):
-                    """Invoke the judge panel for a critique."""
-                    # Extract args from tool_use (Strands format) or kwargs
-                    args = {}
-                    tool_use_id = ""
-                    if tool_use and isinstance(tool_use, dict):
-                        args = tool_use.get("input", {}) or {}
-                        tool_use_id = tool_use.get("toolUseId", "")
-                    if not args:
-                        args = kwargs
+            if sess is not None and 'strands_tool_decorator' in dir():
+                @strands_tool_decorator(name="agent_panel", description=(
+                    "Invoke the multi-model judge panel for a critique. "
+                    "Fans the prompt out to a diverse panel of frontier LLMs "
+                    "and returns merged results. Use for code review, plan "
+                    "critique, or getting multiple expert opinions."
+                ))
+                def agent_panel(prompt: str, panel: list = None, effort: str = "med") -> str:
+                    """Invoke the judge panel. Returns merged critique results."""
+                    args = {"prompt": prompt}
+                    if panel:
+                        args["panel"] = panel
+                    if effort:
+                        args["effort"] = effort
                     result = conscious_tools._agent_panel(sess, args)
-                    # Ensure toolUseId is in the result (Strands requirement)
-                    if isinstance(result, dict) and "toolUseId" not in result:
-                        result["toolUseId"] = tool_use_id
-                    return result
-                panel_mod = _types.ModuleType("agent_panel")
-                panel_mod.__file__ = __file__
-                panel_mod.agent_panel = _panel_tool_wrapper  # name matches module
-                panel_mod.TOOL_SPEC = {
-                    "name": "agent_panel",
-                    "description": (
-                        "Invoke the multi-model judge panel for a critique. "
-                        "Fans the prompt out to a diverse panel of frontier LLMs "
-                        "and returns merged results. Use for code review, plan "
-                        "critique, or getting multiple expert opinions."
-                    ),
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "prompt": {"type": "string", "description": "The critique prompt"},
-                            "panel": {"type": "array", "items": {"type": "string"},
-                                      "description": "Optional: list of model names"},
-                            "effort": {"type": "string", "description": "low|med|high|max"},
-                        },
-                        "required": ["prompt"],
-                    },
-                }
-                tools.append(panel_mod)
+                    if isinstance(result, dict):
+                        parts = [c.get("text", "") for c in result.get("content", [])]
+                        return "\n".join(parts) or str(result)
+                    return str(result)
+
+                tools.append(agent_panel)
         except Exception:
             pass
 
