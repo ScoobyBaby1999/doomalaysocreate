@@ -98,6 +98,7 @@ export interface ChatState {
   effort: "low" | "med" | "high" | "max";
   webSearch: boolean;
   deepResearch: boolean;
+  mode: "auto" | "build" | "plan";
 
   // Files
   files: AgentFile[];
@@ -136,6 +137,7 @@ export interface ChatState {
   setEffort: (effort: "low" | "med" | "high" | "max") => void;
   toggleWebSearch: () => void;
   toggleDeepResearch: () => void;
+  setMode: (mode: "auto" | "build" | "plan") => void;
   setSidebarOpen: (open: boolean) => void;
   setFileDrawerOpen: (open: boolean) => void;
   setPanelDrawerOpen: (open: boolean) => void;
@@ -620,6 +622,7 @@ export const useChatStore = create<ChatState>()(
       effort: "med",
       webSearch: false,
       deepResearch: false,
+      mode: "auto",
 
       files: [],
       fileDrawerOpen: false,
@@ -645,6 +648,7 @@ export const useChatStore = create<ChatState>()(
       setEffort: (effort) => set({ effort }),
       toggleWebSearch: () => set((s) => ({ webSearch: !s.webSearch })),
       toggleDeepResearch: () => set((s) => ({ deepResearch: !s.deepResearch })),
+      setMode: (mode) => set({ mode }),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
       setFileDrawerOpen: (open) => set({ fileDrawerOpen: open }),
       setPanelDrawerOpen: (open) => set({ panelDrawerOpen: open }),
@@ -998,6 +1002,7 @@ async function _runTurn(
         effort: get().effort,
         web_search: get().webSearch,
         deep_research: get().deepResearch,
+        mode: get().mode,
       },
     );
     agentSid = start.session_id;

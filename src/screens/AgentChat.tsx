@@ -55,6 +55,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const effort = useChatStore((s) => s.effort);
   const webSearch = useChatStore((s) => s.webSearch);
   const deepResearch = useChatStore((s) => s.deepResearch);
+  const mode = useChatStore((s) => s.mode);
   const files = useChatStore((s) => s.files);
   const fileDrawerOpen = useChatStore((s) => s.fileDrawerOpen);
   const panelDrawerOpen = useChatStore((s) => s.panelDrawerOpen);
@@ -74,6 +75,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
   // Actions (stable references from zustand — don't cause re-renders)
   const setInputText = useChatStore((s) => s.setInputText);
   const setEffort = useChatStore((s) => s.setEffort);
+  const setMode = useChatStore((s) => s.setMode);
   const toggleWebSearch = useChatStore((s) => s.toggleWebSearch);
   const toggleDeepResearch = useChatStore((s) => s.toggleDeepResearch);
   const setSidebarOpen = useChatStore((s) => s.setSidebarOpen);
@@ -516,6 +518,22 @@ export function AgentChat({ settings }: { settings: Settings }) {
               </svg>
               Deep
             </button>
+            <div className="w-px h-4 bg-border mx-1 shrink-0" />
+            <span className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mr-1 shrink-0">Mode</span>
+            {(["auto", "build", "plan"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors shrink-0 capitalize ${
+                  mode === m
+                    ? "border-accent text-accent bg-accent/10"
+                    : "border-border text-muted-foreground hover:border-accent/50"
+                }`}
+                title={m === "auto" ? "Execute autonomously" : m === "build" ? "Step-by-step with confirmation" : "Plan first, then execute"}
+              >
+                {m}
+              </button>
+            ))}
           </div>
         )}
 

@@ -155,7 +155,7 @@ export class AgentClient {
     model?: string,
     workspaceId?: string,
     chatSessionId?: string,
-    opts?: { effort?: string; web_search?: boolean; deep_research?: boolean },
+    opts?: { effort?: string; web_search?: boolean; deep_research?: boolean; mode?: string },
   ) {
     const body: Record<string, unknown> = { message };
     if (sessionId) body.session_id = sessionId;
@@ -165,6 +165,7 @@ export class AgentClient {
     if (opts?.effort) body.effort = opts.effort;
     if (opts?.web_search) body.web_search = true;
     if (opts?.deep_research) body.deep_research = true;
+    if (opts?.mode) body.mode = opts.mode;
     return this.req<AgentStart>("/api/agent", {
       method: "POST",
       body: JSON.stringify(body),
