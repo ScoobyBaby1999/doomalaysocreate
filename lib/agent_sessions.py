@@ -1510,11 +1510,29 @@ class AgentSession:
         self.status = "starting"
         self.closed = False
         self.lock = threading.Lock()
+        # BUGFIX (double-response on model switch, Bug 2): a brand-new
+        # AgentSession ALWAYS starts with an empty event buffer and seq
+        # numbering from 0. The seq is derived from len(self.events) in
+        # emit() (new_ev = {"i": len(self.events), ...}), so a fresh
+        # session's first event is always i=0. When the user switches
+        # models mid-conversation, get_or_create() closes the old session
+        # and creates a new one here -- the new session's events start
+        # from i=0, independent of the old session's seq numbering. The
+        # frontend MUST reset its _lastEventSeq cursor when it detects a
+        # new session_id (server returns a different session_id from
+        # POST /api/agent); otherwise it would poll the new stream with
+        # a stale since=<old_max_seq> and miss all events. The backend's
+        # subscribe() also guards against this by resetting an out-of-
+        # range cursor to 0 (see subscribe()).
         self.events: list[dict] = []
         self.inbox: queue.Queue = queue.Queue()
         self._stream_queues: list[queue.Queue] = []
         self.adapter: BaseAdapter | None = None
         self._interrupting = False
+        # Bug 3: auto-title generation. Set to True after we've generated
+        # (or attempted to generate) a title for this session's chat
+        # session, so we only do it once (on the first completed turn).
+        self._title_generated = False
         # use provided workspace path (user's workspace) or create ephemeral one
         if workspace_path is not None:
             self.workspace = workspace_path
@@ -1572,7 +1590,16 @@ class AgentSession:
         for q in queues:
             try:
                 q.put_nowait(stream_ev)
-            except (queue.Full, ValueError):
+            except queue.Full:
+                # Queue full -> the SSE client is too slow. Drop THIS event
+                # but keep the queue registered so future events still flow.
+                # Previously we removed the queue on overflow, which silently
+                # disconnected slow clients mid-turn (they'd see "only my
+                # message, no reply" because the assistant event was the one
+                # that overflowed). The client can recover by reconnecting
+                # with since=<max_seen> to get a fresh replay.
+                pass
+            except ValueError:
                 try:
                     self._stream_queues.remove(q)
                 except ValueError:
@@ -1603,23 +1630,52 @@ class AgentSession:
 
     def subscribe(self, since: int = 0):
         """Subscribe to live events for SSE streaming. Returns a queue.Queue
-        that receives every new event as it's emitted. Events with i < since
+        that receives every new event as it's emitted. Events with i >= since
         are replayed first (so a late subscriber catches up), then the queue
         stays open for live events. Call unsubscribe(q) when done.
 
         This is the method the SSE endpoint looks for via getattr(session,
         'subscribe', None). Without it, the SSE handler falls back to polling
-        (200ms snapshots) — which is why streaming felt choppy/non-live."""
-        q: queue.Queue = queue.Queue(maxsize=256)
-        # Replay events the subscriber hasn't seen yet.
+        (200ms snapshots) — which is why streaming felt choppy/non-live.
+
+        BUGFIX (first-message-no-response): the previous implementation
+        snapshotted self.events FIRST, then registered the queue. That left
+        a race window: an event emitted between the snapshot and the
+        registration would be in NEITHER the snapshot (already taken) NOR
+        the queue (not yet registered) — lost forever. On a fresh session
+        where the agent emits status/user/assistant events in quick
+        succession before the SSE client connects, this could drop the
+        assistant event so the user saw "only my message, no reply".
+
+        Fix: register the queue AND snapshot self.events under the SAME
+        lock. emit() also holds this lock when appending to self.events
+        and snapshotting _stream_queues, so the two operations are atomic
+        with respect to emit():
+          - emit() that ran BEFORE we acquired the lock: its event is in
+            self.events (so it's in our replay) AND it didn't push to our
+            queue (we hadn't registered yet) -> exactly one copy in the q.
+          - emit() that runs AFTER we release the lock: its event is NOT
+            in our replay (snapshot already taken) AND it pushes to our
+            queue (we registered it) -> exactly one copy in the q.
+        No duplicates, no missing events."""
+        q: queue.Queue = queue.Queue(maxsize=512)
         with self.lock:
-            replay = [e for e in self.events if (e.get("i", 0) >= since)]
+            # Register the queue FIRST (under the lock) so emit() can't
+            # miss it, then snapshot the events for replay.
+            self._stream_queues.append(q)
+            # If the client's cursor is AHEAD of our buffer (e.g., a stale
+            # cursor carried over from a previous agent session after a
+            # model switch), reset to 0 so we replay the full transcript
+            # from the start instead of returning an empty stream that
+            # leaves the user with no assistant reply.
+            max_seq = self.events[-1].get("i", -1) if self.events else -1
+            effective_since = since if since <= max_seq else 0
+            replay = [e for e in self.events if (e.get("i", 0) >= effective_since)]
         for ev in replay:
             try:
                 q.put_nowait(ev)
             except queue.Full:
                 pass  # drop backlog if subscriber is slow
-        self.register_stream_queue(q)
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
@@ -1735,7 +1791,138 @@ class AgentSession:
                     self._set_status("error", detail=_clip(str(exc), 300))
             finally:
                 self._interrupting = False
+                # Bug 3: auto-generate a title for the chat session on the
+                # first completed turn. The chat session is created with
+                # title="New Chat" by _handle_agent_post; we replace it
+                # with a 3-6 word title derived from the user's first
+                # message via a lightweight LLM call (falling back to a
+                # plain truncation if no panel/LLM is available). Emits a
+                # `title` event so the frontend sidebar updates live.
+                if (not self._title_generated and self.chat_session_id
+                        and msg and msg.strip()):
+                    self._title_generated = True
+                    try:
+                        self._maybe_auto_title(msg.strip())
+                    except Exception:
+                        pass  # best-effort -- never block the turn loop
         adapter.close()
+
+    def _maybe_auto_title(self, first_user_msg: str) -> None:
+        """Generate a 3-6 word title for the chat session from the user's
+        first message and emit a `title` event. Best-effort: falls back to
+        a plain truncation if no panel/LLM is available or the LLM call
+        fails. Idempotent (caller guards with self._title_generated)."""
+        import chat_routes
+        # Skip if the session already has a non-default title (e.g., the
+        # user set one manually before sending the first message).
+        cs = chat_routes.get_chat_session(self.chat_session_id)
+        if not cs:
+            return
+        existing_title = (cs.get("title") or "").strip()
+        if existing_title and existing_title != "New Chat":
+            return
+
+        title: str | None = None
+        # Try a lightweight LLM call via the panel (3-6 word title).
+        if self.panel is not None:
+            try:
+                title = self._llm_title(first_user_msg)
+            except Exception:
+                title = None
+        # Fallback: plain truncation (same as chat_routes._auto_title).
+        if not title or not title.strip():
+            title = chat_routes._auto_title(first_user_msg, max_len=48)
+        title = title.strip()[:80] or "New Chat"
+
+        chat_routes.update_chat_session(self.chat_session_id, title=title)
+        # Emit a title event so the frontend can update its sidebar
+        # immediately without re-fetching the session list.
+        self.emit({"type": "title", "title": title,
+                   "chat_session_id": self.chat_session_id})
+
+    def _llm_title(self, user_msg: str) -> str | None:
+        """Use the panel to generate a 3-6 word title via a single
+        lightweight LLM call. Returns None on any failure (caller falls
+        back to truncation). Runs in a private event loop so it works
+        from the synchronous _run() worker thread."""
+        import asyncio
+        import httpx
+        from content.roles import Roles
+        from scheduler import call_slot, ProviderError
+
+        # Pick a slot: prefer the session's model, else the panel's
+        # default panel, else the first available candidate.
+        pick_role = Roles("critiquer")
+        logical: str | None = None
+        candidates: list = []
+        if self.model:
+            logical, candidates = self.panel.resolve_candidates(self.model)
+        if not candidates and self.panel.default_panel:
+            logical, candidates = self.panel.resolve_candidates(
+                self.panel.default_panel[0])
+        if not candidates:
+            return None
+        picker = getattr(self.panel.scheduler, "pick_slot_from", None)
+        picked = None
+        if callable(picker):
+            try:
+                picked = picker(candidates, pick_role)
+            except Exception:
+                picked = None
+        if picked is None:
+            picked = candidates[0]
+
+        # Keep the title-gen prompt tiny so it's cheap and fast.
+        sys_prompt = (
+            "You generate a short chat title. Read the user's first message "
+            "and reply with ONLY a 3-6 word title (no quotes, no punctuation "
+            "at the end, no prefix like 'Title:'). Plain text, no markdown."
+        )
+        # Truncate the user message to keep the prompt small.
+        user_excerpt = user_msg[:500]
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_excerpt},
+        ]
+
+        async def _call() -> str | None:
+            async with httpx.AsyncClient() as client:
+                try:
+                    content, _usage = await call_slot(
+                        client, picked, messages,
+                        max_tokens=32, timeout_s=20.0)
+                except ProviderError:
+                    return None
+                except Exception:
+                    return None
+            return content
+
+        loop = asyncio.new_event_loop()
+        try:
+            content = loop.run_until_complete(_call())
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+        if not content:
+            return None
+        # Clean up: strip quotes, newlines, "Title:" prefix, trailing period.
+        content = content.strip()
+        for prefix in ("Title:", "title:", "TITLE:"):
+            if content.startswith(prefix):
+                content = content[len(prefix):].strip()
+        content = content.strip('"').strip("'").strip()
+        content = content.split(chr(10))[0].strip()
+        if content.endswith("."):
+            content = content[:-1].strip()
+        # Collapse whitespace.
+        content = " ".join(content.split())
+        # Sanity-check length: if the LLM returned something absurdly long
+        # or empty, signal failure so the caller falls back.
+        if not content or len(content) > 80:
+            return None
+        return content
 
 
 _sessions: dict[str, AgentSession] = {}

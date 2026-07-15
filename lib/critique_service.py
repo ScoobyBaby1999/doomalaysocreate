@@ -401,12 +401,25 @@ class Panel:
                 "pricing": pricing,
             })
         models.sort(key=lambda m: (m["arena_elo"] or 0), reverse=True)
+        # Default templates grouped by kind, so the frontend can populate
+        # the tool popovers (websearch / deepresearch / judge) without a
+        # second round-trip. System templates are seeded idempotently on
+        # first access via template_library.seed_defaults().
+        templates_by_kind: dict[str, list] = {}
+        try:
+            import template_library as _tl
+            for kind in ("websearch", "deepresearch", "judge", "chat", "custom"):
+                templates_by_kind[kind] = _tl.list_default_templates(kind=kind)
+        except Exception:
+            # Best-effort: never break /api/roster on a template-library error.
+            templates_by_kind = {}
         return {
             "models": models,
             "frontier_total": frontier_total,
             "frontier_privacy_safe_available": frontier_safe_available,
             "frontier_ok": frontier_safe_available >= 2,
             "benchmark_note": "indicative, hand-curated (see benchmarks.json) - not authoritative",
+            "templates": templates_by_kind,
         }
 
 
@@ -1243,10 +1256,20 @@ class Handler(BaseHTTPRequestHandler):
                     "POST /api/critique": "critique a plan/schematic (preset)",
                     "POST /api/panel": "general: any role or custom system prompt",
                     "POST /api/run": "orchestrator: template id | inline schematic | template:'auto' (planner); judge loop + file artifacts",
-                    "GET /api/templates": "list built-in + user templates",
-                    "GET /api/templates/<id>": "fetch one template's schematic",
-                    "POST /api/templates": "save a user template {id, schematic} (persisted)",
-                    "DELETE /api/templates/<id>": "delete a user template",
+                    "GET /api/templates": "list the caller's templates (private + public)",
+                    "GET /api/templates/explore": "browse public templates (sort=hearts|recent|relevant, query, kind)",
+                    "GET /api/templates/<id>": "fetch one template (full markdown)",
+                    "POST /api/templates": "create a template {name, description, markdown, kind, tags, is_public}",
+                    "PATCH /api/templates/<id>": "update a template (owner only)",
+                    "DELETE /api/templates/<id>": "delete a template (owner only)",
+                    "POST /api/templates/<id>/heart": "toggle heart on a template",
+                    "POST /api/templates/<id>/download": "download a template (creates a local copy)",
+                    "POST /api/templates/<id>/publish": "publish to the global library",
+                    "POST /api/templates/<id>/unpublish": "unpublish from the global library",
+                    "GET /api/orchestrator/templates": "list built-in + user orchestrator schematic templates",
+                    "GET /api/orchestrator/templates/<id>": "fetch one orchestrator template's schematic",
+                    "POST /api/orchestrator/templates": "save a user orchestrator template {id, schematic}",
+                    "DELETE /api/orchestrator/templates/<id>": "delete a user orchestrator template",
                     "GET /api/jobs/<id>": "poll an async job/run (when called with async:true)",
                     "POST /api/agent": "agent chat: {message, session_id?} -> 202 {session_id}",
                     "GET /api/agent/<sid>?since=<n>": "poll the agent transcript (delta events)",
@@ -1309,15 +1332,29 @@ class Handler(BaseHTTPRequestHandler):
                 "logical_models": sorted(panel.logical_models.keys()),
             })
             return
+        # --- Template library (GET /api/templates*) -- bearer-gated ---------
+        # The new template library handles user-created reusable templates
+        # (websearch/deepresearch/judge/chat/custom). It dispatches via
+        # template_library.handle_request and supports:
+        #   GET /api/templates           -> caller's templates (private + public)
+        #   GET /api/templates/explore   -> browse public templates
+        #   GET /api/templates/<id>      -> fetch one template
         if route == "/api/templates" or route.startswith("/api/templates/"):
+            import template_library
+            template_library.handle_request("GET", self.path, {}, self)
+            return
+        # --- Orchestrator schematic templates (moved to /api/orchestrator/templates
+        #     to free up /api/templates for the new template library). These are
+        #     the JSON-stage templates used by POST /api/run with a template id. ---
+        if route == "/api/orchestrator/templates" or route.startswith("/api/orchestrator/templates/"):
             if not self._auth_ok():
                 self._send_json(401, {"error": "missing or invalid bearer token"})
                 return
             panel: Panel = self.server.panel  # type: ignore[attr-defined]
-            if route == "/api/templates":
+            if route == "/api/orchestrator/templates":
                 self._send_json(200, {"templates": panel.templates.list()})
             else:
-                tid = route[len("/api/templates/"):]
+                tid = route[len("/api/orchestrator/templates/"):]
                 data = panel.templates.get_dict(tid)
                 if data is None:
                     self._send_json(404, {"error": f"no such template {tid!r}"})
@@ -3455,11 +3492,30 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._handle_chat_judge(payload)
             return
+        # --- Template library (POST /api/templates*) — bearer-gated ----------
+        # Handles: POST /api/templates (create), POST /api/templates/<id>/heart,
+        # POST /api/templates/<id>/download, POST /api/templates/<id>/publish,
+        # POST /api/templates/<id>/unpublish. Body parsed inside the dispatcher.
+        if route == "/api/templates" or route.startswith("/api/templates/"):
+            import template_library
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            template_library.handle_request("POST", self.path, payload, self)
+            return
+        # --- Orchestrator schematic templates (moved to /api/orchestrator/templates) ---
+        if route == "/api/orchestrator/templates":
+            payload = self._auth_and_body()
+            if payload is None:
+                return
+            panel: Panel = self.server.panel  # type: ignore[attr-defined]
+            self._handle_template_save(payload, panel)
+            return
         # -----------------------------------------------------------------------
         # POST /api/agent shares the same _auth_and_body gate as the panel routes
         # (service bearer token in Authorization).  GitHub identity for workspace
         # ownership is carried separately in the X-JWT header (see _require_user_from_jwt).
-        if route not in ("/api/critique", "/api/panel", "/api/run", "/api/templates", "/api/agent"):
+        if route not in ("/api/critique", "/api/panel", "/api/run", "/api/agent"):
             self._send_json(404, {"error": "not found"})
             return
         payload = self._auth_and_body()
@@ -3471,9 +3527,6 @@ class Handler(BaseHTTPRequestHandler):
         panel: Panel = self.server.panel  # type: ignore[attr-defined]
         is_async = bool(payload.get("async"))
 
-        if route == "/api/templates":
-            self._handle_template_save(payload, panel)
-            return
         if route == "/api/run":
             self._handle_run(payload, panel, is_async)
             return
@@ -3567,12 +3620,18 @@ class Handler(BaseHTTPRequestHandler):
             if ws_id:
                 self._handle_workspace_delete(ws_id)
                 return
-        # template deletion
-        if not route.startswith("/api/templates/"):
+        # --- Template library (DELETE /api/templates/<id>) — delete a template
+        #     (owner only). Body not required; auth + identity handled inside. ---
+        if route == "/api/templates" or route.startswith("/api/templates/"):
+            import template_library
+            template_library.handle_request("DELETE", self.path, {}, self)
+            return
+        # --- Orchestrator schematic templates (moved to /api/orchestrator/templates) ---
+        if not route.startswith("/api/orchestrator/templates/"):
             self._send_json(404, {"error": "not found"})
             return
         panel: Panel = self.server.panel  # type: ignore[attr-defined]
-        tid = route[len("/api/templates/"):]
+        tid = route[len("/api/orchestrator/templates/"):]
         try:
             removed = panel.templates.delete(tid)
         except OrchestrateError as e:
@@ -3601,6 +3660,15 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             chat_jobs.handle_request("PATCH", self.path, payload, self)
+            return
+        # --- Template library (PATCH /api/templates/<id>) — update a template
+        #     (owner only). Body parsed inside the dispatcher. ---
+        if route == "/api/templates" or route.startswith("/api/templates/"):
+            import template_library
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            template_library.handle_request("PATCH", self.path, payload, self)
             return
         self._send_json(404, {"error": "not found"})
 
