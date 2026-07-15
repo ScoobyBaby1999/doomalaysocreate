@@ -8,6 +8,7 @@ import { ConsciousScreen } from "./screens/ConsciousScreen";
 import { DebugScreen } from "./screens/DebugScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
 import { BenchmarksScreen } from "./screens/BenchmarksScreen";
+import { ProvidersScreen } from "./screens/ProvidersScreen";
 import { ModelSelectOverlay } from "./components/ModelSelectOverlay";
 import { ProvidersDialog } from "./components/ProvidersDialog";
 import { useModelStore } from "./lib/model-store";
@@ -16,7 +17,7 @@ import { getJWTSub } from "./lib/jwt";
 import { deriveToken } from "./api/token";
 import type { Settings } from "./api/panel";
 
-type Tab = "agentchat" | "conscious" | "workspaces" | "memory" | "benchmarks" | "settings" | "debug";
+type Tab = "agentchat" | "conscious" | "workspaces" | "memory" | "benchmarks" | "providers" | "settings" | "debug";
 
 export default function App() {
   const [settings, setSettings] = useSettings();
@@ -237,6 +238,8 @@ export default function App() {
           <MemoryScreen settings={settings} />
         ) : tab === "benchmarks" ? (
           <BenchmarksScreen settings={settings} />
+        ) : tab === "providers" ? (
+          <ProvidersScreen settings={settings} />
         ) : tab === "debug" ? (
           <DebugScreen settings={settings} />
         ) : (
@@ -245,7 +248,7 @@ export default function App() {
       </main>
 
       <nav className="flex border-t border-border overflow-x-auto no-scrollbar">
-        {(["agentchat", "conscious", "workspaces", "memory", "benchmarks", "settings", "debug"] as Tab[]).map((t) => (
+        {(["agentchat", "conscious", "workspaces", "memory", "benchmarks", "providers", "settings", "debug"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -286,6 +289,14 @@ export default function App() {
                 </svg>
                 <span className="text-[10px]">Models</span>
               </>
+            ) : t === "providers" ? (
+              <>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="6" width="20" height="12" rx="2"/>
+                  <path d="M6 12h.01M10 12h.01M14 12h.01M18 12h.01"/>
+                </svg>
+                <span className="text-[10px]">Keys</span>
+              </>
             ) : t === "debug" ? (
               <>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -293,6 +304,14 @@ export default function App() {
                   <path d="M12 16v-4M12 8h.01"/>
                 </svg>
                 <span className="text-[10px]">Debug</span>
+              </>
+            ) : t === "settings" ? (
+              <>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3"/>
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                </svg>
+                <span className="text-[10px]">Settings</span>
               </>
             ) : (
               t

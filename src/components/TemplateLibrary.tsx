@@ -82,8 +82,14 @@ export function TemplateLibrary({
   // Selected template (right panel preview)
   const [selected, setSelected] = useState<Template | null>(null);
 
+  /** On mobile (<=480px), selecting a template takes over the entire panel
+   *  with a "back" button. We track this separately from `selected` so the
+   *  desktop right-column preview can stay in sync without forcing the
+   *  mobile takeover on desktop. */
+  const [mobilePreview, setMobilePreview] = useState(false);
+
   // Editor state — when set, the editor form replaces the list+preview
-  // (full-modal). Null = no editor open.
+  // (full-modal on desktop, bottom sheet on mobile). Null = no editor open.
   const [editing, setEditing] = useState<Template | null>(null);
   const [creating, setCreating] = useState(false);
 
@@ -93,6 +99,7 @@ export function TemplateLibrary({
       setTab(initialTab);
       setKindFilter(initialKind);
       setSelected(null);
+      setMobilePreview(false);
       setEditing(null);
       setCreating(false);
     }
@@ -295,16 +302,19 @@ export function TemplateLibrary({
           />
 
           {/* Modal */}
+          {/* Modal — full-screen takeover on mobile (no padding), centered
+              rounded card on sm:+. The inner container fills the viewport on
+              mobile so the list/preview/editor each take the full height. */}
           <motion.div
             initial={{ opacity: 0, scale: 0.97, y: 8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 8 }}
             transition={{ duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 pointer-events-none"
+            className="fixed inset-0 z-50 flex items-stretch sm:items-center justify-stretch sm:justify-center p-0 sm:p-6 pointer-events-none"
           >
             <div
-              className="pointer-events-auto w-full max-w-5xl flex flex-col rounded-xl border border-border bg-surface shadow-2xl shadow-black/30 overflow-hidden"
-              style={{ height: "min(86vh, 720px)" }}
+              className="pointer-events-auto w-full flex flex-col rounded-none sm:rounded-xl border-0 sm:border border-border bg-surface shadow-2xl shadow-black/30 overflow-hidden sm:max-w-5xl"
+              style={{ height: "100dvh", maxHeight: "100dvh" }}
               onClick={(e) => e.stopPropagation()}
               role="dialog"
               aria-modal="true"
@@ -392,12 +402,55 @@ export function TemplateLibrary({
                   }}
                   onSaved={handleSaved}
                 />
+              ) : mobilePreview && selected ? (
+                /* Mobile full-screen preview take-over. Replaces the list with
+                   a single-column preview + a back button. Hidden on sm:+. */
+                <div className="flex-1 flex flex-col min-h-0 sm:hidden">
+                  <div className="flex items-center gap-2 px-3 h-11 border-b border-border shrink-0">
+                    <button
+                      onClick={() => setMobilePreview(false)}
+                      className="touch-target flex items-center gap-1 -ml-1 px-2 h-8 rounded-xl text-accent hover:bg-surface2 transition-colors text-[12px]"
+                      aria-label="Back to template list"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="15 18 9 12 15 6" />
+                      </svg>
+                      Back
+                    </button>
+                    <span className="text-[12px] font-medium text-foreground truncate flex-1">
+                      {selected.name}
+                    </span>
+                    <button
+                      onClick={onClose}
+                      className="touch-target p-1.5 rounded-xl text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors shrink-0"
+                      aria-label="Close"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-hidden">
+                    <TemplatePreview
+                      template={selected}
+                      onApply={onApply}
+                      onHeart={handleHeart}
+                      onDownload={handleDownload}
+                      onEdit={tab === "mine" ? (t) => setEditing(t) : undefined}
+                      onDelete={tab === "mine" ? handleDelete : undefined}
+                      onPublish={tab === "mine" ? handlePublish : undefined}
+                      compact
+                    />
+                  </div>
+                </div>
               ) : (
                 <div className="flex-1 flex flex-col md:flex-row min-h-0">
                   {/* Left column — list + filters */}
-                  <div className="flex-1 flex flex-col min-h-0 border-b md:border-b-0 md:border-r border-border">
-                    {/* Filters */}
-                    <div className="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0">
+                  <div className={`flex-1 flex flex-col min-h-0 border-b md:border-b-0 md:border-r border-border ${mobilePreview ? "hidden sm:flex" : ""}`}>
+                    {/* Filters — sticky at the top on mobile so search
+                        stays visible while scrolling the list. */}
+                    <div className="sticky top-0 z-10 bg-surface/95 backdrop-blur flex items-center gap-2 px-3 py-2 border-b border-border shrink-0">
                       {tab === "explore" && (
                         <>
                           <div className="relative flex-1 min-w-0">
@@ -492,7 +545,10 @@ export function TemplateLibrary({
                           <TemplateList
                             templates={mineFiltered}
                             selectedId={selected?.id}
-                            onSelect={setSelected}
+                            onSelect={(t) => {
+                              setSelected(t);
+                              setMobilePreview(true);
+                            }}
                             onEdit={(t) => setEditing(t)}
                             onDelete={handleDelete}
                             onPublish={handlePublish}
@@ -516,7 +572,10 @@ export function TemplateLibrary({
                         <TemplateList
                           templates={exploreFiltered}
                           selectedId={selected?.id}
-                          onSelect={setSelected}
+                          onSelect={(t) => {
+                            setSelected(t);
+                            setMobilePreview(true);
+                          }}
                           onHeart={handleHeart}
                           onDownload={handleDownload}
                           onApply={onApply}
@@ -561,36 +620,7 @@ export function TemplateLibrary({
                     )}
                   </div>
 
-                  {/* Mobile preview sheet — slides up from the bottom */}
-                  {selected && (
-                    <div className="md:hidden fixed inset-x-0 bottom-0 z-50 max-h-[70vh] bg-surface border-t border-border rounded-t-xl shadow-2xl flex flex-col">
-                      <div className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
-                        <span className="text-[11px] font-medium truncate flex-1">{selected.name}</span>
-                        <button
-                          onClick={() => setSelected(null)}
-                          className="text-muted-foreground hover:text-foreground p-1 rounded-xl hover:bg-surface2 shrink-0"
-                          aria-label="Close preview"
-                        >
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            <line x1="18" y1="6" x2="6" y2="18" />
-                            <line x1="6" y1="6" x2="18" y2="18" />
-                          </svg>
-                        </button>
-                      </div>
-                      <div className="overflow-y-auto">
-                        <TemplatePreview
-                          template={selected}
-                          onApply={onApply}
-                          onHeart={handleHeart}
-                          onDownload={handleDownload}
-                          onEdit={tab === "mine" ? (t) => setEditing(t) : undefined}
-                          onDelete={tab === "mine" ? handleDelete : undefined}
-                          onPublish={tab === "mine" ? handlePublish : undefined}
-                          compact
-                        />
-                      </div>
-                    </div>
-                  )}
+                  {/* (Mobile preview is handled by the `mobilePreview` take-over above.) */}
                 </div>
               )}
             </div>
@@ -841,6 +871,26 @@ function TemplatePreview({
   onPublish,
   compact,
 }: TemplatePreviewProps) {
+  // "Human Readable" renders the rendered markdown; "See Raw" shows the
+  // raw markdown source in a scrollable <pre> code block. Power users want
+  // this — the raw source is what actually gets sent to the model (system
+  // prompt, role instructions, fanout config, shard definitions, etc.).
+  const [viewMode, setViewMode] = useState<"human" | "raw">("human");
+  // Reset to human-readable when the template changes.
+  useEffect(() => { setViewMode("human"); }, [t.id]);
+
+  // Copy raw markdown to clipboard (used by the "See Raw" view).
+  const [copied, setCopied] = useState(false);
+  const handleCopyRaw = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(t.markdown || "");
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked — non-fatal */
+    }
+  }, [t.markdown]);
+
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Header */}
@@ -898,10 +948,85 @@ function TemplatePreview({
         )}
       </div>
 
-      {/* Markdown body */}
-      <div className={`flex-1 overflow-y-auto ${compact ? "p-2" : "p-3"}`}>
-        <Markdown text={t.markdown || "_No markdown body._"} />
+      {/* View-mode toggle — Human Readable (default) | See Raw.
+          Sticky at the top of the markdown body so it's always reachable. */}
+      <div className="sticky top-0 z-10 flex items-center gap-1.5 px-3 py-1.5 border-b border-border bg-surface/95 backdrop-blur shrink-0">
+        <div className="flex items-center bg-surface2 rounded-xl p-0.5 text-[10.5px]">
+          <button
+            onClick={() => setViewMode("human")}
+            className={`px-2 py-0.5 rounded-lg transition-colors flex items-center gap-1 ${
+              viewMode === "human"
+                ? "bg-accent text-white"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+            aria-pressed={viewMode === "human"}
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 7V4h16v3" />
+              <path d="M9 20h6" />
+              <path d="M12 4v16" />
+            </svg>
+            Human Readable
+          </button>
+          <button
+            onClick={() => setViewMode("raw")}
+            className={`px-2 py-0.5 rounded-lg transition-colors flex items-center gap-1 ${
+              viewMode === "raw"
+                ? "bg-accent text-white"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+            aria-pressed={viewMode === "raw"}
+            title="Show the raw markdown source — system prompt, role instructions, fanout config, shards"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="16 18 22 12 16 6" />
+              <polyline points="8 6 2 12 8 18" />
+            </svg>
+            See Raw
+          </button>
+        </div>
+        <div className="flex-1" />
+        {viewMode === "raw" && (
+          <>
+            <span className="text-[9.5px] text-muted-foreground/60 hidden sm:inline tabular-nums">
+              {(t.markdown || "").length.toLocaleString()} chars
+            </span>
+            <button
+              onClick={handleCopyRaw}
+              className="touch-target text-[10px] px-2 h-7 rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1"
+              title="Copy raw markdown to clipboard"
+            >
+              {copied ? (
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-emerald-400">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              ) : (
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+              )}
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </>
+        )}
       </div>
+
+      {/* Body — rendered markdown OR raw source <pre>. */}
+      {viewMode === "human" ? (
+        <div className={`flex-1 overflow-y-auto ${compact ? "p-2" : "p-3"}`}>
+          <Markdown text={t.markdown || "_No markdown body._"} />
+        </div>
+      ) : (
+        <div className="flex-1 overflow-auto bg-background/60">
+          <pre
+            className={`font-mono text-[11px] leading-relaxed text-foreground/90 whitespace-pre-wrap break-words ${compact ? "p-2" : "p-3"}`}
+            spellCheck={false}
+          >
+            {t.markdown || "(empty template — no markdown body)"}
+          </pre>
+        </div>
+      )}
 
       {/* Actions */}
       <div className="px-3 py-2 border-t border-border shrink-0 flex items-center gap-1.5 flex-wrap">
@@ -1089,7 +1214,7 @@ function TemplateEditor({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. Repo Audit"
-            className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
+            className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[16px] sm:text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
           />
         </div>
 
@@ -1102,7 +1227,7 @@ function TemplateEditor({
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="Short one-line summary"
-            className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
+            className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[16px] sm:text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
           />
         </div>
 
@@ -1115,7 +1240,7 @@ function TemplateEditor({
               value={kind}
               onChange={(e) => setKind(e.target.value as TemplateKind)}
               disabled={!!existing}
-              className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[12.5px] text-foreground outline-none focus:border-accent disabled:opacity-60"
+              className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[16px] sm:text-[12.5px] text-foreground outline-none focus:border-accent disabled:opacity-60"
             >
               {ALL_KINDS.map((k) => (
                 <option key={k} value={k}>
@@ -1133,7 +1258,7 @@ function TemplateEditor({
               value={tagsInput}
               onChange={(e) => setTagsInput(e.target.value)}
               placeholder="audit, security, refactor"
-              className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
+              className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[16px] sm:text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
             />
           </div>
         </div>

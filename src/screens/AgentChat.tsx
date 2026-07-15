@@ -14,6 +14,7 @@ import { PriceGauge } from "../components/PriceGauge";
 import { ToolIcons } from "../components/ToolIcons";
 import { QueueMonitor } from "../components/QueueMonitor";
 import { TemplateLibrary } from "../components/TemplateLibrary";
+import { SaveAsTemplateDialog } from "../components/SaveAsTemplateDialog";
 
 export function AgentChat({ settings }: { settings: Settings }) {
   // Model store
@@ -197,6 +198,32 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const [workspaces, setWorkspaces] = useState<{ id: string; title: string; source_repo?: string | null }[]>([]);
   const [wsOpen, setWsOpen] = useState(false);
   const ghClient = useMemo(() => new GitHubClient(settings), [settings]);
+
+  // "Save as Template" dialog — opened from the chat input toolbar.
+  // Pre-fills the markdown with the most-recent user + assistant messages.
+  const [saveAsTemplateOpen, setSaveAsTemplateOpen] = useState(false);
+  const handleSaveAsTemplate = useCallback(
+    (template: import("../api/templates").Template) => {
+      // Route the freshly-saved template to the right tool slot (same logic
+      // as applyTemplate in chatStore), then close the dialog + toast.
+      applyTemplate(template);
+      setSaveAsTemplateOpen(false);
+    },
+    [applyTemplate],
+  );
+
+  // Suggested name for the Save-as-Template dialog: the most-recent user
+  // message, truncated to 60 chars. Falls back to "Chat Template".
+  const suggestedTemplateName = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "user" && !m.isError && m.content?.trim()) {
+        const t = m.content.trim().replace(/\s+/g, " ");
+        return t.length > 60 ? t.slice(0, 57) + "…" : t;
+      }
+    }
+    return "";
+  }, [messages]);
   useEffect(() => {
     ghClient.listWorkspaces().then((r) => setWorkspaces(r.workspaces || [])).catch(() => {});
   }, [ghClient]);
@@ -818,6 +845,25 @@ export function AgentChat({ settings }: { settings: Settings }) {
             </button>
           )}
 
+          {/* Save as Template — quick capture flow. Opens a dialog that
+              pre-fills the markdown with the most-recent user + assistant
+              messages and lets the user pick a kind, then saves via the
+              template library API. Disabled when the chat is empty. */}
+          <button
+            onClick={() => setSaveAsTemplateOpen(true)}
+            disabled={messages.length === 0}
+            className="touch-target shrink-0 text-[11px] px-2.5 h-7 rounded-xl text-muted-foreground hover:text-accent hover:bg-surface2 transition-colors flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Save this chat as a reusable template"
+            aria-label="Save as Template"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+              <polyline points="17 21 17 13 7 13 7 21" />
+              <polyline points="7 3 7 8 15 8" />
+            </svg>
+            <span className="hidden sm:inline">Save as Template</span>
+          </button>
+
           {/* Spacer pushes Queue/Stop toggle to the right (desktop only —
               on mobile the toolbar scrolls horizontally instead). */}
           <div className="hidden sm:flex flex-1" />
@@ -983,6 +1029,16 @@ export function AgentChat({ settings }: { settings: Settings }) {
         settings={settings}
         onClose={closeTemplateLibrary}
         onApply={applyTemplate}
+      />
+
+      <SaveAsTemplateDialog
+        open={saveAsTemplateOpen}
+        settings={settings}
+        messages={messages}
+        suggestedName={suggestedTemplateName}
+        defaultKind="chat"
+        onClose={() => setSaveAsTemplateOpen(false)}
+        onSaved={handleSaveAsTemplate}
       />
     </div>
   );
