@@ -217,6 +217,32 @@ class Panel:
         vals = [int(c["ctx"]) for c in spec.get("candidates", []) if c.get("ctx")]
         return max(vals) if vals else DEFAULT_CTX_TOKENS
 
+    def _model_pricing(self, logical: str, candidates: list) -> dict:
+        #   best-effort pricing for the roster. Most providers in this catalog
+        #   are free-tier (0/0); OpenRouter live pricing is fetched separately
+        #   via /api/pricing. Returns {inputPerM, outputPerM, free, source}.
+        try:
+            from providers import load_provider_catalog
+            catalog = load_provider_catalog()
+        except Exception:
+            catalog = []
+        for cand in (candidates or []):
+            prov_name = getattr(getattr(cand, "provider", None), "name", None)
+            if not prov_name:
+                continue
+            for entry in catalog:
+                if entry.get("name") == prov_name:
+                    p = (entry.get("pricing") or {})
+                    if p:
+                        return {"inputPerM": float(p.get("input_per_m", 0) or 0),
+                                "outputPerM": float(p.get("output_per_m", 0) or 0),
+                                "free": bool(p.get("free", False)),
+                                "source": "catalog"}
+                    return {"inputPerM": 0.0, "outputPerM": 0.0,
+                            "free": True, "source": "catalog (free tier)"}
+        return {"inputPerM": 0.0, "outputPerM": 0.0, "free": True,
+                "source": "unknown (assume free)"}
+
     def _sync_all_provider_models(self) -> None:
         """Fetch live model lists from all providers, register new slots, and
         build logical_models mapping dynamically (no static catalog).
@@ -314,11 +340,65 @@ class Panel:
                 frontier_total += 1
                 if safe_routable:
                     frontier_safe_available += 1
+            # Per-model capabilities — derived from the reasoning_catalog
+            # (a model with a 'body' entry supports effort/thinking) and the
+            # benchmarks (vision/coding/agentic tags). webSearch + deepResearch
+            # are always available (web_tools + research_templates work for
+            # every model); extendedThinking requires a reasoning body entry.
+            rcat = getattr(self, "reasoning_catalog", {}) or {}
+            # Scan ALL catalog entries that could apply to this logical model:
+            #   1. the logical-level entry (key == logical)
+            #   2. every candidate's provider/model entry (key == cand.who)
+            #   3. any catalog key ending with '/{logical}' (catches provider-
+            #      specific entries like 'nvidia/moonshotai/kimi-k2.6' for
+            #      logical 'kimi-k2.6' when the family function splits them).
+            has_reasoning_body = False
+            if isinstance(rcat, dict):
+                _logical_entry = rcat.get(logical) or {}
+                if isinstance(_logical_entry, dict) and _logical_entry.get("body"):
+                    has_reasoning_body = True
+                if not has_reasoning_body:
+                    for cand in (cands or []):
+                        who = getattr(cand, "who", None)
+                        if who and isinstance(rcat.get(who), dict) and rcat[who].get("body"):
+                            has_reasoning_body = True
+                            break
+                if not has_reasoning_body:
+                    suffix = "/" + logical
+                    suffix_free = "/" + logical + ":free"
+                    for k, v in rcat.items():
+                        if not isinstance(v, dict) or not v.get("body"):
+                            continue
+                        if (k.endswith(suffix) or k.endswith(suffix_free)
+                                or k == logical):
+                            has_reasoning_body = True
+                            break
+            caps_tags = []
+            bench_lower = " ".join(str(bench.get(k, "") or "").lower()
+                                    for k in ("tags", "note")).lower()
+            bench_full = (bench_lower + " " + logical.lower()
+                          + " " + " ".join(h["slot"].lower() for h in hosts))
+            if any(t in bench_full for t in ("vision", "image", "multimodal")):
+                caps_tags.append("vision")
+            if any(t in bench_full for t in ("tool", "function", "agentic")):
+                caps_tags.append("tools")
+            capabilities = {
+                "effort": has_reasoning_body,
+                "webSearch": True,
+                "deepResearch": True,
+                "extendedThinking": has_reasoning_body,
+                "tools": "tools" in caps_tags,
+                "vision": "vision" in caps_tags,
+            }
+            # Pricing (best-effort, from providers_catalog).
+            pricing = self._model_pricing(logical, cands)
             models.append({
                 "logical": logical, "frontier": is_frontier,
                 "arena_elo": bench.get("arena_elo"), "aa_index": bench.get("aa_index"),
                 "hosts": hosts, "routable": routable,
                 "privacy_safe_routable": safe_routable,
+                "capabilities": capabilities,
+                "pricing": pricing,
             })
         models.sort(key=lambda m: (m["arena_elo"] or 0), reverse=True)
         return {
@@ -1071,6 +1151,33 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/chat/sessions" or route.startswith("/api/chat/sessions/"):
             import chat_routes
             chat_routes.handle_request("GET", self.path, {}, self)
+            return
+        # --- Chat job queue (GET /api/chat/queue) — bearer-gated -------------
+        if route == "/api/chat/queue":
+            import chat_jobs
+            chat_jobs.handle_request("GET", self.path, {}, self)
+            return
+        # --- Pricing (GET /api/pricing) — bearer-gated, 10-min cached --------
+        if route == "/api/pricing":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            self._handle_pricing()
+            return
+        # --- Monitor SSE (GET /api/monitor) — bearer-gated, long-lived stream
+        if route == "/api/monitor":
+            ok = self._auth_ok()
+            if not ok:
+                from urllib.parse import parse_qs, urlsplit
+                q = parse_qs(urlsplit(self.path).query)
+                token_q = q.get("bearer", [None])[0]
+                if token_q:
+                    self.headers["Authorization"] = f"Bearer {token_q}"
+                    ok = self._auth_ok()
+            if not ok:
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            self._handle_monitor_sse()
             return
         # --- HF Spaces health check ---
         if route == "/-/health":
@@ -1831,6 +1938,36 @@ class Handler(BaseHTTPRequestHandler):
                 chat_session_id = cs["id"]
             except Exception:
                 chat_session_id = None
+        # Research mode params (optional). When webSearch or deepResearch is
+        # true, the session uses ResearchAdapter instead of the Claude/Strands
+        # SDK and drives research_templates directly from the panel's slots.
+        panel_for_research: Panel = self.server.panel  # type: ignore[attr-defined]
+        effort = str(payload.get("effort", "")).strip().lower() or None
+        if effort and effort not in ("low", "med", "high", "max"):
+            self._send_json(400, {"error": "'effort' must be one of low|med|high|max"})
+            return
+        web_search = bool(payload.get("webSearch") or payload.get("web_search"))
+        web_search_template = (payload.get("webSearchTemplate")
+                                or payload.get("web_search_template"))
+        if web_search_template and web_search_template not in (
+                "breadth", "deep_dive", "compare", "fact_check"):
+            self._send_json(400, {"error": "'webSearchTemplate' must be one of breadth|deep_dive|compare|fact_check"})
+            return
+        if web_search and not web_search_template:
+            web_search_template = "breadth"  # default template
+        deep_research = bool(payload.get("deepResearch") or payload.get("deep_research"))
+        deep_research_mode = (payload.get("deepResearchMode")
+                               or payload.get("deep_research_mode"))
+        if deep_research_mode and deep_research_mode not in (
+                "default", "react", "extended_thinking"):
+            self._send_json(400, {"error": "'deepResearchMode' must be one of default|react|extended_thinking"})
+            return
+        deep_research_template = (payload.get("deepResearchTemplate")
+                                   or payload.get("deep_research_template"))
+        if deep_research_template and deep_research_template not in (
+                "breadth", "deep_dive", "compare", "fact_check"):
+            self._send_json(400, {"error": "'deepResearchTemplate' must be one of breadth|deep_dive|compare|fact_check"})
+            return
         try:
             mode = str(payload.get("mode", "auto")).strip().lower()
             if mode not in ("auto", "build", "plan"):
@@ -1838,7 +1975,14 @@ class Handler(BaseHTTPRequestHandler):
             session = agent_sessions.get_or_create(session_id, model,
                                                    workspace_id=workspace_id,
                                                    chat_session_id=chat_session_id,
-                                                   mode=mode)
+                                                   mode=mode,
+                                                   panel=panel_for_research,
+                                                   effort=effort,
+                                                   web_search=web_search,
+                                                   web_search_template=web_search_template,
+                                                   deep_research=deep_research,
+                                                   deep_research_mode=deep_research_mode,
+                                                   deep_research_template=deep_research_template)
         except agent_sessions.CapacityError as e:
             self._send_json(429, {"error": str(e)}, headers={"Retry-After": "30"})
             return
@@ -1865,6 +2009,157 @@ class Handler(BaseHTTPRequestHandler):
         if chat_session_id:
             resp["chat_session_id"] = chat_session_id
         self._send_json(202, resp)
+
+    def _handle_chat_judge(self, payload: dict) -> None:
+        #   POST /api/chat/judge — in-chat multi-model judge panel.
+        #   Accepts: {input, template (critique|verify|improve|debate), count (1-6)}
+        #   Fans out to N diverse judges in parallel, then merges.
+        input_text = payload.get("input")
+        if not isinstance(input_text, str) or not input_text.strip():
+            self._send_json(400, {"error": "'input' (non-empty string) is required"})
+            return
+        template = str(payload.get("template", "critique")).strip().lower()
+        if template not in ("critique", "verify", "improve", "debate"):
+            self._send_json(400, {"error": "'template' must be critique|verify|improve|debate"})
+            return
+        try:
+            count = int(payload.get("count", 3))
+        except (TypeError, ValueError):
+            count = 3
+        if not 1 <= count <= 6:
+            self._send_json(400, {"error": "'count' must be in 1..6"})
+            return
+        panel: Panel = self.server.panel  # type: ignore[attr-defined]
+        # Build a diverse panel from the roster — different model families.
+        # Use the panel's default_panel if it has >= count entries; else
+        # expand from the roster's logical models.
+        roster = panel.roster()
+        candidates: list[str] = []
+        # Prefer the default panel (already curated for diversity).
+        for who in panel.default_panel:
+            if who not in candidates:
+                candidates.append(who)
+        # Top up from the roster (frontier models first).
+        if len(candidates) < count:
+            for m in roster.get("models", []):
+                logical = m.get("logical")
+                if logical and logical not in candidates and m.get("routable"):
+                    candidates.append(logical)
+                    if len(candidates) >= count * 2:
+                        break
+        if not candidates:
+            self._send_json(503, {"error": "no judges available (configure a provider key)"})
+            return
+        who_list = candidates[:count]
+        # Map template → role + merge mode.
+        template_to_role = {
+            "critique": ("critiquer", "dedupe"),
+            "verify":   ("verifier", "vote"),
+            "improve":  ("transformer", "dedupe"),
+            "debate":   ("generator", "concat"),
+        }
+        role, merge = template_to_role[template]
+        try:
+            params = build_panel_params(
+                panel, input_text=input_text, role=role, system=None,
+                instructions=None, output_rules=None, template=None,
+                panel_override=who_list, merge_mode=merge, max_tokens=8192,
+                want_artifacts=False, reasoning=False, research=False)
+            params = apply_effort(params, "med")
+        except Exception as e:  # noqa: BLE001
+            self._send_json(500, {"error": f"failed to build judge params: {type(e).__name__}"})
+            return
+        try:
+            result = asyncio.run(run_sync(panel, params))
+        except Exception as e:  # noqa: BLE001
+            log_event("chat_judge_error", error=repr(e)[:200])
+            self._send_json(500, {"error": f"judge failed: {type(e).__name__}"})
+            return
+        judges = result.get("judges", [])
+        ok = sum(1 for j in judges if j.get("ok"))
+        self._send_json(200, {
+            "merged": result.get("merged", ""),
+            "judges": judges,
+            "ok": ok,
+            "total": len(judges),
+            "template": template,
+            "count": count,
+        })
+
+    def _handle_pricing(self) -> None:
+        #   GET /api/pricing — live OpenRouter pricing + local catalog merge.
+        try:
+            import pricing as _pricing
+            result = _pricing.get_pricing()
+            self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001
+            log_event("pricing_error", error=repr(e)[:200])
+            self._send_json(500, {"error": f"failed to fetch pricing: {type(e).__name__}"})
+
+    def _handle_monitor_sse(self) -> None:
+        #   GET /api/monitor — SSE stream that polls for queued chat jobs,
+        #   runs them, and streams live progress events. One long-lived
+        #   connection per browser tab.
+        from urllib.parse import parse_qs, urlsplit
+        qs = parse_qs(urlsplit(self.path).query)
+        space_id = (qs.get("spaceId", [""])[0] or qs.get("space_id", [""])[0] or "").strip() or None
+        # Allow ?bearer= for SSE clients that can't set headers (EventSource).
+        try:
+            idle_timeout_s = float(qs.get("idleTimeout", ["120"])[0])
+        except ValueError:
+            idle_timeout_s = 120.0
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        panel: Panel = self.server.panel  # type: ignore[attr-defined]
+        import chat_jobs
+        import time as _time
+
+        def _send_event(ev: dict) -> None:
+            try:
+                line = f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return False
+            return True
+
+        last_activity = _time.time()
+        try:
+            while True:
+                # Poll for queued jobs (FIFO — oldest first).
+                queued = chat_jobs.list_queued_jobs(limit=5)
+                if space_id:
+                    queued = [j for j in queued if j.get("space_id") == space_id]
+                if queued:
+                    job = queued[0]
+                    if job.get("status") == "queued":
+                        # Run the job synchronously in this thread. The runner
+                        # emits events via _send_event; we relay them as SSE.
+                        chat_jobs.run_job(job, panel=panel, emit=_send_event)
+                        last_activity = _time.time()
+                else:
+                    # Heartbeat so proxies don't time us out.
+                    if _time.time() - last_activity > idle_timeout_s:
+                        break
+                    try:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        break
+                    _time.sleep(2.0)
+                    continue
+                # Brief pause between jobs so we don't tight-loop on errors.
+                _time.sleep(0.5)
+        except Exception as exc:  # noqa: BLE001 — never crash the SSE thread
+            log_event("monitor_sse_error", error=repr(exc)[:200])
+            _send_event({"event": "job_error", "error": f"monitor stream error: {type(exc).__name__}"})
 
     def _handle_agent_stream(self, route: str) -> None:
         """SSE endpoint: GET /api/agent/<sid>/stream
@@ -3145,6 +3440,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             chat_routes.handle_request("POST", self.path, payload, self)
             return
+        # --- Chat job queue (POST /api/chat/queue) — bearer-gated -------------
+        if route == "/api/chat/queue":
+            import chat_jobs
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            chat_jobs.handle_request("POST", self.path, payload, self)
+            return
+        # --- In-chat judge (POST /api/chat/judge) — bearer-gated --------------
+        if route == "/api/chat/judge":
+            payload = self._auth_and_body()
+            if payload is None:
+                return
+            self._handle_chat_judge(payload)
+            return
         # -----------------------------------------------------------------------
         # POST /api/agent shares the same _auth_and_body gate as the panel routes
         # (service bearer token in Authorization).  GitHub identity for workspace
@@ -3283,6 +3593,14 @@ class Handler(BaseHTTPRequestHandler):
         route = urlsplit(self.path).path.rstrip("/")
         if route == "/api/conscious" or route.startswith("/api/conscious/"):
             self._conscious_dispatch("PATCH")
+            return
+        # --- Chat job queue (PATCH /api/chat/queue) — cancel a job ------------
+        if route == "/api/chat/queue":
+            import chat_jobs
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            chat_jobs.handle_request("PATCH", self.path, payload, self)
             return
         self._send_json(404, {"error": "not found"})
 

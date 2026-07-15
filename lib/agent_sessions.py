@@ -1208,6 +1208,181 @@ class StrandsAdapter(BaseAdapter):
                 pass
 
 
+
+# --------------------------------------------------------------------------
+# Research adapter — drives research_templates + deep_research modes when the
+# chat endpoint is called with webSearch=true / deepResearch=true. Bypasses
+# the Claude/Strands SDKs entirely; uses the panel's scheduler + slots.
+# --------------------------------------------------------------------------
+
+class ResearchAdapter(BaseAdapter):
+    """Runs a research template or deep-research mode in a private event loop.
+
+    Picks a slot from the panel (explicit provider/model or the default panel),
+    resolves reasoning params from reasoning_catalog.json, and dispatches to
+    ``research_templates.run_template`` or ``run_deep_research``. Emits SSE
+    events (status, sources, thinking, delta, done, error) through the same
+    ``emit`` callback the other adapters use, so the existing polling/SSE
+    infrastructure works unchanged.
+    """
+
+    def __init__(self, workspace: Path, model: str | None = None,
+                 workspace_id: str | None = None, system_prompt: str | None = None,
+                 panel=None, effort: str = "med",
+                 web_search: bool = False, web_search_template: str | None = None,
+                 deep_research: bool = False, deep_research_mode: str | None = None,
+                 deep_research_template: str | None = None):
+        super().__init__(workspace, workspace_id)
+        self.model = model
+        self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
+        self.panel = panel
+        self.effort = effort or "med"
+        self.web_search = web_search
+        self.web_search_template = web_search_template
+        self.deep_research = deep_research
+        self.deep_research_mode = deep_research_mode
+        self.deep_research_template = deep_research_template
+        self.loop: asyncio.AbstractEventLoop | None = None
+        # Resolved routing info (set by open()/turn() so snapshot() can surface it).
+        self.resolved_model: str | None = None
+        self.resolved_provider: str | None = None
+        self.resolved_api_base: str | None = None
+
+    def open(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        # Best-effort: resolve the model up-front so snapshot() can show it
+        # before the first turn. The actual slot pick happens in _turn().
+        if self.panel is not None:
+            try:
+                picked = self._pick_slot_sync()
+                if picked is not None:
+                    self.resolved_model = picked.model
+                    self.resolved_provider = picked.provider.name
+                    self.resolved_api_base = picked.provider.url or None
+            except Exception:
+                pass
+
+    def _pick_slot_sync(self):
+        """Synchronous slot pick (best-effort) for the open() snapshot."""
+        if self.panel is None:
+            return None
+        from content.roles import Roles
+        pick_role = Roles("critiquer")
+        candidates: list = []
+        if self.model:
+            _, candidates = self.panel.resolve_candidates(self.model)
+        if not candidates and self.panel.default_panel:
+            _, candidates = self.panel.resolve_candidates(self.panel.default_panel[0])
+        if not candidates:
+            return None
+        picker = getattr(self.panel.scheduler, "pick_slot_from", None)
+        if callable(picker):
+            try:
+                return picker(candidates, pick_role) or candidates[0]
+            except Exception:
+                return candidates[0]
+        return candidates[0]
+
+    def turn(self, user_msg: str, emit) -> None:
+        assert self.loop is not None
+        self.loop.run_until_complete(self._turn(user_msg, emit))
+
+    async def _turn(self, user_msg: str, emit) -> None:
+        if self.panel is None:
+            emit({"type": "error", "error": "no panel available for research"})
+            return
+        picked, logical, extra_body = self._resolve_slot()
+        if picked is None:
+            emit({"type": "error",
+                  "error": f"no slot available for model {self.model!r} (no configured provider hosts it)"})
+            return
+        self.resolved_model = picked.model
+        self.resolved_provider = picked.provider.name
+        self.resolved_api_base = picked.provider.url or None
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            if self.deep_research:
+                # If a template is also specified, run that template instead
+                # of the mode (templates are richer; modes are simpler).
+                if self.deep_research_template:
+                    from research_templates import run_template
+                    await run_template(template=self.deep_research_template,
+                                       question=user_msg, client=client, picked=picked,
+                                       extra_body=extra_body, emit=emit, effort=self.effort)
+                else:
+                    from research_templates import run_deep_research
+                    await run_deep_research(mode=self.deep_research_mode or "default",
+                                            question=user_msg, client=client, picked=picked,
+                                            extra_body=extra_body, max_tokens=16384,
+                                            timeout_s=1500.0, emit=emit, effort=self.effort)
+            elif self.web_search and self.web_search_template:
+                from research_templates import run_template
+                await run_template(template=self.web_search_template,
+                                   question=user_msg, client=client, picked=picked,
+                                   extra_body=extra_body, emit=emit, effort=self.effort)
+            else:
+                emit({"type": "error",
+                      "error": "research adapter created without a template or mode"})
+
+    def _resolve_slot(self):
+        """Pick a slot + resolve reasoning body. Returns (picked, logical, extra_body)."""
+        from providers import resolve_reasoning_body
+        from content.roles import Roles
+        pick_role = Roles("critiquer")
+        logical: str | None = None
+        candidates: list = []
+        if self.model:
+            logical, candidates = self.panel.resolve_candidates(self.model)
+        if not candidates and self.panel.default_panel:
+            logical, candidates = self.panel.resolve_candidates(self.panel.default_panel[0])
+        if not candidates:
+            return None, None, None
+        picker = getattr(self.panel.scheduler, "pick_slot_from", None)
+        picked = None
+        if callable(picker):
+            try:
+                picked = picker(candidates, pick_role)
+            except Exception:
+                picked = None
+        if picked is None:
+            picked = candidates[0]
+        extra_body = None
+        if self.effort and self.effort != "low":
+            rcat = getattr(self.panel, "reasoning_catalog", None) or {}
+            try:
+                extra_body = resolve_reasoning_body(
+                    rcat, logical=logical, who=picked.who,
+                    family=getattr(picked, "model_family", None)) or None
+            except Exception:
+                extra_body = None
+        return picked, logical, extra_body
+
+    def interrupt(self) -> None:
+        if self.loop is None or self.loop.is_closed():
+            return
+        try:
+            for task in asyncio.all_tasks(self.loop):
+                task.cancel()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        if self.loop is None or self.loop.is_closed():
+            return
+        try:
+            for task in asyncio.all_tasks(self.loop):
+                task.cancel()
+            self.loop.run_until_complete(asyncio.sleep(0.05))
+        except Exception:
+            pass
+        finally:
+            try:
+                self.loop.close()
+            except Exception:
+                pass
+
+
 def _make_adapter(tier: str, workspace: Path, model: str | None = None,
                   workspace_id: str | None = None, system_prompt: str | None = None) -> BaseAdapter:
     if tier == "claude":
@@ -1244,7 +1419,11 @@ class AgentSession:
     def __init__(self, tier: str, model: str | None = None,
                  workspace_path: Path | None = None, workspace_id: str | None = None,
                  conscious_id: str | None = None, agent_id: str | None = None,
-                 chat_session_id: str | None = None, mode: str = "auto"):
+                 chat_session_id: str | None = None, mode: str = "auto",
+                 panel=None, effort: str | None = None,
+                 web_search: bool = False, web_search_template: str | None = None,
+                 deep_research: bool = False, deep_research_mode: str | None = None,
+                 deep_research_template: str | None = None):
         self.id = uuid.uuid4().hex[:16]
         self.chat_session_id = chat_session_id
         self.persisted_seq = 0
@@ -1252,6 +1431,15 @@ class AgentSession:
         self.model = model
         self.workspace_id = workspace_id  # links to user's workspace, if any
         self.mode = mode  # "auto" (default), "build", "plan"
+        # Research mode params — when web_search or deep_research is True, the
+        # session uses ResearchAdapter instead of the Claude/Strands SDK.
+        self.panel = panel
+        self.effort = effort
+        self.web_search = web_search
+        self.web_search_template = web_search_template
+        self.deep_research = deep_research
+        self.deep_research_mode = deep_research_mode
+        self.deep_research_template = deep_research_template
         # Tier 3 — Conscious binding. Set when an agent is spawned against a
         # Conscious. Existing non-Conscious agents have both as None; the
         # conscious_* tool handlers no-op with an error in that case.
@@ -1481,8 +1669,18 @@ class AgentSession:
         self.inbox.put(None)
 
     def _run(self) -> None:
-        adapter = _make_adapter(self.tier, self.workspace, self.model,
-                                self.workspace_id, self.system_prompt)
+        if self.web_search or self.deep_research:
+            # Research mode: bypass the Claude/Strands SDKs and drive
+            # research_templates directly from the panel's slots.
+            adapter = ResearchAdapter(
+                self.workspace, model=self.model, workspace_id=self.workspace_id,
+                system_prompt=self.system_prompt, panel=self.panel, effort=self.effort,
+                web_search=self.web_search, web_search_template=self.web_search_template,
+                deep_research=self.deep_research, deep_research_mode=self.deep_research_mode,
+                deep_research_template=self.deep_research_template)
+        else:
+            adapter = _make_adapter(self.tier, self.workspace, self.model,
+                                    self.workspace_id, self.system_prompt)
         self.adapter = adapter
         # Tier 3 — give the adapter a back-reference so it can register the
         # conscious tool registry on the owning session (conscious_id/agent_id).
@@ -1582,7 +1780,11 @@ def get_or_create(session_id: str | None = None,
                   conscious_id: str | None = None,
                   agent_id: str | None = None,
                   chat_session_id: str | None = None,
-                  mode: str = "auto") -> AgentSession:
+                  mode: str = "auto",
+                  panel=None, effort: str | None = None,
+                  web_search: bool = False, web_search_template: str | None = None,
+                  deep_research: bool = False, deep_research_mode: str | None = None,
+                  deep_research_template: str | None = None) -> AgentSession:
     """Reuse a live session by id, or start a new one (CapacityError if full).
     `model` (optional) selects which model/tier drives a NEW session.
     `workspace_id` (optional) links the session to a user workspace sandbox.
@@ -1591,9 +1793,14 @@ def get_or_create(session_id: str | None = None,
     `chat_session_id` (optional) links this agent session to a persistent
     chat session for event persistence.
     """
-    tier = tier_for_model(model)
-    if tier is None:
-        raise RuntimeError("no agent tier available for the requested model")
+    # Research mode bypasses the SDK tier check — it uses the panel's slots
+    # directly, so it works even when no Claude/Strands SDK is installed.
+    if web_search or deep_research:
+        tier = "research"
+    else:
+        tier = tier_for_model(model)
+        if tier is None:
+            raise RuntimeError("no agent tier available for the requested model")
     with _sessions_lock:
         _sweep_locked()
         if session_id and session_id in _sessions:
@@ -1635,7 +1842,11 @@ def get_or_create(session_id: str | None = None,
         s = AgentSession(tier, model, workspace_path=workspace_path,
                          workspace_id=workspace_id,
                          conscious_id=conscious_id, agent_id=agent_id,
-                         chat_session_id=chat_session_id, mode=mode)
+                         chat_session_id=chat_session_id, mode=mode,
+                         panel=panel, effort=effort,
+                         web_search=web_search, web_search_template=web_search_template,
+                         deep_research=deep_research, deep_research_mode=deep_research_mode,
+                         deep_research_template=deep_research_template)
         _sessions[s.id] = s
         return s
 
