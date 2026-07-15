@@ -380,7 +380,7 @@ function ProviderBox({
       >
         <button
           onClick={() => setCollapsed((c) => !c)}
-          className="touch-target flex items-center gap-2 flex-1 min-w-0 text-left rounded-lg"
+          className="touch-target flex items-center gap-2 flex-1 min-w-0 text-left rounded-xl"
           aria-expanded={!collapsed}
           aria-label={`${collapsed ? "Expand" : "Collapse"} ${provider.displayName}`}
         >
@@ -401,7 +401,7 @@ function ProviderBox({
         </button>
         <button
           onClick={openSettings}
-          className="touch-target inline-flex items-center justify-center size-8 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+          className="touch-target inline-flex items-center justify-center size-8 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
           aria-label={`Manage ${provider.displayName} privacy & keys`}
           title={`${provider.manageLabel} \u2197`}
         >
@@ -520,7 +520,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
       data-selected={isSelected ? "true" : undefined}
     >
       <span className="flex items-center w-full">
-        <button onClick={onSelect} data-selected={isSelected ? "true" : undefined} aria-pressed={isSelected} className="touch-target flex items-center flex-1 min-w-0 cursor-pointer text-left rounded-lg">
+        <button onClick={onSelect} data-selected={isSelected ? "true" : undefined} aria-pressed={isSelected} className="touch-target flex items-center flex-1 min-w-0 cursor-pointer text-left rounded-xl">
           <span
             className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
             style={{ width: 16, height: 16, fontSize: 0, border: isSelected ? "none" : "1.5px solid var(--border)", backgroundColor: isSelected ? "#a855f7" : "transparent" }}
@@ -541,7 +541,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
 
       {topHost && !expanded && (
         <button onClick={onToggleExpand}
-          className="touch-target flex items-center gap-1.5 w-full pl-7 pr-1 py-1 min-h-[36px] rounded-lg text-[11px] transition-colors hover:bg-muted/30 cursor-pointer text-left"
+          className="touch-target flex items-center gap-1.5 w-full pl-7 pr-1 py-1 min-h-[36px] rounded-xl text-[11px] transition-colors hover:bg-muted/30 cursor-pointer text-left"
           title={localOrder.length > 1 ? "Tap to show all provider options" : "Only one provider available"}
         >
           <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: topHost.color }} />
@@ -556,7 +556,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
         <div className="flex flex-col gap-0.5 pl-7 pr-1 mt-0.5">
           {localOrder.map((host, i) => (
             <div key={`${host.provider}-${host.modelId}`}
-              className="flex items-center gap-1.5 py-1 min-h-[36px] rounded-lg text-[11px]"
+              className="flex items-center gap-1.5 py-1 min-h-[36px] rounded-xl text-[11px]"
               style={{ opacity: host.hasApiKey ? 1 : 0.4 }}
             >
               <span className="inline-flex items-center justify-center size-4 rounded-full text-[8px] font-bold shrink-0"
@@ -571,7 +571,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
                 <button
                   onClick={(e) => { e.stopPropagation(); moveUp(i); }}
                   disabled={i === 0}
-                  className="touch-target size-6 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+                  className="touch-target size-6 flex items-center justify-center rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
                   title="Higher priority"
                   aria-label="Move provider up"
                 >
@@ -580,7 +580,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
                 <button
                   onClick={(e) => { e.stopPropagation(); moveDown(i); }}
                   disabled={i === localOrder.length - 1}
-                  className="touch-target size-6 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+                  className="touch-target size-6 flex items-center justify-center rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
                   title="Lower priority"
                   aria-label="Move provider down"
                 >
@@ -979,7 +979,7 @@ export function ModelSelectOverlay() {
                   <div className="hidden sm:flex items-center gap-1">
                     <button
                       onClick={() => openProvidersDialog()}
-                      className="touch-target inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+                      className="touch-target inline-flex items-center gap-1 px-2 h-7 rounded-xl text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
                       title="Providers & privacy settings"
                     >
                       <IcoSettings />
@@ -988,7 +988,7 @@ export function ModelSelectOverlay() {
                     <button
                       onClick={() => condensedView ? fetchCondensedModels(true) : refreshProviders()}
                       disabled={refreshing && !condensedView}
-                      className="touch-target inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-60 shrink-0"
+                      className="touch-target inline-flex items-center gap-1 px-2 h-7 rounded-xl text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-60 shrink-0"
                       title={condensedView ? "Refresh condensed catalog" : (refreshing ? "syncing" : `${syncedLabel} \u00b7 ${liveCount}/${totalCount} providers live \u00b7 click to re-sync`)}
                     >
                       <IcoRefresh spinning={refreshing && !condensedView} />
@@ -1120,7 +1120,7 @@ export function ModelSelectOverlay() {
                   {anyFilterActive && (
                     <button
                       onClick={() => { activeFilters.forEach((f) => toggleFilter(f)); setContextMin(0); }}
-                      className="touch-target shrink-0 text-[11px] leading-none px-2.5 h-7 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-muted/40 transition-colors ml-auto"
+                      className="touch-target shrink-0 text-[11px] leading-none px-2.5 h-7 rounded-xl text-muted-foreground/70 hover:text-foreground hover:bg-muted/40 transition-colors ml-auto"
                     >
                       clear
                     </button>

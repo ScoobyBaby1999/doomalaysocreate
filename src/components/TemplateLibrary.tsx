@@ -702,7 +702,7 @@ function TemplateCard({
   return (
     <div
       onClick={onSelect}
-      className={`rounded-lg border p-2.5 cursor-pointer transition-colors card-hover ${
+      className={`rounded-xl border p-2.5 cursor-pointer transition-colors card-hover ${
         selected
           ? "border-accent bg-accent/5"
           : "border-border hover:border-accent/40 hover:bg-surface2/50"
@@ -954,7 +954,7 @@ function TemplatePreview({
         <div className="flex items-center bg-surface2 rounded-xl p-0.5 text-[10.5px]">
           <button
             onClick={() => setViewMode("human")}
-            className={`px-2 py-0.5 rounded-lg transition-colors flex items-center gap-1 ${
+            className={`px-2 py-0.5 rounded-xl transition-colors flex items-center gap-1 ${
               viewMode === "human"
                 ? "bg-accent text-white"
                 : "text-muted-foreground hover:text-foreground"
@@ -970,7 +970,7 @@ function TemplatePreview({
           </button>
           <button
             onClick={() => setViewMode("raw")}
-            className={`px-2 py-0.5 rounded-lg transition-colors flex items-center gap-1 ${
+            className={`px-2 py-0.5 rounded-xl transition-colors flex items-center gap-1 ${
               viewMode === "raw"
                 ? "bg-accent text-white"
                 : "text-muted-foreground hover:text-foreground"

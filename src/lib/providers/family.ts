@@ -33,35 +33,6 @@ export function makeFamily(id: string): string {
   return m;
 }
 
-const ACRONYMS = new Set(["glm", "gpt", "oss", "llm", "mimo", "api", "fp8"]);
-
-export function deriveDisplayName(id: string): string {
-  const fam = makeFamily(id);
-  const tokens = fam.split("-").filter(Boolean);
-  const pretty = tokens.map((t) => {
-    if (/^\d+(\.\d+)*$/.test(t)) return t;
-    if (ACRONYMS.has(t.toLowerCase())) return t.toUpperCase();
-    return t.charAt(0).toUpperCase() + t.slice(1);
-  });
-  let name = pretty.join(" ");
-  if (/:free$/i.test(id) || /-free$/i.test(id) || /\bfree\b/i.test(id)) {
-    name += " (Free)";
-  }
-  return name;
-}
-
-export function deriveCapabilitiesFromName(id: string): string[] {
-  const fam = makeFamily(id);
-  const caps: string[] = [];
-  if (/\b(gemma|kimi|llama-4|qwen3|glm-5|step)\b/.test(fam) || /vision/.test(fam)) {
-    caps.push("vision");
-  }
-  if (/\bcoder\b/.test(fam)) {
-    caps.push("coder");
-  }
-  return caps;
-}
-
 export function isFreeModel(id: string): boolean {
   return /:free$/i.test(id) || /-free$/i.test(id);
 }

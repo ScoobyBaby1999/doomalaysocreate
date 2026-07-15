@@ -212,7 +212,7 @@ function ActiveJobRow({ job, onCancel }: { job: MonitorJob; onCancel: () => void
   const pct = typeof job.progress === "number" ? Math.round(job.progress * 100) : null;
   const stage = job.stage ? stageLabel(job.stage) : job.status === "queued" ? "Queued" : "Working…";
   return (
-    <div className="rounded-lg border border-border bg-surface/40 overflow-hidden">
+    <div className="rounded-xl border border-border bg-surface/40 overflow-hidden">
       <div className="flex items-center gap-2 px-2.5 py-2">
         <span className="size-1.5 rounded-full bg-accent animate-pulse shrink-0" />
         <div className="flex-1 min-w-0">
@@ -265,7 +265,7 @@ function RecentJobRow({
   const ok = job.status === "complete";
   const elapsed = job.ended_at && job.started_at ? Math.round((job.ended_at - job.started_at) / 1000) : null;
   return (
-    <div className="rounded-lg border border-border overflow-hidden">
+    <div className="rounded-xl border border-border overflow-hidden">
       <button
         onClick={() => setOpen((o) => !o)}
         className="w-full flex items-center gap-2 px-2.5 py-2 hover:bg-surface transition-colors"

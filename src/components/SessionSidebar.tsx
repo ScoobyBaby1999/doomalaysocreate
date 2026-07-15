@@ -351,7 +351,7 @@ function SessionRow({
   const count = typeof session.message_count === "number" ? session.message_count : null;
   return (
     <div
-      className={`group flex items-center gap-2 px-2.5 py-2 mx-2 rounded-lg cursor-pointer transition-all duration-150 ${
+      className={`group flex items-center gap-2 px-2.5 py-2 mx-2 rounded-xl cursor-pointer transition-all duration-150 ${
         isActive
           ? "bg-accent/10 border border-accent/30"
           : "hover:bg-surface2 border border-transparent"

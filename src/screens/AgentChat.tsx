@@ -515,7 +515,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
               onClick={() => setWsOpen((v) => !v)}
               disabled={running}
               title={workspaceId || "No workspace (ephemeral)"}
-              className="touch-target shrink-0 flex items-center gap-1.5 px-2.5 h-8 rounded-lg border border-border hover:border-accent/60 transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[160px]"
+              className="touch-target shrink-0 flex items-center gap-1.5 px-2.5 h-8 rounded-xl border border-border hover:border-accent/60 transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[160px]"
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-muted-foreground">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -760,7 +760,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
             </div>
             <button
               onClick={() => queue.forEach((q) => dequeueMessage(q.id))}
-              className="touch-target shrink-0 text-muted-foreground hover:text-foreground px-2.5 h-7 rounded-lg hover:bg-surface2 transition-colors text-[11px]"
+              className="touch-target shrink-0 text-muted-foreground hover:text-foreground px-2.5 h-7 rounded-xl hover:bg-surface2 transition-colors text-[11px]"
               title="Clear queue"
             >
               Clear
@@ -778,7 +778,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
           <span className="flex-1 min-w-0">{error}</span>
           <button
             onClick={() => useChatStore.setState({ error: null })}
-            className="touch-target shrink-0 text-red-300/70 hover:text-red-200 px-2.5 h-7 rounded-lg text-[11px]"
+            className="touch-target shrink-0 text-red-300/70 hover:text-red-200 px-2.5 h-7 rounded-xl text-[11px]"
           >
             dismiss
           </button>
@@ -872,7 +872,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
           <div className="flex items-center bg-surface2 rounded-xl p-0.5 text-[11px] shrink-0" title="What happens when you press Enter while the agent is busy">
             <button
               onClick={() => setBusyMode("queue")}
-              className={`touch-target px-2.5 h-7 rounded-lg transition-colors ${
+              className={`touch-target px-2.5 h-7 rounded-xl transition-colors ${
                 busyMode === "queue" ? "bg-accent text-white" : "text-muted-foreground hover:text-foreground"
               }`}
             >
@@ -880,7 +880,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
             </button>
             <button
               onClick={() => setBusyMode("stop")}
-              className={`touch-target px-2.5 h-7 rounded-lg transition-colors ${
+              className={`touch-target px-2.5 h-7 rounded-xl transition-colors ${
                 busyMode === "stop" ? "bg-accent text-white" : "text-muted-foreground hover:text-foreground"
               }`}
             >
@@ -1083,7 +1083,7 @@ function ModePill({
               <button
                 key={m}
                 onClick={() => { setMode(m); setOpen(false); }}
-                className={`w-full text-left px-3 py-2 rounded-lg text-[12px] transition-colors ${
+                className={`w-full text-left px-3 py-2 rounded-xl text-[12px] transition-colors ${
                   mode === m ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
                 }`}
               >
