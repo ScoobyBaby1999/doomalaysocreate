@@ -235,6 +235,180 @@ def resolve_quirks(catalog: dict[str, dict], *, logical: str | None,
     return dict(quirks) if isinstance(quirks, dict) else {}
 
 
+
+# --- web-search catalog (provider-native web search) -------------------------
+# Same shape as the reasoning catalog, but for the per-provider "do they have a
+# NATIVE web-search tool?" question. Lives under the "web_search" key in
+# reasoning_catalog.json so all provider-native tooling lives in one file.
+
+def load_web_search_catalog() -> dict[str, dict]:
+    """Per-(provider, model) native web-search adapter. Returns the
+    ``web_search`` section of reasoning_catalog.json. Keys are catalog keys
+    like 'openrouter/*' or 'openrouter/moonshotai/kimi-k2.6:free'; values
+    are dicts with 'native' (bool) and 'body' (the request-body fields).
+    """
+    try:
+        raw = _load_json_commented(REASONING_CATALOG_PATH).get("web_search", {})
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in raw.items()
+            if not k.startswith("//") and isinstance(v, dict)}
+
+
+def _ws_candidate_keys(provider: str, model: str) -> list[str]:
+    """Build the ordered list of catalog keys to look up for a (provider, model).
+    Resolution order: provider/model -> provider/<last-segment> -> provider/* -> *.
+    """
+    p = (provider or "").strip().lower().replace("_", "-").replace(" ", "")
+    m = (model or "").strip()
+    out: list[str] = []
+    if p and m:
+        out.append(f"{p}/{m}")
+    if m:
+        last = m.split("/")[-1]
+        if last and last != m:
+            out.append(f"{p}/{last}")
+    if p:
+        out.append(f"{p}/*")
+    out.append("*")
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for k in out:
+        if k not in seen:
+            seen.add(k)
+            deduped.append(k)
+    return deduped
+
+
+def resolve_web_search_entry(catalog: dict[str, dict], *,
+                             provider: str | None, model: str | None) -> dict:
+    """Pick the most-specific web_search catalog entry for this (provider, model).
+
+    Returns the entry dict (which has 'native' + 'body' + optional 'note'),
+    or {} when nothing matches. The catch-all '*' entry is only used when no
+    more-specific entry exists (so a host-level 'openrouter/*' overrides '*').
+    """
+    keys = _ws_candidate_keys(provider or "", model or "")
+    for key in keys:
+        if key and key in catalog:
+            # The '*' entry is the fall-through; only return it if it's the
+            # last key in the resolution order (no host-level entry existed).
+            if key == "*":
+                continue
+            entry = catalog.get(key)
+            if isinstance(entry, dict):
+                return entry
+    star = catalog.get("*") or {}
+    return star if isinstance(star, dict) else {}
+
+
+def resolve_web_search_body(catalog: dict[str, dict], *,
+                            provider: str | None, model: str | None) -> dict:
+    """Return the request-body fields to enable NATIVE web search for this
+    (provider, model), or {} when native web search isn't supported."""
+    entry = resolve_web_search_entry(catalog, provider=provider, model=model)
+    if not entry.get("native"):
+        return {}
+    body = entry.get("body")
+    return dict(body) if isinstance(body, dict) else {}
+
+
+def supports_native_web_search(catalog: dict[str, dict], *,
+                               provider: str | None, model: str | None) -> bool:
+    """True iff this (provider, model) has a NATIVE web-search tool."""
+    return bool(resolve_web_search_entry(catalog, provider=provider, model=model)
+                .get("native", False))
+
+
+def _bench_lower(bench: dict | None) -> str:
+    """Lowercase string of benchmark tags + note for capability matching."""
+    if not isinstance(bench, dict):
+        return ""
+    return " ".join(str(bench.get(k, "") or "").lower()
+                    for k in ("tags", "note"))
+
+
+def get_model_capabilities(provider_name: str | None, model_id: str | None, *,
+                           logical: str | None = None,
+                           family: str | None = None,
+                           benchmarks: dict | None = None,
+                           reasoning_catalog: dict | None = None,
+                           web_search_catalog: dict | None = None) -> dict:
+    """Return what this (provider, model) actually supports on its host.
+
+    This is the AUTHORITATIVE capability detector used by the roster endpoint
+    (so the frontend shows accurate per-(provider, model) capability badges
+    instead of "always True for web search"). It cross-references:
+
+      - reasoning_catalog.json 'reasoning' section  -> effort support + param name
+      - reasoning_catalog.json 'web_search' section -> native web search support
+      - benchmarks.json tags/note                   -> tools / vision tags
+
+    Returns:
+        {
+            'effort': bool,                # supports a reasoning/thinking param
+            'effort_param': str|None,      # the param name (e.g. 'reasoning_effort')
+            'web_search': bool,            # supports native web-search tool
+            'web_search_native': bool,     # alias of web_search (clarity)
+            'tools': bool,                 # supports function/tool calling
+            'vision': bool,                # supports image input
+        }
+    """
+    rcat = reasoning_catalog if reasoning_catalog is not None else load_reasoning_catalog()
+    wscat = web_search_catalog if web_search_catalog is not None else load_web_search_catalog()
+
+    # Normalize provider name (catalog uses dashes, env vars use underscores).
+    p = (provider_name or "").strip().lower().replace("_", "-").replace(" ", "")
+    m = (model_id or "").strip()
+    who = f"{p}/{m}" if p and m else None
+    if family is None and m:
+        family = make_model_family(m)
+
+    rbody = resolve_reasoning_body(rcat, logical=logical, who=who, family=family)
+    if rbody:
+        if "reasoning" in rbody:
+            effort_param = "reasoning"
+        elif "reasoning_effort" in rbody:
+            effort_param = "reasoning_effort"
+        elif "chat_template_kwargs" in rbody:
+            effort_param = "chat_template_kwargs"
+        else:
+            effort_param = next(iter(rbody.keys()), None)
+    else:
+        effort_param = None
+
+    ws_native = supports_native_web_search(wscat, provider=p, model=m)
+
+    # Tools / vision: derive from benchmarks tags + catalog notes.
+    bench = benchmarks or {}
+    bench_lower = _bench_lower(bench)
+    full = (bench_lower + " " + (logical or "").lower()
+            + " " + (model_id or "").lower()
+            + " " + (provider_name or "").lower())
+    has_vision = any(t in full for t in ("vision", "image", "multimodal"))
+    has_tools = any(t in full for t in ("tool", "function", "agentic"))
+
+    # Host-level guarantees: OpenRouter exposes OpenAI-style tools on every
+    # chat-completions model; CF Workers AI chat-completions exposes tools
+    # when the model's tag says "Function calling". We're conservative: only
+    # flip has_tools when we have positive evidence.
+    if p == "openrouter":
+        has_tools = True
+    if p == "cloudflare" and m.startswith("@cf/"):
+        if "function calling" in full or "tool" in full:
+            has_tools = True
+
+    return {
+        "effort": bool(rbody),
+        "effort_param": effort_param,
+        "web_search": ws_native,
+        "web_search_native": ws_native,
+        "tools": has_tools,
+        "vision": has_vision,
+    }
+
+
+
 def _first_env(env_var) -> str:
     #   env_var may be a single name or a list (first present wins).
     names = [env_var] if isinstance(env_var, str) else list(env_var or [])

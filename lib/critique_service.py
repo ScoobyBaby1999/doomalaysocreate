@@ -331,64 +331,66 @@ class Panel:
                 blacklisted = bool(st and st.blacklisted)
                 live = not (cooling or blacklisted)
                 safe = slot_is_privacy_safe(s)
+                # Per-host capabilities (accurate, from providers.get_model_capabilities).
+                # This reads reasoning_catalog.json + benchmarks.json so the
+                # frontend can show exactly what THIS host can do (e.g. OpenRouter
+                # kimi-k2.6:free supports native web search, NVIDIA kimi-k2.6 does
+                # not). Falls back to a minimal dict on any error so a roster
+                # failure never breaks the picker.
+                host_caps: dict = {}
+                try:
+                    from providers import get_model_capabilities
+                    host_caps = get_model_capabilities(
+                        s.provider.name, s.model, logical=logical,
+                        family=getattr(s, "model_family", None), benchmarks=bench)
+                except Exception:
+                    host_caps = {}
                 hosts.append({"slot": s.who, "privacy_safe": safe,
                               "stability_tier": s.provider.stability_tier,
-                              "cooling": cooling, "blacklisted": blacklisted})
+                              "cooling": cooling, "blacklisted": blacklisted,
+                              "capabilities": host_caps})
                 routable = routable or live
                 safe_routable = safe_routable or (live and safe)
             if is_frontier:
                 frontier_total += 1
                 if safe_routable:
                     frontier_safe_available += 1
-            # Per-model capabilities — derived from the reasoning_catalog
-            # (a model with a 'body' entry supports effort/thinking) and the
-            # benchmarks (vision/coding/agentic tags). webSearch + deepResearch
-            # are always available (web_tools + research_templates work for
-            # every model); extendedThinking requires a reasoning body entry.
-            rcat = getattr(self, "reasoning_catalog", {}) or {}
-            # Scan ALL catalog entries that could apply to this logical model:
-            #   1. the logical-level entry (key == logical)
-            #   2. every candidate's provider/model entry (key == cand.who)
-            #   3. any catalog key ending with '/{logical}' (catches provider-
-            #      specific entries like 'nvidia/moonshotai/kimi-k2.6' for
-            #      logical 'kimi-k2.6' when the family function splits them).
-            has_reasoning_body = False
-            if isinstance(rcat, dict):
-                _logical_entry = rcat.get(logical) or {}
-                if isinstance(_logical_entry, dict) and _logical_entry.get("body"):
-                    has_reasoning_body = True
-                if not has_reasoning_body:
-                    for cand in (cands or []):
-                        who = getattr(cand, "who", None)
-                        if who and isinstance(rcat.get(who), dict) and rcat[who].get("body"):
-                            has_reasoning_body = True
-                            break
-                if not has_reasoning_body:
-                    suffix = "/" + logical
-                    suffix_free = "/" + logical + ":free"
-                    for k, v in rcat.items():
-                        if not isinstance(v, dict) or not v.get("body"):
-                            continue
-                        if (k.endswith(suffix) or k.endswith(suffix_free)
-                                or k == logical):
-                            has_reasoning_body = True
-                            break
-            caps_tags = []
-            bench_lower = " ".join(str(bench.get(k, "") or "").lower()
-                                    for k in ("tags", "note")).lower()
-            bench_full = (bench_lower + " " + logical.lower()
-                          + " " + " ".join(h["slot"].lower() for h in hosts))
-            if any(t in bench_full for t in ("vision", "image", "multimodal")):
-                caps_tags.append("vision")
-            if any(t in bench_full for t in ("tool", "function", "agentic")):
-                caps_tags.append("tools")
+            # Per-LOGICAL-model capabilities: aggregate per-host capabilities
+            # (any host supporting a feature → the logical model supports it).
+            # This replaces the old "scan catalog keys by suffix" heuristic
+            # with the authoritative providers.get_model_capabilities() call.
+            #
+            # web_search here means NATIVE web search (provider's own tool).
+            # webSearch + deepResearch remain True because our web_tools.py
+            # + research_templates work on EVERY model (the non-native fallback).
+            any_effort = False
+            any_native_ws = False
+            any_tools = False
+            any_vision = False
+            effort_params: set[str] = set()
+            for h in hosts:
+                hc = h.get("capabilities") or {}
+                if hc.get("effort"):
+                    any_effort = True
+                    if hc.get("effort_param"):
+                        effort_params.add(hc["effort_param"])
+                if hc.get("web_search") or hc.get("web_search_native"):
+                    any_native_ws = True
+                if hc.get("tools"):
+                    any_tools = True
+                if hc.get("vision"):
+                    any_vision = True
             capabilities = {
-                "effort": has_reasoning_body,
-                "webSearch": True,
-                "deepResearch": True,
-                "extendedThinking": has_reasoning_body,
-                "tools": "tools" in caps_tags,
-                "vision": "vision" in caps_tags,
+                "effort": any_effort,
+                "effort_param": sorted(p for p in effort_params if p),
+                "web_search": any_native_ws,
+                "web_search_native": any_native_ws,
+                # Backwards-compat aliases (frontend may still use these):
+                "webSearch": True,        # web_tools.py injection works everywhere
+                "deepResearch": True,     # research_templates work everywhere
+                "extendedThinking": any_effort,
+                "tools": any_tools,
+                "vision": any_vision,
             }
             # Pricing (best-effort, from providers_catalog).
             pricing = self._model_pricing(logical, cands)

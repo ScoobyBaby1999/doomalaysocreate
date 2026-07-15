@@ -7,36 +7,77 @@
   "//5": "confirm the exact param from each provider's docs (editable, zero code changes).",
   "//6": "Leave 'body' empty {} to rely on big token budget + the model's default behaviour.",
   "//7": "IMPORTANT: the SAME logical model uses DIFFERENT param shapes per host - NVIDIA",
-  "//8": "NIM uses chat_template_kwargs, OpenRouter uses top-level reasoning:{enabled},",
-  "//9": "Cloudflare's newer slots use top-level reasoning_effort or chat_template_kwargs.",
-  "//10": "Multi-host models are keyed by exact 'provider/model' so the wrong shape never",
-  "//11": "leaks to a host that would 400 it (a 400 blacklists the slot - keep shapes exact).",
-  "//12": "Capability sweep 2026-06: ctx windows + extra knobs recorded in notes below.",
+  "//8": "NIM uses chat_template_kwargs (or top-level reasoning_effort for newer models),",
+  "//9": "OpenRouter uses top-level reasoning:{enabled|effort}, Cloudflare's newer slots use",
+  "//10": "top-level reasoning_effort or chat_template_kwargs. Multi-host models are keyed by",
+  "//11": "exact 'provider/model' so the wrong shape never leaks to a host that would 400 it",
+  "//12": "(a 400 blacklists the slot - keep shapes exact).",
+  "//13": "Capability sweep 2026-06: ctx windows + extra knobs recorded in notes below.",
+  "//14": "VERIFIED 2026-06 (PROVIDER-SKILLS task): fetched each provider's docs page via",
+  "//15": "curl and cross-checked the JSON shape. Sources:",
+  "//16": "  - OpenRouter: https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+  "//17": "    shape: reasoning:{enabled:true} or reasoning:{effort:'max'|'xhigh'|'high'|'medium'|'low'|'minimal'|'none'}",
+  "//18": "    (effort and max_tokens are mutually exclusive).",
+  "//19": "  - NVIDIA NIM (deepseek-v4-pro/flash, nemotron-3-ultra): the docs explicitly say",
+  "//20": "    'Snippets translate this field into the model chat_template_kwargs' - i.e. the",
+  "//21": "    CANONICAL API is the top-level `reasoning_effort` field; sending chat_template_kwargs",
+  "//22": "    directly also works (the underlying shape). We send the top-level form because that",
+  "//23": "    is the documented/supported API and matches the OpenAI-compatible shape on other hosts.",
+  "//24": "  - NVIDIA NIM (kimi-k2.6): chat_template_kwargs:{thinking:true|false} (no top-level alias).",
+  "//25": "  - NVIDIA NIM (gemma-4-31b-it): chat_template_kwargs:{enable_thinking:true|false}.",
+  "//26": "  - Cloudflare: per-model schema exposes either reasoning_effort OR chat_template_kwargs",
+  "//27": "    (kimi-k2.6 -> reasoning_effort; nemotron-120b/gemma-4 -> chat_template_kwargs).",
+  "//28": "  - GitHub Models: Azure OpenAI-compatible. phi-4-reasoning strips system prompts, so",
+  "//29": "    the quirk folds system into user; deepseek-r1 reasons natively (no param).",
 
   "reasoning": {
     "*": { "body": {}, "note": "default: no special param; rely on token budget + native behaviour" },
 
-    "glm-5.1": { "body": {"chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false}}, "note": "NVIDIA NIM only; confirmed. ctx 131k in/out; emits reasoning_content" },
-    "deepseek-v4-pro": { "body": {"chat_template_kwargs": {"thinking": true, "reasoning_effort": "high"}}, "note": "NVIDIA NIM only; confirmed. reasoning_effort max|high|none; ctx 1M. 'high' default - 'max' thinks past every timeout we have (captest judge killed at 35min still thinking); override per-request when truly needed" },
+    "glm-5.1": { "body": {"chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false}}, "note": "NVIDIA NIM only; confirmed. ctx 131k in/out; emits reasoning_content. NIM ref page 404s but captest-verified." },
+    "deepseek-v4-pro": { "body": {"reasoning_effort": "high"}, "note": "NVIDIA NIM canonical API (verified https://docs.api.nvidia.com/nim/reference/deepseek-ai-deepseek-v4-pro-infer). reasoning_effort: none|high|max, default 'high'. NIM internally translates to chat_template_kwargs. 'max' thinks past every timeout we have (captest judge killed at 35min still thinking); override per-request when truly needed. ctx 1M." },
+    "deepseek-v4-flash": { "body": {"reasoning_effort": "high"}, "note": "NVIDIA NIM canonical API (verified https://docs.api.nvidia.com/nim/reference/deepseek-ai-deepseek-v4-flash-infer). reasoning_effort: none|high|max, default 'high'. Snippets translate to chat_template_kwargs. ctx 262k." },
     "deepseek-v3": { "body": {}, "note": "non-reasoning by default (github models)" },
     "deepseek-r1": { "body": {}, "note": "github R1-0528 reasons natively; no param. 403s on our tier - kept for when the tier rises. CF r1-distill removed (captest: hallucinated a deadlock fix)" },
     "phi-4-reasoning": { "body": {}, "quirks": {"system_in_user": true}, "note": "reasoning model by design (github models; streams its think trace). GitHub strips/overrides custom system prompts for this model (captest: in_tokens=233, never saw the input) - quirk folds system into the user message" },
 
-    "nvidia/moonshotai/kimi-k2.6": { "body": {"chat_template_kwargs": {"thinking": true}}, "note": "NVIDIA NIM Kimi thinking (confirmed). ctx 256k; vision-capable (MoonViT)" },
-    "openrouter/moonshotai/kimi-k2.6:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle; ctx 262k" },
+    "nvidia/moonshotai/kimi-k2.6": { "body": {"chat_template_kwargs": {"thinking": true}}, "note": "NVIDIA NIM Kimi thinking (verified https://docs.api.nvidia.com/nim/reference/moonshotai-kimi-k2-6-infer). chat_template_kwargs:{thinking:true|false}; no top-level alias. ctx 256k; vision-capable (MoonViT)" },
+    "openrouter/moonshotai/kimi-k2.6:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle (verified https://openrouter.ai/docs/guides/best-practices/reasoning-tokens). ctx 262k. Could also use reasoning:{effort:'high'} for stronger thinking." },
     "cloudflare/@cf/moonshotai/kimi-k2.6": { "body": {"reasoning_effort": "high", "max_completion_tokens": 32768}, "note": "CF schema exposes reasoning_effort (no chat_template_kwargs); ctx 262k; tools. CF deprecates max_tokens -> send max_completion_tokens or thinking gets cut mid-trace (seen live)" },
     "kimi-k2.6": { "body": {}, "note": "fallback for unlisted hosts: no thinking param" },
 
-    "nvidia/nvidia/nemotron-3-ultra-550b-a55b": { "body": {"chat_template_kwargs": {"enable_thinking": true}, "reasoning_budget": 16384}, "note": "confirmed. ctx up to 1M. extra knobs: chat_template_kwargs.medium_effort (cheaper traces), force_nonempty_content:true REQUIRED when combining tools+thinking; reasoning_budget is soft (closes at newline before budget or +500 tok)" },
+    "nvidia/nvidia/nemotron-3-ultra-550b-a55b": { "body": {"reasoning_effort": "high", "reasoning_budget": 16384}, "note": "NVIDIA NIM canonical API (verified https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-ultra-550b-a55b-infer). reasoning_effort: none|medium|high (default high). reasoning_budget: -1..32768 (default 16384); -1 disables enforcement. Both fields are top-level; NIM translates to chat_template_kwargs.reasoning_budget internally. ctx up to 1M. extra knobs: force_nonempty_content:true REQUIRED when combining tools+thinking; reasoning_budget is soft (closes at newline before budget or +500 tok)" },
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle; ctx 1M" },
     "cloudflare/@cf/nvidia/nemotron-3-120b-a12b": { "body": {"chat_template_kwargs": {"enable_thinking": true}, "max_completion_tokens": 32768}, "note": "CF schema exposes chat_template_kwargs + reasoning_effort; ctx 256k; tools. max_completion_tokens (max_tokens deprecated on CF)" },
     "nemotron-ultra": { "body": {}, "note": "fallback: no thinking param" },
 
-    "nvidia/google/gemma-4-31b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "note": "confirmed. ctx 256k; vision (image+video). rec sampling: temp 1.0 / top_p 0.95 / top_k 64" },
+    "nvidia/google/gemma-4-31b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "note": "NVIDIA NIM canonical API (verified https://docs.api.nvidia.com/nim/reference/google-gemma-4-31b-it-infer). chat_template_kwargs:{enable_thinking:true|false}; no top-level alias. ctx 256k; vision (image+video). rec sampling: temp 1.0 / top_p 0.95 / top_k 64" },
     "openrouter/google/gemma-4-31b-it:free": { "body": {"reasoning": {"enabled": true}}, "note": "OpenRouter reasoning toggle; ctx 256k" },
     "cloudflare/@cf/google/gemma-4-26b-a4b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}, "max_completion_tokens": 32768}, "note": "CF schema exposes chat_template_kwargs + reasoning_effort; ctx 256k; vision. max_completion_tokens (max_tokens deprecated on CF)" },
 
     "gpt-oss-120b": { "body": {}, "note": "CF chat-completions schema does NOT list reasoning_effort (responses API only) - a rejected param would 400-blacklist the slot, so effort stays default. raise via system prompt 'Reasoning: high' if needed. ctx 128k" },
     "step-flash": { "body": {}, "note": "no thinking param documented; ctx 256k; vision; 100-350 tok/s" }
+  },
+
+  "web_search": {
+    "//": "Provider-native web-search adapter. Each provider exposes web search differently",
+    "//1": "(plugins, :online suffix, native provider passthrough). lib/provider_tools.py",
+    "//2": "uses this map to decide whether to call the provider's NATIVE web search tool",
+    "//3": "or fall back to our web_tools.py injection (Tavily/DuckDuckGo). 'body' is",
+    "//4": "shallow-merged into the chat-completions request when native web search is on.",
+    "//5": "Per-host entries (provider/model) take precedence; '*' is the default.",
+
+    "*": { "native": false, "note": "default: no native web search - fall back to web_tools.py injection" },
+
+    "openrouter/*": { "native": true, "body": {"plugins": [{"id": "web"}]}, "note": "OpenRouter web plugin (verified https://openrouter.ai/docs/features/web-search). Model-agnostic grounding via Exa/native/parallel/perplexity. Default engine: native for OpenAI/Anthropic/Google/Perplexity/xAI, Exa for others. Exa costs $0.005/req (still works for :free models but consumes OR credits). Equivalent shortcut: append :online to model slug." },
+    "openrouter/moonshotai/kimi-k2.6:free": { "native": true, "body": {"plugins": [{"id": "web", "engine": "exa", "max_results": 5}]}, "note": "OpenRouter :free model - Exa only (no native engine); 5 results is a good default. Costs $0.005/req in OR credits." },
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": { "native": true, "body": {"plugins": [{"id": "web", "engine": "exa", "max_results": 5}]}, "note": "OpenRouter :free model - Exa only." },
+    "openrouter/google/gemma-4-31b-it:free": { "native": true, "body": {"plugins": [{"id": "web", "engine": "exa", "max_results": 5}]}, "note": "OpenRouter :free model - Exa only." },
+
+    "nvidia/*": { "native": false, "note": "NVIDIA NIM does not expose a native web-search tool on chat-completions; use web_tools.py injection." },
+    "cloudflare/*": { "native": false, "note": "Cloudflare Workers AI has no native web-search tool on chat-completions; use web_tools.py injection." },
+    "github-models/*": { "native": false, "note": "GitHub Models does not expose a native web-search tool; use web_tools.py injection." },
+    "privatemodeai/*": { "native": false, "note": "Privacy-first proxy has no native web-search tool; use web_tools.py injection." },
+    "opencode-zen/*": { "native": false, "note": "OpenCode Zen has no native web-search tool; use web_tools.py injection." },
+    "opencode-go/*": { "native": false, "note": "OpenCode Go has no native web-search tool; use web_tools.py injection." }
   }
 }

@@ -729,11 +729,25 @@ class StrandsAdapter(BaseAdapter):
     """
 
     def __init__(self, workspace: Path, model: str | None = None,
-                 workspace_id: str | None = None, system_prompt: str | None = None):
+                 workspace_id: str | None = None, system_prompt: str | None = None,
+                 effort: str | None = None, panel=None,
+                 web_search: bool = False):
         super().__init__(workspace, workspace_id)
         self.model = model
         self.agent = None
         self.system_prompt = system_prompt or AGENT_SYSTEM_PROMPT
+        # Effort level (low|med|high|max) — when set to non-"low",
+        # open() resolves the per-provider reasoning body from
+        # reasoning_catalog.json via lib/provider_tools.py and forwards
+        # it to LiteLLM as additional_request_params.extra_body. This is
+        # the programmatic way to invoke reasoning (vs. feeding prompts).
+        self.effort = effort
+        self.panel = panel
+        # When True and the provider supports NATIVE web search
+        # (e.g. OpenRouter :online / plugins:[{id:web}]), open() merges
+        # the native-web-search body into the request. Falls back to the
+        # Strands `web_search` tool (Tavily/DuckDuckGo) when not supported.
+        self.web_search = bool(web_search)
         # Resolved routing info (set by open(), surfaced in snapshot for verification)
         self.resolved_model: str | None = None
         self.resolved_provider: str | None = None
@@ -802,7 +816,56 @@ class StrandsAdapter(BaseAdapter):
         # NVIDIA) don't return toolUseId in streaming tool_use deltas → KeyError
         # in Strands' event loop. Non-streaming mode processes the full response
         # at once and _process_tool_calls generates UUIDs for missing IDs.
-        llm = LiteLLMModel(client_args=client_args, model_id=model, stream=False)
+        #
+        # PROGRAMMATIC SKILL INVOCATION (PROVIDER-SKILLS task):
+        # resolve the per-(provider, model) reasoning body from
+        # reasoning_catalog.json and the native-web-search body (when
+        # the user asked for web search AND this provider supports it).
+        # These get shallow-merged into the request body via LiteLLM's
+        # `extra_body` kwarg — litellm forwards extra_body to the underlying
+        # OpenAI-compatible HTTP request. This is the documented way to
+        # invoke reasoning (e.g. OpenRouter `reasoning:{enabled:true}`,
+        # NVIDIA `reasoning_effort:"high"`, CF `chat_template_kwargs`)
+        # and OpenRouter's native web search plugin — instead of feeding
+        # prompts and hoping the model decides to think.
+        extra_body: dict = {}
+        try:
+            import provider_tools
+            # Resolve the canonical provider name from _resolve_open_model
+            # (4th tuple element); fall back to key_env-derived name.
+            _provider_for_caps = provider_label or key_env
+            _enable_reasoning = bool(self.effort and self.effort != "low")
+            _enable_native_ws = bool(self.web_search)
+            # If native web search is requested but unsupported, fall back
+            # to Strands' built-in web_search tool (Tavily/DuckDuckGo) —
+            # which is already loaded below in the tools list. We don't
+            # double-search: if native is on, the Strands web_search tool
+            # stays available but the model typically prefers the native
+            # plugin (lower latency, fresher results).
+            if _enable_native_ws and not provider_tools.supports_native_web_search(
+                    _provider_for_caps, model):
+                _enable_native_ws = False
+            extra_body = provider_tools.build_extra_body(
+                _provider_for_caps, model,
+                enable_reasoning=_enable_reasoning,
+                enable_web_search=_enable_native_ws,
+            )
+            if extra_body:
+                try:
+                    log_event("agent_extra_body", provider=_provider_for_caps,
+                              model=model, keys=list(extra_body.keys()),
+                              effort=self.effort, web_search=_enable_native_ws)
+                except Exception:
+                    pass
+        except Exception:
+            extra_body = {}
+        llm_kwargs = dict(client_args=client_args, model_id=model, stream=False)
+        if extra_body:
+            # Strands LiteLLMModel forwards additional_request_params as
+            # **kwargs to litellm.completion(), which forwards extra_body
+            # to the OpenAI-compatible HTTP request body.
+            llm_kwargs["additional_request_params"] = {"extra_body": extra_body}
+        llm = LiteLLMModel(**llm_kwargs)
 
 
         # the agent works in its session workspace; tools are imported defensively
@@ -1409,7 +1472,7 @@ class ResearchAdapter(BaseAdapter):
                 picked = None
         if picked is None:
             picked = candidates[0]
-        extra_body = None
+        extra_body: dict | None = None
         if self.effort and self.effort != "low":
             rcat = getattr(self.panel, "reasoning_catalog", None) or {}
             try:
@@ -1418,6 +1481,29 @@ class ResearchAdapter(BaseAdapter):
                     family=getattr(picked, "model_family", None)) or None
             except Exception:
                 extra_body = None
+        # PROGRAMMATIC SKILL INVOCATION: when web search or deep research
+        # is requested AND this (provider, model) has a NATIVE web-search
+        # tool (e.g. OpenRouter `plugins:[{id:"web"}]`), merge that body
+        # in here. When NOT supported, the research template falls back
+        # to our web_tools.py injection (Tavily/DuckDuckGo) — no change
+        # needed in extra_body for the fallback path.
+        if (self.web_search or self.deep_research):
+            try:
+                import provider_tools
+                ws_body = provider_tools.native_web_search_body(
+                    picked.provider.name, picked.model)
+                if ws_body:
+                    extra_body = dict(extra_body or {})
+                    extra_body.update(ws_body)
+                    try:
+                        from oplog import log_event as _le
+                        _le("agent_native_web_search",
+                            provider=picked.provider.name, model=picked.model,
+                            body_keys=list(ws_body.keys()))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         return picked, logical, extra_body
 
     def interrupt(self) -> None:
@@ -1446,11 +1532,14 @@ class ResearchAdapter(BaseAdapter):
 
 
 def _make_adapter(tier: str, workspace: Path, model: str | None = None,
-                  workspace_id: str | None = None, system_prompt: str | None = None) -> BaseAdapter:
+                  workspace_id: str | None = None, system_prompt: str | None = None,
+                  effort: str | None = None, panel=None,
+                  web_search: bool = False) -> BaseAdapter:
     if tier == "claude":
         return ClaudeAdapter(workspace, model, workspace_id, system_prompt)
     if tier == "open":
-        return StrandsAdapter(workspace, model, workspace_id, system_prompt)
+        return StrandsAdapter(workspace, model, workspace_id, system_prompt,
+                              effort=effort, panel=panel, web_search=web_search)
     return MockAdapter(workspace, workspace_id, system_prompt)
 
 
@@ -1804,7 +1893,9 @@ class AgentSession:
                 deep_research_template=self.deep_research_template)
         else:
             adapter = _make_adapter(self.tier, self.workspace, self.model,
-                                    self.workspace_id, self.system_prompt)
+                                    self.workspace_id, self.system_prompt,
+                                    effort=self.effort, panel=self.panel,
+                                    web_search=self.web_search)
         self.adapter = adapter
         # Tier 3 — give the adapter a back-reference so it can register the
         # conscious tool registry on the owning session (conscious_id/agent_id).
