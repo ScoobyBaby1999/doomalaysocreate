@@ -4,10 +4,15 @@ import { AgentClient } from "../api/agent";
 import { GitHubClient } from "../api/github";
 import { useChatStore } from "../state/chatStore";
 import { useModelStore } from "../lib/model-store";
+import { isFreeModel } from "../lib/providers/family";
 import { ChatMessageBubble } from "../components/ChatMessageBubble";
 import { SessionSidebar } from "../components/SessionSidebar";
 import { FileDrawer } from "../components/FileDrawer";
 import { PanelDrawer, type PanelInvocation } from "../components/PanelDrawer";
+import { ContextCircle } from "../components/ContextCircle";
+import { PriceGauge } from "../components/PriceGauge";
+import { ToolIcons } from "../components/ToolIcons";
+import { QueueMonitor } from "../components/QueueMonitor";
 
 export function AgentChat({ settings }: { settings: Settings }) {
   // Model store
@@ -56,15 +61,23 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const webSearch = useChatStore((s) => s.webSearch);
   const deepResearch = useChatStore((s) => s.deepResearch);
   const mode = useChatStore((s) => s.mode);
+  const webTemplate = useChatStore((s) => s.webTemplate);
+  const deepTemplate = useChatStore((s) => s.deepTemplate);
+  const judge = useChatStore((s) => s.judge);
+  const busyMode = useChatStore((s) => s.busyMode);
   const files = useChatStore((s) => s.files);
   const fileDrawerOpen = useChatStore((s) => s.fileDrawerOpen);
   const agentSessionId = useChatStore((s) => s._agentSessionId);
   const panelDrawerOpen = useChatStore((s) => s.panelDrawerOpen);
   const panelInvocations = useChatStore((s) => s.panelInvocations);
   const sidebarOpen = useChatStore((s) => s.sidebarOpen);
-  const cost = useChatStore((s) => s.cost);
+  const queueMonitorOpen = useChatStore((s) => s.queueMonitorOpen);
+  const sessionCost = useChatStore((s) => s.sessionCost);
   const lastUsage = useChatStore((s) => s.lastUsage);
   const queue = useChatStore((s) => s.queue);
+  const jobs = useChatStore((s) => s.jobs);
+  const suggestions = useChatStore((s) => s.suggestions);
+  const pinnedSessionIds = useChatStore((s) => s.pinnedSessionIds);
   const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
   // Model verification fields
   const resolvedModel = useChatStore((s) => s.resolvedModel);
@@ -73,15 +86,77 @@ export function AgentChat({ settings }: { settings: Settings }) {
   // Workspace
   const workspaceId = useChatStore((s) => s.workspaceId);
   const setWorkspaceId = useChatStore((s) => s.setWorkspaceId);
+
+  // ── Derived model info ───────────────────────────────────────────────
+  // Find the selected model in the providers list so we can read its REAL
+  // contextLength (was hardcoded 128000) + capabilities (for ToolIcons
+  // dimming) + free status (for PriceGauge).
+  const selectedModelInfo = useMemo(() => {
+    if (!selectedModelId && !selectedSlotId) return null;
+    for (const p of providers) {
+      const m = p.models.find(
+        (m) =>
+          m.id === selectedModelId ||
+          m.slotId === selectedSlotId ||
+          (selectedSlotId && m.slotId === selectedSlotId),
+      );
+      if (m) {
+        const caps = m.attributes?.capabilities || [];
+        return {
+          contextLength: m.contextLength || 128000,
+          capabilities: {
+            effort: caps.includes("effort"),
+            webSearch: caps.includes("webSearch") || caps.includes("web_search"),
+            deepResearch: caps.includes("deepResearch") || caps.includes("deep_research"),
+            extendedThinking:
+              caps.includes("extendedThinking") || caps.includes("extended_thinking"),
+          },
+          isFree: isFreeModel(m.id) || isFreeModel(m.slotId || ""),
+        };
+      }
+    }
+    return null;
+  }, [providers, selectedModelId, selectedSlotId]);
+
+  // Fallbacks when the model isn't in the providers list yet (e.g. logical
+  // ID before the roster sync completes). Default to 128k + all-caps-enabled
+  // so the UI is permissive — better to show a working tool than a dimmed
+  // one when we don't actually know.
+  const modelContextLength = selectedModelInfo?.contextLength || 128000;
+  const modelCapabilities = selectedModelInfo?.capabilities || {
+    effort: true,
+    webSearch: true,
+    deepResearch: true,
+    extendedThinking: true,
+  };
+  const modelIsFree = selectedModelInfo?.isFree || false;
+
+  // The cost of the most-recent assistant message (for PriceGauge current).
+  // Walks the message list backwards to find the last assistant bubble with
+  // a non-null costUsd.
+  const lastMsgCost = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "assistant" && typeof m.costUsd === "number") return m.costUsd;
+    }
+    return null;
+  }, [messages]);
   // Actions (stable references from zustand — don't cause re-renders)
   const setInputText = useChatStore((s) => s.setInputText);
   const setEffort = useChatStore((s) => s.setEffort);
   const setMode = useChatStore((s) => s.setMode);
   const toggleWebSearch = useChatStore((s) => s.toggleWebSearch);
   const toggleDeepResearch = useChatStore((s) => s.toggleDeepResearch);
+  const setWebTemplate = useChatStore((s) => s.setWebTemplate);
+  const setDeepTemplate = useChatStore((s) => s.setDeepTemplate);
+  const setJudge = useChatStore((s) => s.setJudge);
+  const setBusyMode = useChatStore((s) => s.setBusyMode);
+  const resetTools = useChatStore((s) => s.resetTools);
   const setSidebarOpen = useChatStore((s) => s.setSidebarOpen);
   const setFileDrawerOpen = useChatStore((s) => s.setFileDrawerOpen);
   const setPanelDrawerOpen = useChatStore((s) => s.setPanelDrawerOpen);
+  const setQueueMonitorOpen = useChatStore((s) => s.setQueueMonitorOpen);
+  const togglePin = useChatStore((s) => s.togglePin);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const createSession = useChatStore((s) => s.createSession);
   const switchSession = useChatStore((s) => s.switchSession);
@@ -90,6 +165,11 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const sendMessage = useChatStore((s) => s.sendMessage);
   const stopGeneration = useChatStore((s) => s.stopGeneration);
   const dequeueMessage = useChatStore((s) => s.dequeueMessage);
+  const runJudge = useChatStore((s) => s.runJudge);
+  const connectMonitor = useChatStore((s) => s.connectMonitor);
+  const disconnectMonitor = useChatStore((s) => s.disconnectMonitor);
+  const cancelJob = useChatStore((s) => s.cancelJob);
+  const applySuggestion = useChatStore((s) => s.applySuggestion);
 
   // Refs
   const clientRef = useRef(new AgentClient(settings));
@@ -132,6 +212,20 @@ export function AgentChat({ settings }: { settings: Settings }) {
     loadSessions(clientRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Connect the monitor SSE stream on mount + whenever the workspace changes.
+  // The backend pushes job_started/job_progress/job_delta/job_complete/
+  // job_error events so the QueueMonitor panel stays live without polling.
+  useEffect(() => {
+    connectMonitor(clientRef.current);
+    return () => {
+      disconnectMonitor();
+    };
+    // Reconnect when the workspace changes — different workspace = different
+    // job scope. eslint disabled because connectMonitor is a stable zustand
+    // action and we explicitly want the workspace dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
 
   // Handle send — note the store handles queueing when busy.
   const handleSend = useCallback(
@@ -217,11 +311,23 @@ export function AgentChat({ settings }: { settings: Settings }) {
   );
 
   // Settings panel
-  
-  const [activePopover, setActivePopover] = useState<"effort" | "web" | "deep" | "mode" | null>(null);
-
   const running = isBusy && (status === "running" || status === "starting");
   const queueCount = queue.length;
+
+  // Whether ANY tool override is active (drives the "Reset" button visibility).
+  const toolsDirty =
+    effort !== "med" ||
+    webSearch ||
+    deepResearch ||
+    !!webTemplate ||
+    !!deepTemplate ||
+    mode !== "auto";
+
+  // Handle judge run — fired from the ToolIcons popover. The store handles
+  // the placeholder + API call + bubble insertion.
+  const handleRunJudge = useCallback(() => {
+    runJudge(clientRef.current, undefined, effectiveModelId || undefined);
+  }, [runJudge, effectiveModelId]);
 
   return (
     <div className="flex flex-col h-full relative bg-bg">
@@ -340,28 +446,26 @@ export function AgentChat({ settings }: { settings: Settings }) {
           </div>
         )}
 
-        {/* Cost + token usage indicator with hover breakdown */}
-        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground tabular-nums">
-          {cost != null && cost > 0 && (
-            <span
-              className="cursor-help"
-              title={`Cost breakdown:\nTotal: $${cost.toFixed(4)}`}
-            >
-              <span className="text-amber-400/80">${cost.toFixed(4)}</span>
-            </span>
-          )}
-          {lastUsage && (
-            <span
-              className="cursor-help flex items-center gap-1"
-              title={`Token breakdown:\nInput: ${lastUsage.input_tokens.toLocaleString()}\nOutput: ${lastUsage.output_tokens.toLocaleString()}\nTotal: ${lastUsage.total_tokens.toLocaleString()}`}
-            >
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-60">
-                <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
-              </svg>
-              {lastUsage.total_tokens.toLocaleString()}
-            </span>
-          )}
-        </div>
+        {/* PriceGauge — current message cost / session total. Free models
+            show FREE. Uses REAL cost data from the API. */}
+        <PriceGauge
+          currentCost={lastMsgCost}
+          totalCost={sessionCost}
+          isFree={modelIsFree}
+        />
+
+        {/* Token usage indicator with hover breakdown */}
+        {lastUsage && (
+          <div
+            className="flex items-center gap-1 text-[10px] text-muted-foreground tabular-nums cursor-help"
+            title={`Token breakdown:\nInput: ${lastUsage.input_tokens.toLocaleString()}\nOutput: ${lastUsage.output_tokens.toLocaleString()}\nTotal: ${lastUsage.total_tokens.toLocaleString()}${lastUsage.reasoning_tokens ? `\nReasoning: ${lastUsage.reasoning_tokens.toLocaleString()}` : ""}`}
+          >
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-60">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+            </svg>
+            {lastUsage.total_tokens.toLocaleString()}
+          </div>
+        )}
 
         {/* Status indicator — shows what the agent is doing */}
         {running ? (
@@ -380,12 +484,13 @@ export function AgentChat({ settings }: { settings: Settings }) {
           </div>
         ) : null}
 
-        {/* Context usage circle — shows how much of the model's context is used */}
+        {/* Context usage circle — uses the selected model's REAL
+            contextLength (was hardcoded 128000). 44px, percentage in the
+            center, color shift green→amber→red, pulses at ≥100%. */}
         {lastUsage && (
           <ContextCircle
             used={lastUsage.total_tokens}
-            max={128000}
-            title={`Context: ${lastUsage.total_tokens.toLocaleString()} / 128,000 tokens (${Math.round(lastUsage.total_tokens / 128000 * 100)}%)`}
+            max={modelContextLength}
           />
         )}
 
@@ -417,6 +522,29 @@ export function AgentChat({ settings }: { settings: Settings }) {
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
           </svg>
+        </button>
+
+        {/* QueueMonitor toggle — badge shows active job count */}
+        <button
+          onClick={() => setQueueMonitorOpen(!queueMonitorOpen)}
+          className={`p-1.5 rounded-md transition-colors relative ${
+            queueMonitorOpen
+              ? "text-accent bg-accent/10"
+              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+          }`}
+          title="Queue monitor"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" />
+          </svg>
+          {jobs.filter((j) => j.status === "queued" || j.status === "running").length > 0 && (
+            <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-accent text-white text-[9px] font-mono flex items-center justify-center">
+              {jobs.filter((j) => j.status === "queued" || j.status === "running").length}
+            </span>
+          )}
+          {suggestions.length > 0 && !jobs.some((j) => j.status === "queued" || j.status === "running") && (
+            <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-amber-400 animate-pulse" />
+          )}
         </button>
 
         {running ? (
@@ -473,8 +601,23 @@ export function AgentChat({ settings }: { settings: Settings }) {
           <EmptyState onSend={handleSend} />
         ) : (
           <div className="py-3 max-w-3xl mx-auto">
-            {messages.map((msg) => (
-              <ChatMessageBubble key={msg.id} message={msg} />
+            {messages.map((msg, i) => (
+              <ChatMessageBubble
+                key={msg.id}
+                message={msg}
+                onRetry={
+                  // Show "Retry" only on the last assistant message (the one
+                  // most likely to need a re-roll). The retry handler resends
+                  // the last user message, which kicks off a fresh turn.
+                  i === messages.length - 1 && msg.role === "assistant" && !isBusy
+                    ? () => {
+                        if (lastUserMsgRef.current) {
+                          handleSend(lastUserMsgRef.current);
+                        }
+                      }
+                    : undefined
+                }
+              />
             ))}
 
             {/* Typing indicator — only when the latest message is a user
@@ -554,172 +697,81 @@ export function AgentChat({ settings }: { settings: Settings }) {
 
       {/* Input area */}
       <div className="border-t border-border bg-surface/30 pt-2 pb-3 px-3 shrink-0">
-        {/* Input row with compact icon settings */}
+        {/* Tool bar — sits ABOVE the input. ToolIcons renders the unified
+            effort / web / deep / judge popovers, with capability dimming.
+            Reset clears all tool overrides. Queue/Stop toggles what happens
+            when the user presses Enter while a turn is in flight. */}
+        <div className="flex items-center gap-1 max-w-3xl mx-auto mb-1.5 px-1 min-h-[26px]">
+          <ToolIcons
+            effort={effort}
+            webSearch={webSearch}
+            deepResearch={deepResearch}
+            webTemplate={webTemplate}
+            deepTemplate={deepTemplate}
+            judge={judge}
+            capabilities={modelCapabilities}
+            disabled={running}
+            setEffort={setEffort}
+            toggleWebSearch={toggleWebSearch}
+            toggleDeepResearch={toggleDeepResearch}
+            setWebTemplate={setWebTemplate}
+            setDeepTemplate={setDeepTemplate}
+            setJudge={setJudge}
+            onRunJudge={handleRunJudge}
+          />
+
+          {/* Mode toggle (compact pill) — kept here because it's an execution
+              mode, not a tool. Hidden on narrow viewports. */}
+          <ModePill mode={mode} setMode={setMode} disabled={running} />
+
+          {/* Spacer pushes Reset + Queue/Stop toggle to the right. */}
+          <div className="flex-1" />
+
+          {/* Reset — only visible when a tool override is active. */}
+          {toolsDirty && (
+            <button
+              onClick={resetTools}
+              className="text-[10px] px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1 shrink-0"
+              title="Reset all tool selections"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+              Reset
+            </button>
+          )}
+
+          {/* Queue / Stop mode toggle (default: Queue). */}
+          <div className="flex items-center bg-surface2 rounded-md p-0.5 text-[10px] shrink-0" title="What happens when you press Enter while the agent is busy">
+            <button
+              onClick={() => setBusyMode("queue")}
+              className={`px-2 py-0.5 rounded transition-colors ${
+                busyMode === "queue" ? "bg-accent text-white" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Queue
+            </button>
+            <button
+              onClick={() => setBusyMode("stop")}
+              className={`px-2 py-0.5 rounded transition-colors ${
+                busyMode === "stop" ? "bg-accent text-white" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Stop
+            </button>
+          </div>
+
+          {/* Queued message count — appears when there's anything in the queue. */}
+          {queueCount > 0 && (
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-accent/15 text-accent font-mono tabular-nums shrink-0">
+              {queueCount} queued
+            </span>
+          )}
+        </div>
+
+        {/* Input row — textarea + send/stop button */}
         <div className="flex items-end gap-1.5 max-w-3xl mx-auto">
-
-          {/* Effort icon + dropdown */}
-          <div className="relative shrink-0 mb-0.5">
-            <button
-              onClick={() => { setActivePopover(activePopover === "effort" ? null : "effort"); }}
-              className={`p-2 rounded-lg transition-colors ${
-                activePopover === "effort"
-                  ? "text-accent bg-accent/10"
-                  : "text-muted-foreground hover:text-foreground hover:bg-surface2"
-              }`}
-              title={`Effort: ${effort}`}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-              </svg>
-            </button>
-            {activePopover === "effort" && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setActivePopover(null)} />
-                <div className="absolute bottom-full left-0 mb-1 z-50 w-44 rounded-lg border border-border bg-surface shadow-xl p-1.5">
-                  <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Effort Level</div>
-                  {(["low", "med", "high", "max"] as const).map((e) => (
-                    <button
-                      key={e}
-                      onClick={() => { setEffort(e); setActivePopover(null); }}
-                      className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
-                        effort === e ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="capitalize">{e}</span>
-                        <span className="text-[9px] opacity-60">
-                          {e === "low" ? "1 judge" : e === "med" ? "3 judges" : e === "high" ? "5 judges" : "all judges"}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Web search icon + dropdown */}
-          <div className="relative shrink-0 mb-0.5">
-            <button
-              onClick={() => { setActivePopover(activePopover === "web" ? null : "web"); }}
-              className={`p-2 rounded-lg transition-colors ${
-                webSearch || activePopover === "web"
-                  ? "text-accent bg-accent/10"
-                  : "text-muted-foreground hover:text-foreground hover:bg-surface2"
-              }`}
-              title="Web search"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-              </svg>
-            </button>
-            {activePopover === "web" && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setActivePopover(null)} />
-                <div className="absolute bottom-full left-0 mb-1 z-50 w-52 rounded-lg border border-border bg-surface shadow-xl p-1.5">
-                  <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Web Search</div>
-                  <button
-                    onClick={() => { toggleWebSearch(); setActivePopover(null); }}
-                    className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
-                      webSearch ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-surface2"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span>Enable web search</span>
-                      <span className={`size-1.5 rounded-full ${webSearch ? "bg-accent" : "bg-muted-foreground/30"}`} />
-                    </div>
-                    <div className="text-[9px] opacity-60 mt-0.5">Agent can search the web during its turn</div>
-                  </button>
-                  <div className="text-[9px] text-muted-foreground/50 px-2 py-1 mt-1 border-t border-border/50">
-                    Template: breadth-first topic discovery → batched sub-agent search
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Deep research icon + dropdown */}
-          <div className="relative shrink-0 mb-0.5">
-            <button
-              onClick={() => { setActivePopover(activePopover === "deep" ? null : "deep"); }}
-              className={`p-2 rounded-lg transition-colors ${
-                deepResearch || activePopover === "deep"
-                  ? "text-accent bg-accent/10"
-                  : "text-muted-foreground hover:text-foreground hover:bg-surface2"
-              }`}
-              title="Deep research"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z" /><circle cx="12" cy="10" r="3" />
-              </svg>
-            </button>
-            {activePopover === "deep" && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setActivePopover(null)} />
-                <div className="absolute bottom-full left-0 mb-1 z-50 w-52 rounded-lg border border-border bg-surface shadow-xl p-1.5">
-                  <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Deep Research</div>
-                  <button
-                    onClick={() => { toggleDeepResearch(); setActivePopover(null); }}
-                    className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
-                      deepResearch ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-surface2"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span>Enable deep research</span>
-                      <span className={`size-1.5 rounded-full ${deepResearch ? "bg-accent" : "bg-muted-foreground/30"}`} />
-                    </div>
-                    <div className="text-[9px] opacity-60 mt-0.5">Extended reasoning + web ReAct loop</div>
-                  </button>
-                  <div className="text-[9px] text-muted-foreground/50 px-2 py-1 mt-1 border-t border-border/50">
-                    Uses more tokens + longer timeouts for thorough analysis
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Mode icon + dropdown */}
-          <div className="relative shrink-0 mb-0.5">
-            <button
-              onClick={() => { setActivePopover(activePopover === "mode" ? null : "mode"); }}
-              className={`p-2 rounded-lg transition-colors ${
-                activePopover === "mode"
-                  ? "text-accent bg-accent/10"
-                  : "text-muted-foreground hover:text-foreground hover:bg-surface2"
-              }`}
-              title={`Mode: ${mode}`}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 9h6v6H9z" />
-              </svg>
-            </button>
-            {activePopover === "mode" && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setActivePopover(null)} />
-                <div className="absolute bottom-full left-0 mb-1 z-50 w-48 rounded-lg border border-border bg-surface shadow-xl p-1.5">
-                  <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Execution Mode</div>
-                  {(["auto", "build", "plan"] as const).map((m) => (
-                    <button
-                      key={m}
-                      onClick={() => { setMode(m); setActivePopover(null); }}
-                      className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
-                        mode === m ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="capitalize">{m}</span>
-                        {mode === m && <span className="text-[9px]">●</span>}
-                      </div>
-                      <div className="text-[9px] opacity-60 mt-0.5">
-                        {m === "auto" ? "Execute autonomously" : m === "build" ? "Step-by-step with confirmation" : "Plan first, wait for approval"}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-
           <textarea
             ref={inputRef}
             value={inputText}
@@ -728,7 +780,9 @@ export function AgentChat({ settings }: { settings: Settings }) {
             rows={1}
             placeholder={
               isBusy
-                ? "Queue another message… (Enter to queue, Shift+Enter for newline)"
+                ? busyMode === "queue"
+                  ? "Queue another message… (Enter to queue, Shift+Enter for newline)"
+                  : "Type to replace the running turn… (Enter to stop + send)"
                 : "Ask the agent to build, edit, run, or pack something…"
             }
             className="flex-1 resize-none bg-surface2 border border-border rounded-xl px-3.5 py-2.5 text-[14.5px] leading-relaxed outline-none focus:border-accent min-h-[40px] max-h-[160px] transition-colors placeholder:text-muted-foreground/60"
@@ -775,7 +829,11 @@ export function AgentChat({ settings }: { settings: Settings }) {
         <div className="flex items-center justify-center gap-3 mt-1 text-[9px] text-muted-foreground/40">
           <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Enter</kbd> to send</span>
           <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Shift+Enter</kbd> for newline</span>
-          {isBusy && <span className="text-amber-400/60">Queue mode active</span>}
+          {isBusy && (
+            <span className="text-amber-400/60">
+              {busyMode === "queue" ? "Queue mode active" : "Stop mode active"}
+            </span>
+          )}
         </div>
       </div>
 
@@ -785,6 +843,8 @@ export function AgentChat({ settings }: { settings: Settings }) {
         sessions={sessions}
         activeId={activeSessionId}
         isLoading={false}
+        pinnedIds={pinnedSessionIds}
+        onTogglePin={togglePin}
         onSelect={(id) => {
           switchSession(clientRef.current, id);
           setSidebarOpen(false);
@@ -816,6 +876,73 @@ export function AgentChat({ settings }: { settings: Settings }) {
         onClose={() => setPanelDrawerOpen(false)}
         invocations={panelInvocations as PanelInvocation[]}
       />
+
+      <QueueMonitor
+        open={queueMonitorOpen}
+        onClose={() => setQueueMonitorOpen(false)}
+        jobs={jobs}
+        suggestions={suggestions}
+        onApplySuggestion={applySuggestion}
+        onCancelJob={(jobId) => cancelJob(clientRef.current, jobId)}
+      />
+    </div>
+  );
+}
+
+/** Compact execution-mode pill (auto / build / plan). Sits at the right edge
+ *  of the tool bar so it's out of the way but still one click away. */
+function ModePill({
+  mode,
+  setMode,
+  disabled,
+}: {
+  mode: "auto" | "build" | "plan";
+  setMode: (m: "auto" | "build" | "plan") => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative shrink-0">
+      <button
+        onClick={() => !disabled && setOpen((o) => !o)}
+        disabled={disabled}
+        className={`flex items-center gap-1 px-2 py-1 rounded-md text-[10px] transition-colors ${
+          open
+            ? "text-accent bg-accent/10"
+            : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+        } disabled:opacity-50 disabled:cursor-not-allowed capitalize`}
+        title={`Execution mode: ${mode}`}
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 9h6v6H9z" />
+        </svg>
+        <span className="hidden sm:inline">{mode}</span>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute bottom-full left-0 mb-1 z-50 w-48 rounded-lg border border-border bg-surface shadow-xl p-1.5">
+            <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Execution Mode</div>
+            {(["auto", "build", "plan"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => { setMode(m); setOpen(false); }}
+                className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+                  mode === m ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="capitalize">{m}</span>
+                  {mode === m && <span className="text-[9px]">●</span>}
+                </div>
+                <div className="text-[9px] opacity-60 mt-0.5">
+                  {m === "auto" ? "Execute autonomously" : m === "build" ? "Step-by-step with confirmation" : "Plan first, wait for approval"}
+                </div>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -897,28 +1024,3 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
   );
 }
 
-// Context usage circle — fills clockwise as the model's context window fills up
-function ContextCircle({ used, max, title }: { used: number; max: number; title: string }) {
-  const pct = Math.min(1, used / max);
-  const deg = Math.round(pct * 360);
-  const color = pct > 0.85 ? "#f59e0b" : pct > 0.7 ? "#eab308" : "#5b8cff";
-  return (
-    <div
-      className="relative size-4 shrink-0 cursor-help"
-      title={title}
-    >
-      <svg width="16" height="16" viewBox="0 0 16 16" className="-rotate-90">
-        <circle cx="8" cy="8" r="6" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="2" />
-        <circle
-          cx="8" cy="8" r="6" fill="none" stroke={color} strokeWidth="2"
-          strokeDasharray={`${deg / 360 * 37.7} 37.7`}
-          strokeLinecap="round"
-          style={{ transition: "stroke-dasharray 0.3s ease" }}
-        />
-      </svg>
-      {pct > 0.85 && (
-        <span className="absolute -top-1 -right-1 size-1.5 rounded-full bg-amber-400 animate-pulse" />
-      )}
-    </div>
-  );
-}

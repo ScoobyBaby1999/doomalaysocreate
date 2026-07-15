@@ -24,6 +24,9 @@ import {
   type AgentStatus,
   type ChatSession,
   type AgentStart,
+  type MonitorEvent,
+  type MonitorJob,
+  type MonitorSuggestion,
 } from "../api/agent";
 
 // ---------------------------------------------------------------------------
@@ -37,6 +40,12 @@ export type ChatRole =
   | "tool"
   | "status"
   | "panel";
+
+export interface ChatSource {
+  url: string;
+  name?: string;
+  snippet?: string;
+}
 
 export interface ChatMessage {
   id: string;
@@ -53,6 +62,15 @@ export interface ChatMessage {
   seq: number;
   /** True for messages that haven't been ack'd by the backend yet. */
   pending?: boolean;
+  /** Sources cited by this assistant turn (web search results). */
+  sources?: ChatSource[];
+  /** Token usage for this turn (input/output/reasoning). */
+  tokensIn?: number;
+  tokensOut?: number;
+  tokensReasoning?: number;
+  /** Stage hint from the backend ("searching", "reading:3", "synthesizing").
+   *  Rendered as a one-line status indicator above the bubble. */
+  stage?: string;
 }
 
 export interface QueuedMessage {
@@ -71,6 +89,34 @@ export interface PanelInvocation {
   error?: string;
 }
 
+/** Pinned session IDs (survive refresh; rendered in their own group). */
+const PINNED_KEY = "doomalaysocreate.chat.pinned";
+
+function loadPinned(): string[] {
+  try {
+    const raw = localStorage.getItem(PINNED_KEY);
+    return raw ? (JSON.parse(raw) as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePinned(ids: string[]): void {
+  try {
+    localStorage.setItem(PINNED_KEY, JSON.stringify(ids));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Judge-panel configuration exposed by the ToolIcons "Judge" popover. */
+export interface JudgeConfig {
+  count: number; // 1-6
+  template: "critique" | "verify" | "improve" | "debate";
+}
+
+export type BusyMode = "queue" | "stop";
+
 export interface ChatState {
   // Sessions
   sessions: ChatSession[];
@@ -79,6 +125,8 @@ export interface ChatState {
   sessionError: string | null;
   /** True while we're restoring the active session's events on mount/switch. */
   isLoadingMessages: boolean;
+  /** Pinned session IDs — rendered first in the WorkspaceBrowser. */
+  pinnedSessionIds: string[];
 
   // Messages
   messages: ChatMessage[];
@@ -99,6 +147,16 @@ export interface ChatState {
   webSearch: boolean;
   deepResearch: boolean;
   mode: "auto" | "build" | "plan";
+  /** Web-search template override (empty = regular). */
+  webTemplate: "" | "breadth" | "deepdive" | "compare" | "factcheck";
+  /** Deep-research template override (empty = default). */
+  deepTemplate: "" | "react" | "extended";
+  /** Judge-panel configuration for the chat-integrated popover. */
+  judge: JudgeConfig;
+  /** What happens when the user presses Enter while busy:
+   *  - "queue": enqueue the message (default — 1-up philosophy)
+   *  - "stop": interrupt the running turn and send the new one */
+  busyMode: BusyMode;
 
   // Files
   files: AgentFile[];
@@ -111,10 +169,22 @@ export interface ChatState {
   // Session sidebar
   sidebarOpen: boolean;
 
+  // QueueMonitor panel (jobs + suggestions)
+  queueMonitorOpen: boolean;
+  jobs: MonitorJob[];
+  suggestions: MonitorSuggestion[];
+
   // Derived
   cost: number | null;
+  /** Running total cost across the active session. */
+  sessionCost: number;
   /** Token usage from the last agent turn (cost transparency). */
-  lastUsage: { input_tokens: number; output_tokens: number; total_tokens: number } | null;
+  lastUsage: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    reasoning_tokens?: number;
+  } | null;
   currentModel: string | null;
   /** The model the backend actually resolved + is running (for verification). */
   resolvedModel: string | null;
@@ -131,6 +201,8 @@ export interface ChatState {
   /** Highest event seq we've seen for the current agent session. Used as the
    *  SSE cursor for the next turn so we don't replay the whole transcript. */
   _lastEventSeq: number;
+  /** Monitor SSE controller (single per store instance). */
+  _monitorController: AbortController | null;
 
   // Actions
   setInputText: (text: string) => void;
@@ -138,10 +210,18 @@ export interface ChatState {
   toggleWebSearch: () => void;
   toggleDeepResearch: () => void;
   setMode: (mode: "auto" | "build" | "plan") => void;
+  setWebTemplate: (t: "" | "breadth" | "deepdive" | "compare" | "factcheck") => void;
+  setDeepTemplate: (t: "" | "react" | "extended") => void;
+  setJudge: (cfg: Partial<JudgeConfig>) => void;
+  setBusyMode: (m: BusyMode) => void;
+  /** Reset all tool selections (effort=med, web=off, deep=off, templates cleared). */
+  resetTools: () => void;
   setSidebarOpen: (open: boolean) => void;
   setFileDrawerOpen: (open: boolean) => void;
   setPanelDrawerOpen: (open: boolean) => void;
+  setQueueMonitorOpen: (open: boolean) => void;
   setWorkspaceId: (id: string | null) => void;
+  togglePin: (sessionId: string) => void;
 
   // Core operations
   loadSessions: (client: AgentClient) => Promise<void>;
@@ -158,6 +238,16 @@ export interface ChatState {
   dequeueMessage: (id: string) => void;
   stopGeneration: (client: AgentClient) => Promise<void>;
   refreshFiles: (client: AgentClient) => Promise<void>;
+
+  // Judge panel — fired from the ToolIcons popover. Posts to /api/chat/judge
+  // and inserts the merged result as an assistant message.
+  runJudge: (client: AgentClient, input?: string, model?: string) => Promise<void>;
+
+  // Monitor SSE — opens /api/monitor and routes events into jobs/suggestions.
+  connectMonitor: (client: AgentClient) => void;
+  disconnectMonitor: () => void;
+  cancelJob: (client: AgentClient, jobId: string) => Promise<void>;
+  applySuggestion: (id: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +406,8 @@ export function eventsToMessages(events: AgentEvent[]): ChatMessage[] {
           state: AgentStatus;
           detail?: string;
           cost_usd?: number | null;
+          stage?: string;
+          usage?: { input_tokens: number; output_tokens: number; total_tokens: number; reasoning_tokens?: number };
         };
         if (st.state === "idle" && st.detail === "interrupted") {
           messages.push({
@@ -335,8 +427,50 @@ export function eventsToMessages(events: AgentEvent[]): ChatMessage[] {
             timestamp: ts,
             seq,
           });
+        } else if (st.stage) {
+          // Stage hint while running — attach to the most recent streaming
+          // assistant bubble so the status indicator updates above it.
+          if (streamingAssistantIdx !== -1) {
+            const cur = messages[streamingAssistantIdx];
+            messages[streamingAssistantIdx] = { ...cur, stage: st.stage };
+          }
         }
         // status events don't reset streaming indexes — they wrap a turn.
+        break;
+      }
+      case "sources": {
+        // Attach sources to the most recent assistant message (the one that
+        // produced them via web_search). If there isn't one yet, stash on a
+        // new assistant placeholder so the UI can still render the citation.
+        const srcs = ev.sources || [];
+        if (streamingAssistantIdx !== -1) {
+          const cur = messages[streamingAssistantIdx];
+          const merged = [...(cur.sources || []), ...srcs];
+          // Dedupe by URL so a re-emit doesn't double-list.
+          const seen = new Set<string>();
+          const dedup = merged.filter((s) => {
+            if (seen.has(s.url)) return false;
+            seen.add(s.url);
+            return true;
+          });
+          messages[streamingAssistantIdx] = { ...cur, sources: dedup };
+        } else {
+          // Find the last assistant message in the list.
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === "assistant") {
+              const cur = messages[i];
+              const merged = [...(cur.sources || []), ...srcs];
+              const seen = new Set<string>();
+              const dedup = merged.filter((s) => {
+                if (seen.has(s.url)) return false;
+                seen.add(s.url);
+                return true;
+              });
+              messages[i] = { ...cur, sources: dedup };
+              break;
+            }
+          }
+        }
         break;
       }
       case "panel": {
@@ -539,6 +673,8 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
         state: AgentStatus;
         detail?: string;
         cost_usd?: number | null;
+        stage?: string;
+        usage?: { input_tokens: number; output_tokens: number; total_tokens: number; reasoning_tokens?: number };
       };
       if (st.state === "idle" && st.detail === "interrupted") {
         out.push({
@@ -558,6 +694,48 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
           timestamp: ts,
           seq,
         });
+      } else if (st.usage) {
+        // End-of-turn status: attach token usage to the last assistant
+        // message so the bubble can show tokensIn/tokensOut/tokensReasoning.
+        for (let i = out.length - 1; i >= 0; i--) {
+          if (out[i].role === "assistant") {
+            out[i] = {
+              ...out[i],
+              tokensIn: st.usage.input_tokens,
+              tokensOut: st.usage.output_tokens,
+              tokensReasoning: st.usage.reasoning_tokens,
+              costUsd: typeof st.cost_usd === "number" ? st.cost_usd : out[i].costUsd,
+            };
+            break;
+          }
+        }
+      } else if (st.stage) {
+        // Mid-turn stage hint — attach to the most recent streaming assistant
+        // so the bubble shows "Searching the web…" / "Reading 3 sources…" / etc.
+        for (let i = out.length - 1; i >= 0; i--) {
+          if (out[i].role === "assistant") {
+            out[i] = { ...out[i], stage: st.stage };
+            break;
+          }
+        }
+      }
+      return out;
+    }
+    case "sources": {
+      const srcs = ev.sources || [];
+      // Attach to the most recent assistant bubble (streaming or not).
+      for (let i = out.length - 1; i >= 0; i--) {
+        if (out[i].role === "assistant") {
+          const merged = [...(out[i].sources || []), ...srcs];
+          const seen = new Set<string>();
+          const dedup = merged.filter((s) => {
+            if (seen.has(s.url)) return false;
+            seen.add(s.url);
+            return true;
+          });
+          out[i] = { ...out[i], sources: dedup };
+          break;
+        }
       }
       return out;
     }
@@ -608,6 +786,7 @@ export const useChatStore = create<ChatState>()(
       isLoadingSessions: false,
       sessionError: null,
       isLoadingMessages: false,
+      pinnedSessionIds: loadPinned(),
 
       messages: [],
       isStreaming: false,
@@ -623,6 +802,10 @@ export const useChatStore = create<ChatState>()(
       webSearch: false,
       deepResearch: false,
       mode: "auto",
+      webTemplate: "",
+      deepTemplate: "",
+      judge: { count: 3, template: "critique" },
+      busyMode: "queue",
 
       files: [],
       fileDrawerOpen: false,
@@ -631,7 +814,11 @@ export const useChatStore = create<ChatState>()(
       panelDrawerOpen: false,
 
       sidebarOpen: false,
+      queueMonitorOpen: false,
+      jobs: [],
+      suggestions: [],
       cost: null,
+      sessionCost: 0,
       lastUsage: null,
       currentModel: null,
       resolvedModel: null,
@@ -642,6 +829,7 @@ export const useChatStore = create<ChatState>()(
       _agentSessionId: null,
       _streamController: null,
       _lastEventSeq: 0,
+      _monitorController: null,
 
       // -- Simple setters --
       setInputText: (text) => set({ inputText: text }),
@@ -649,9 +837,32 @@ export const useChatStore = create<ChatState>()(
       toggleWebSearch: () => set((s) => ({ webSearch: !s.webSearch })),
       toggleDeepResearch: () => set((s) => ({ deepResearch: !s.deepResearch })),
       setMode: (mode) => set({ mode }),
+      setWebTemplate: (t) => set({ webTemplate: t }),
+      setDeepTemplate: (t) => set({ deepTemplate: t }),
+      setJudge: (cfg) => set((s) => ({ judge: { ...s.judge, ...cfg } })),
+      setBusyMode: (m) => set({ busyMode: m }),
+      resetTools: () =>
+        set({
+          effort: "med",
+          webSearch: false,
+          deepResearch: false,
+          webTemplate: "",
+          deepTemplate: "",
+          mode: "auto",
+          judge: { count: 3, template: "critique" },
+        }),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
       setFileDrawerOpen: (open) => set({ fileDrawerOpen: open }),
       setPanelDrawerOpen: (open) => set({ panelDrawerOpen: open }),
+      setQueueMonitorOpen: (open) => set({ queueMonitorOpen: open }),
+      togglePin: (sessionId) => {
+        const cur = get().pinnedSessionIds;
+        const next = cur.includes(sessionId)
+          ? cur.filter((id) => id !== sessionId)
+          : [sessionId, ...cur];
+        set({ pinnedSessionIds: next });
+        savePinned(next);
+      },
       setWorkspaceId: (id) => {
         set({ workspaceId: id });
         try {
@@ -726,7 +937,8 @@ export const useChatStore = create<ChatState>()(
             isStreaming: false,
             error: null,
             cost: null,
-      lastUsage: null,
+            sessionCost: 0,
+            lastUsage: null,
             currentModel: model || null,
             resolvedModel: null,
             resolvedProvider: null,
@@ -734,6 +946,7 @@ export const useChatStore = create<ChatState>()(
             panelInvocations: [],
             files: [],
             queue: [],
+            suggestions: [],
             _agentSessionId: null,
             _streamController: null,
             _lastEventSeq: 0,
@@ -768,7 +981,8 @@ export const useChatStore = create<ChatState>()(
           isBusy: false,
           isStreaming: false,
           cost: null,
-      lastUsage: null,
+          sessionCost: 0,
+          lastUsage: null,
           files: [],
           currentModel: null,
           resolvedModel: null,
@@ -776,6 +990,7 @@ export const useChatStore = create<ChatState>()(
           requestedModel: null,
           panelInvocations: [],
           queue: [],
+          suggestions: [],
           _agentSessionId: null,
           _streamController: null,
           _lastEventSeq: 0,
@@ -871,14 +1086,24 @@ export const useChatStore = create<ChatState>()(
         set((s) => ({ queue: s.queue.filter((q) => q.id !== id) }));
       },
 
-      // -- Send message (with queue support) --
+      // -- Send message (with queue + stop mode support) --
       sendMessage: async (client, message, model) => {
         const text = message.trim();
         if (!text) return;
         const state = get();
 
-        // If busy, enqueue instead of rejecting.
+        // If busy:
+        //  - busyMode "queue" (default): enqueue so it fires after the current turn.
+        //  - busyMode "stop": interrupt the running turn, then send this one immediately.
         if (state.isBusy) {
+          if (state.busyMode === "stop") {
+            await get().stopGeneration(client);
+            // stopGeneration is async — give the backend a beat to settle the
+            // interrupt before we kick off a new turn.
+            await new Promise((r) => setTimeout(r, 50));
+            await _runTurn(client, text, model, set, get);
+            return;
+          }
           set((s) => ({
             queue: [...s.queue, { id: genQueueId(), text, enqueuedAt: Date.now() }],
             inputText: "",
@@ -923,6 +1148,200 @@ export const useChatStore = create<ChatState>()(
           /* ignore */
         }
       },
+
+      // -- Judge panel (chat-integrated) ---------------------------------
+      // Fires a POST /api/chat/judge with the current input (or the supplied
+      // override) and the user-configured count + template. The merged result
+      // is inserted as an assistant message tagged with [Judge Panel].
+      runJudge: async (client, input, model) => {
+        const text = (input ?? get().inputText).trim();
+        if (!text) return;
+        const cfg = get().judge;
+        // Insert a placeholder streaming assistant bubble so the user sees
+        // immediate feedback that the judge panel is running.
+        const placeholderId = genMsgId();
+        const placeholder: ChatMessage = {
+          id: placeholderId,
+          role: "assistant",
+          content: "",
+          isStreaming: true,
+          stage: "judge:running",
+          timestamp: Date.now(),
+          seq: -1,
+          pending: true,
+        };
+        set((s) => ({
+          messages: [...s.messages, placeholder],
+          isBusy: true,
+          status: "running",
+          inputText: input ? get().inputText : "",
+          error: null,
+        }));
+        try {
+          const res = await client.runJudge({
+            input: text,
+            template: cfg.template,
+            count: cfg.count,
+            model: model || undefined,
+          });
+          // Replace the placeholder with the merged output. Keep the
+          // assistant role so the bubble renders normally with Markdown.
+          set((s) => ({
+            messages: s.messages.map((m) =>
+              m.id === placeholderId
+                ? {
+                    ...m,
+                    content: res.merged || "(no output)",
+                    isStreaming: false,
+                    stage: undefined,
+                    pending: false,
+                    costUsd: null,
+                  }
+                : m,
+            ),
+            isBusy: false,
+            status: "idle",
+          }));
+        } catch (e) {
+          set((s) => ({
+            messages: s.messages.map((m) =>
+              m.id === placeholderId
+                ? {
+                    ...m,
+                    content: `Judge panel failed: ${e instanceof Error ? e.message : String(e)}`,
+                    isStreaming: false,
+                    isError: true,
+                    stage: undefined,
+                    pending: false,
+                  }
+                : m,
+            ),
+            isBusy: false,
+            status: "idle",
+            error: e instanceof Error ? e.message : "Judge panel failed",
+          }));
+        }
+      },
+
+      // -- Monitor SSE (job queue + suggestions) -------------------------
+      connectMonitor: (client) => {
+        // Don't double-open.
+        if (get()._monitorController) return;
+        const ctrl = client.monitorStream(
+          get().workspaceId,
+          (ev: MonitorEvent) => {
+            switch (ev.type) {
+              case "job_started": {
+                set((s) => ({
+                  jobs: [...s.jobs.filter((j) => j.id !== ev.job.id), ev.job],
+                }));
+                break;
+              }
+              case "job_progress": {
+                set((s) => ({
+                  jobs: s.jobs.map((j) =>
+                    j.id === ev.job_id
+                      ? {
+                          ...j,
+                          stage: ev.stage ?? j.stage,
+                          progress: ev.progress ?? j.progress,
+                          cost_usd: ev.cost_usd ?? j.cost_usd,
+                          status: "running",
+                        }
+                      : j,
+                  ),
+                }));
+                break;
+              }
+              case "job_delta": {
+                // We don't surface delta text in the QueueMonitor (the chat
+                // bubble already streams it). Just bump the job's last-touched
+                // timestamp so the active list re-orders.
+                set((s) => ({
+                  jobs: s.jobs.map((j) =>
+                    j.id === ev.job_id ? { ...j, status: "running" } : j,
+                  ),
+                }));
+                break;
+              }
+              case "job_complete": {
+                set((s) => ({
+                  jobs: s.jobs.map((j) =>
+                    j.id === ev.job_id
+                      ? {
+                          ...j,
+                          status: ev.ok ? "complete" : "error",
+                          stage: undefined,
+                          progress: 1,
+                          ended_at: Date.now(),
+                          cost_usd: ev.total_cost_usd ?? j.cost_usd,
+                        }
+                      : j,
+                  ),
+                  // Append any new suggestions (deduped by id, sorted by importance×creativity desc).
+                  suggestions: ev.suggestions
+                    ? mergeSuggestions(s.suggestions, ev.suggestions)
+                    : s.suggestions,
+                }));
+                break;
+              }
+              case "job_error": {
+                set((s) => ({
+                  jobs: s.jobs.map((j) =>
+                    j.id === ev.job_id
+                      ? {
+                          ...j,
+                          status: "error",
+                          stage: ev.error,
+                          ended_at: Date.now(),
+                        }
+                      : j,
+                  ),
+                }));
+                break;
+              }
+            }
+          },
+          () => {
+            // On error: clear the controller so connectMonitor can retry
+            // next time. We don't surface the error to the user — the
+            // chat itself still works without the monitor.
+            set({ _monitorController: null });
+          },
+        );
+        set({ _monitorController: ctrl });
+      },
+
+      disconnectMonitor: () => {
+        const ctrl = get()._monitorController;
+        if (ctrl) {
+          try { ctrl.abort(); } catch { /* ignore */ }
+        }
+        set({ _monitorController: null });
+      },
+
+      cancelJob: async (client, jobId) => {
+        // Optimistic: mark cancelled locally so the UI reflects it instantly.
+        set((s) => ({
+          jobs: s.jobs.map((j) =>
+            j.id === jobId
+              ? { ...j, status: "error", stage: "cancelled", ended_at: Date.now() }
+              : j,
+          ),
+        }));
+        try {
+          await client.cancelJob(jobId);
+        } catch {
+          /* keep optimistic state */
+        }
+      },
+
+      // Drop a suggestion into the input box so the user can edit/send it.
+      applySuggestion: (id) => {
+        const sug = get().suggestions.find((s) => s.id === id);
+        if (!sug) return;
+        set({ inputText: sug.text });
+      },
     }),
     {
       name: "doomalaysocreate.chat.store",
@@ -932,10 +1351,29 @@ export const useChatStore = create<ChatState>()(
         deepResearch: state.deepResearch,
         mode: state.mode,
         sidebarOpen: state.sidebarOpen,
+        busyMode: state.busyMode,
+        webTemplate: state.webTemplate,
+        deepTemplate: state.deepTemplate,
+        judge: state.judge,
       }),
     },
   ),
 );
+
+/** Merge new suggestions into existing, dedupe by id, and sort by
+ *  (importance desc, creativity desc). Cap at 12 entries so the panel
+ *  doesn't grow unbounded. */
+function mergeSuggestions(
+  existing: MonitorSuggestion[],
+  incoming: MonitorSuggestion[],
+): MonitorSuggestion[] {
+  const map = new Map<string, MonitorSuggestion>();
+  for (const s of existing) map.set(s.id, s);
+  for (const s of incoming) map.set(s.id, s);
+  return Array.from(map.values())
+    .sort((a, b) => b.importance - a.importance || b.creativity - a.creativity)
+    .slice(0, 12);
+}
 
 // ---------------------------------------------------------------------------
 // Internal: run a single agent turn (called by sendMessage and the queue
@@ -1004,6 +1442,9 @@ async function _runTurn(
         web_search: get().webSearch,
         deep_research: get().deepResearch,
         mode: get().mode,
+        web_template: get().webTemplate || undefined,
+        deep_template: get().deepTemplate || undefined,
+        judge: { count: get().judge.count, template: get().judge.template },
       },
     );
     agentSid = start.session_id;
@@ -1044,10 +1485,17 @@ async function _runTurn(
 
         // Update status from status events.
         if (ev.type === "status") {
-          const st = ev as { state: AgentStatus; cost_usd?: number | null; usage?: { input_tokens: number; output_tokens: number; total_tokens: number } };
+          const st = ev as {
+            state: AgentStatus;
+            cost_usd?: number | null;
+            usage?: { input_tokens: number; output_tokens: number; total_tokens: number; reasoning_tokens?: number };
+          };
           set({ status: st.state });
           if (typeof st.cost_usd === "number") {
-            set({ cost: st.cost_usd });
+            // cost_usd is the SESSION TOTAL so far (the backend accumulates),
+            // not per-turn. We store it on `cost` for the header gauge and on
+            // `sessionCost` for the running PriceGauge total.
+            set({ cost: st.cost_usd, sessionCost: st.cost_usd });
           }
           if (st.usage) {
             set({ lastUsage: st.usage });

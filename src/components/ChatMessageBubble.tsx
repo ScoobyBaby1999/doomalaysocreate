@@ -1,7 +1,7 @@
 import { useState, memo } from "react";
 import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
-import type { ChatMessage } from "../state/chatStore";
+import type { ChatMessage, ChatSource } from "../state/chatStore";
 
 const TOOL_ICONS: Record<string, string> = {
   bash: "Terminal",
@@ -32,11 +32,29 @@ function isDiff(text: string): boolean {
   return text.includes("---") && text.includes("+++") && /^diff --git/.test(text.trim());
 }
 
-interface ChatMessageBubbleProps {
-  message: ChatMessage;
+/** Map a backend stage hint to a human label. */
+function stageLabel(stage: string): string {
+  if (stage === "searching") return "Searching the web…";
+  if (stage === "synthesizing") return "Synthesizing…";
+  if (stage.startsWith("reading:")) {
+    const n = stage.slice("reading:".length);
+    return `Reading ${n} source${n === "1" ? "" : "s"}…`;
+  }
+  if (stage.startsWith("judge:")) return "Judge panel running…";
+  // Fall back to whatever the backend sent, humanized.
+  return stage.charAt(0).toUpperCase() + stage.slice(1) + "…";
 }
 
-export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
+interface ChatMessageBubbleProps {
+  message: ChatMessage;
+  /** Optional retry callback for the last assistant message. */
+  onRetry?: () => void;
+}
+
+export const ChatMessageBubble = memo(function ChatMessageBubble({
+  message,
+  onRetry,
+}: ChatMessageBubbleProps) {
   // -- User message: right-aligned bubble with pending indicator ----------
   if (message.role === "user") {
     return (
@@ -63,21 +81,49 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: Ch
 
   // -- Assistant message: left-aligned with avatar + markdown -------------
   if (message.role === "assistant") {
+    const hasMeta =
+      message.tokensIn != null ||
+      message.tokensOut != null ||
+      message.tokensReasoning != null ||
+      typeof message.costUsd === "number";
     return (
       <div className="flex justify-start px-4 py-1.5 group">
         <div className="flex gap-2.5 max-w-[92%] fade-in">
           <Avatar kind="assistant" />
           <div className="flex-1 min-w-0 pt-0.5">
+            {/* Status indicator — mid-turn stage hint */}
+            {message.isStreaming && message.stage && (
+              <div className="flex items-center gap-1.5 text-[10.5px] text-accent/80 mb-1 fade-in">
+                <span className="flex gap-0.5">
+                  <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "0ms" }} />
+                  <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "120ms" }} />
+                  <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "240ms" }} />
+                </span>
+                <span>{stageLabel(message.stage)}</span>
+              </div>
+            )}
             <div className="text-[14.5px] leading-relaxed text-foreground">
               <Markdown text={message.content} />
               {message.isStreaming && (
                 <span className="inline-block w-[6px] h-[15px] ml-0.5 bg-accent animate-pulse align-middle rounded-sm" />
               )}
             </div>
-            {/* Action bar — visible on hover */}
+            {/* Sources panel — collapsible list of cited URLs */}
+            {message.sources && message.sources.length > 0 && (
+              <SourcesPanel sources={message.sources} />
+            )}
+            {/* Meta + actions row — visible on hover */}
             {!message.isStreaming && message.content.trim() && (
-              <div className="flex items-center gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="flex items-center gap-2 mt-1 opacity-0 group-hover:opacity-100 transition-opacity flex-wrap">
                 <CopyButton text={message.content} />
+                {onRetry && <RetryButton onClick={onRetry} />}
+                {hasMeta && <MessageMeta message={message} />}
+              </div>
+            )}
+            {/* Even when streaming, show meta on hover for live cost tracking */}
+            {message.isStreaming && hasMeta && (
+              <div className="flex items-center gap-2 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <MessageMeta message={message} />
               </div>
             )}
           </div>
@@ -92,7 +138,11 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ message }: Ch
     return (
       <div className="px-4 py-1 fade-in">
         <Collapsible
-          label={message.isStreaming ? `Thinking… ${preview}${message.content.length > 80 ? "…" : ""}` : "Thinking"}
+          label={
+            message.isStreaming
+              ? `Thinking… ${preview}${message.content.length > 80 ? "…" : ""}`
+              : "Thinking"
+          }
           kind="thinking"
           defaultOpen={!!message.isStreaming}
         >
@@ -362,5 +412,160 @@ function CopyButton({ text }: { text: string }) {
         </>
       )}
     </button>
+  );
+}
+
+function RetryButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="text-[9px] px-1.5 py-0.5 rounded text-muted-foreground/60 hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1"
+      title="Retry this turn"
+    >
+      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="23 4 23 10 17 10" />
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+      </svg>
+      Retry
+    </button>
+  );
+}
+
+/** Per-message metadata row: tokens (in↓ out↑ reasoning🧠) + cost ($ or free). */
+function MessageMeta({ message }: { message: ChatMessage }) {
+  const parts: React.ReactNode[] = [];
+  if (message.tokensIn != null) {
+    parts.push(
+      <span key="in" className="flex items-center gap-0.5" title="Input tokens">
+        <span>↓</span>
+        <span>{message.tokensIn.toLocaleString()}</span>
+      </span>,
+    );
+  }
+  if (message.tokensOut != null) {
+    parts.push(
+      <span key="out" className="flex items-center gap-0.5" title="Output tokens">
+        <span>↑</span>
+        <span>{message.tokensOut.toLocaleString()}</span>
+      </span>,
+    );
+  }
+  if (message.tokensReasoning != null && message.tokensReasoning > 0) {
+    parts.push(
+      <span key="reason" className="flex items-center gap-0.5" title="Reasoning tokens">
+        <span>🧠</span>
+        <span>{message.tokensReasoning.toLocaleString()}</span>
+      </span>,
+    );
+  }
+  if (typeof message.costUsd === "number") {
+    if (message.costUsd === 0) {
+      parts.push(
+        <span key="cost" className="text-emerald-400/80" title="Free model">
+          free
+        </span>,
+      );
+    } else {
+      const v = message.costUsd;
+      const s = v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(3)}`;
+      parts.push(
+        <span key="cost" className="text-amber-400/80" title="Cost (USD)">
+          {s}
+        </span>,
+      );
+    }
+  }
+  if (parts.length === 0) return null;
+  return (
+    <div className="flex items-center gap-2 text-[9px] text-muted-foreground/60 font-mono tabular-nums">
+      {parts}
+    </div>
+  );
+}
+
+/** Collapsible "N sources" panel with citation links. */
+function SourcesPanel({ sources }: { sources: ChatSource[] }) {
+  const [open, setOpen] = useState(false);
+  if (sources.length === 0) return null;
+  return (
+    <div className="mt-1.5 max-w-2xl">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={`transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+        >
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+        </svg>
+        <span>
+          {sources.length} source{sources.length !== 1 ? "s" : ""}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-1 rounded-lg border border-border bg-surface/30 overflow-hidden">
+          {sources.map((s, i) => {
+            const host = (() => {
+              try {
+                return new URL(s.url).hostname.replace(/^www\./, "");
+              } catch {
+                return s.url;
+              }
+            })();
+            return (
+              <a
+                key={i}
+                href={s.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block px-3 py-2 hover:bg-surface2 transition-colors border-b border-border/50 last:border-b-0 group"
+                title={s.url}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-muted-foreground/60 font-mono shrink-0">
+                    {i + 1}.
+                  </span>
+                  <span className="text-[11px] text-accent font-medium truncate flex-1">
+                    {s.name || host}
+                  </span>
+                  <svg
+                    width="9"
+                    height="9"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="text-muted-foreground/60 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+                  >
+                    <path d="M7 7h10v10" />
+                    <path d="M7 17 17 7" />
+                  </svg>
+                </div>
+                <div className="text-[9px] text-muted-foreground/50 ml-4 truncate">{host}</div>
+                {s.snippet && (
+                  <div className="text-[10px] text-muted-foreground/70 mt-1 ml-4 line-clamp-2">
+                    {s.snippet}
+                  </div>
+                )}
+              </a>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }

@@ -25,7 +25,21 @@ export type AgentEvent =
       state: "starting" | "idle" | "running" | "error";
       detail?: string;
       cost_usd?: number | null;
-      usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
+      usage?: {
+        input_tokens: number;
+        output_tokens: number;
+        total_tokens: number;
+        reasoning_tokens?: number;
+      };
+      /** Stage hint — e.g. "searching", "reading:3", "synthesizing".
+       *  The frontend maps these to human labels in the bubble status row. */
+      stage?: string;
+    }
+  | {
+      i: number;
+      ts: number;
+      type: "sources";
+      sources: { url: string; name?: string; snippet?: string }[];
     }
   | {
       i: number;
@@ -46,6 +60,53 @@ export type AgentEvent =
       guidance: string;
       detail: string;
     };
+
+/** Monitor SSE events — emitted by the backend's /api/monitor stream.
+ *  These drive the QueueMonitor panel (active jobs, recent jobs, suggestions). */
+export type MonitorEvent =
+  | { type: "job_started"; job: MonitorJob }
+  | {
+      type: "job_progress";
+      job_id: string;
+      stage?: string;
+      progress?: number;
+      detail?: string;
+      cost_usd?: number;
+    }
+  | { type: "job_delta"; job_id: string; text: string }
+  | {
+      type: "job_complete";
+      job_id: string;
+      ok: boolean;
+      merged?: string;
+      suggestions?: MonitorSuggestion[];
+      total_cost_usd?: number;
+    }
+  | { type: "job_error"; job_id: string; error: string };
+
+export interface MonitorJob {
+  id: string;
+  space_id?: string;
+  kind: "chat" | "panel" | "template";
+  status: "queued" | "running" | "complete" | "error";
+  prompt: string;
+  stage?: string;
+  progress?: number;
+  started_at?: number;
+  ended_at?: number;
+  cost_usd?: number;
+  model?: string;
+}
+
+export interface MonitorSuggestion {
+  id: string;
+  text: string;
+  /** Higher = more important. Used to sort. */
+  importance: number;
+  /** Higher = more creative. Used to sort + label. */
+  creativity: number;
+  kind?: "followup" | "action" | "question" | "template";
+}
 
 export type AgentStatus = "starting" | "idle" | "running" | "error";
 
@@ -90,6 +151,8 @@ export interface ChatSession {
   user_id?: string | null;
   created_at: string;
   updated_at: string;
+  /** Optional message count (populated when the backend returns `_count`). */
+  message_count?: number;
 }
 
 export class AgentClient {
@@ -155,7 +218,18 @@ export class AgentClient {
     model?: string,
     workspaceId?: string,
     chatSessionId?: string,
-    opts?: { effort?: string; web_search?: boolean; deep_research?: boolean; mode?: string },
+    opts?: {
+      effort?: string;
+      web_search?: boolean;
+      deep_research?: boolean;
+      mode?: string;
+      /** Web-search template override ("breadth" | "deepdive" | "compare" | "factcheck"). */
+      web_template?: string;
+      /** Deep-research template override ("react" | "extended"). */
+      deep_template?: string;
+      /** Judge-panel config: { count, template }. */
+      judge?: { count: number; template: string };
+    },
   ) {
     const body: Record<string, unknown> = { message };
     if (sessionId) body.session_id = sessionId;
@@ -166,6 +240,9 @@ export class AgentClient {
     if (opts?.web_search) body.web_search = true;
     if (opts?.deep_research) body.deep_research = true;
     if (opts?.mode) body.mode = opts.mode;
+    if (opts?.web_template) body.web_template = opts.web_template;
+    if (opts?.deep_template) body.deep_template = opts.deep_template;
+    if (opts?.judge) body.judge = opts.judge;
     return this.req<AgentStart>("/api/agent", {
       method: "POST",
       body: JSON.stringify(body),
@@ -359,5 +436,134 @@ export class AgentClient {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  }
+
+  // -- judge panel (chat-integrated) -------------------------------------
+
+  /** Run the judge panel directly from chat. Returns the merged result + per-judge info. */
+  runJudge(body: { input: string; template?: string; count?: number; model?: string }) {
+    return this.req<{
+      merged: string;
+      judges: { model: string; status: string; output?: string; error?: string }[];
+      ok: boolean;
+      total: number;
+    }>("/api/chat/judge", {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: this.jwtHeaders(),
+    });
+  }
+
+  // -- async job queue + monitor SSE ------------------------------------
+
+  /** Enqueue a job (chat turn, panel run, template run). Returns the job id. */
+  enqueueJob(body: {
+    kind: "chat" | "panel" | "template";
+    prompt: string;
+    model?: string;
+    spaceId?: string;
+    template?: string;
+    effort?: string;
+    web_search?: boolean;
+    deep_research?: boolean;
+  }) {
+    return this.req<{ job_id: string; status: string }>("/api/chat/queue", {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: this.jwtHeaders(),
+    });
+  }
+
+  /** List queued/running/recent jobs for a space. */
+  listJobs(spaceId?: string) {
+    const qs = spaceId ? `?spaceId=${encodeURIComponent(spaceId)}` : "";
+    return this.req<{ jobs: MonitorJob[] }>(`/api/chat/queue${qs}`);
+  }
+
+  /** Cancel a queued/running job. */
+  cancelJob(jobId: string) {
+    return this.req<{ ok: boolean }>(`/api/chat/queue`, {
+      method: "PATCH",
+      body: JSON.stringify({ job_id: jobId, action: "cancel" }),
+      headers: this.jwtHeaders(),
+    });
+  }
+
+  /** Get live pricing (per-model $/1M tokens, free flags). */
+  getPricing() {
+    return this.req<{
+      models: {
+        id: string;
+        prompt_price_per_1m?: number;
+        completion_price_per_1m?: number;
+        is_free?: boolean;
+      }[];
+    }>("/api/pricing");
+  }
+
+  /**
+   * Open the monitor SSE stream. Returns an AbortController. The onEvent
+   * callback fires for every job_started/job_progress/job_delta/job_complete/
+   * job_error event. We use fetch + ReadableStream (not native EventSource)
+   * so we can pass the Authorization header (EventSource can't).
+   */
+  monitorStream(
+    spaceId: string | null,
+    onEvent: (ev: MonitorEvent) => void,
+    onError?: (err: Error) => void,
+  ): AbortController {
+    const ac = new AbortController();
+    const baseUrl = this.settings.baseUrl;
+    this.bearer(0).then((token) => {
+      const qs = spaceId ? `?spaceId=${encodeURIComponent(spaceId)}` : "";
+      const url = `${baseUrl}/api/monitor${qs}`;
+      fetch(url, {
+        signal: ac.signal,
+        headers: { Authorization: `Bearer ${token}`, ...this.jwtHeaders() },
+      })
+        .then(async (r) => {
+          if (!r.ok) {
+            onError?.(new Error(`monitor stream HTTP ${r.status}`));
+            return;
+          }
+          const reader = r.body?.getReader();
+          if (!reader) {
+            onError?.(new Error("monitor: no response body"));
+            return;
+          }
+          const decoder = new TextDecoder();
+          let buf = "";
+          try {
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+              const lines = buf.split("\n");
+              buf = lines.pop() || "";
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed.startsWith("data: ")) {
+                  try {
+                    const ev = JSON.parse(trimmed.slice(6)) as MonitorEvent;
+                    onEvent(ev);
+                  } catch {
+                    /* skip malformed */
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            if ((e as Error)?.name !== "AbortError") {
+              onError?.(e instanceof Error ? e : new Error(String(e)));
+            }
+          }
+        })
+        .catch((e) => {
+          if ((e as Error)?.name !== "AbortError") {
+            onError?.(e instanceof Error ? e : new Error(String(e)));
+          }
+        });
+    });
+    return ac;
   }
 }
