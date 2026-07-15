@@ -5,7 +5,6 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
 
 from oplog import atomic_write_json, log_event
 

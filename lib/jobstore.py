@@ -4,7 +4,6 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
 from oplog import atomic_write_json, log_event
 

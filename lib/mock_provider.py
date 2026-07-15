@@ -3,7 +3,6 @@ import hashlib
 import os
 import re
 import threading
-import time
 
 from oplog import log_event
 

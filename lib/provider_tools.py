@@ -28,15 +28,12 @@ Why a separate module (instead of inlining into providers.py)?
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 
 from providers import (
     REASONING_CATALOG_PATH,
     _load_json_commented,
     make_model_family,
     resolve_reasoning_body,
-    resolve_reasoning_entry,
 )
 
 
