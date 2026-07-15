@@ -50,8 +50,8 @@ jobs:
           mkdir space
           cp -r backend/lib/. space/
           mkdir space/app
-          cp -r frontend/. space/app/
-          rm -rf space/app/.git space/app/node_modules space/app/dist
+          # Copy frontend excluding .git (shallow checkout has pack files that break cp -r)
+          rsync -a --exclude='.git' --exclude='node_modules' --exclude='dist' frontend/ space/app/
           ls space
 
       - name: Push to Space
