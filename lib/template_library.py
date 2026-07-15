@@ -212,7 +212,13 @@ def create_template(*, user_id: str | None, name: str,
 
 
 def list_my_templates(user_id: str | None, *, limit: int = 200) -> list[dict]:
-    """List the caller's own templates (private + published), newest first."""
+    """List the caller's own templates (private + published), newest first.
+
+    Each returned template dict includes per-user ``hearted`` and
+    ``downloaded`` boolean flags (always False for anonymous callers) so the
+    frontend can render the correct heart/download button state after a
+    page reload — without these flags the UI couldn't tell which templates
+    the current user has already hearted/downloaded (Bug 4)."""
     _ensure_schema_once()
     db = _dbmod._db()
     if user_id:
@@ -226,15 +232,23 @@ def list_my_templates(user_id: str | None, *, limit: int = 200) -> list[dict]:
             "SELECT * FROM templates WHERE author_id = 'anonymous' "
             "ORDER BY created_at DESC LIMIT ?",
             (limit,)).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    out = [_row_to_dict(r) for r in rows]
+    _annotate_user_flags(out, user_id)
+    return out
 
 
 def list_public_templates(*, sort: str = "hearts", query: str | None = None,
                           kind: str | None = None,
-                          limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
+                          limit: int = 50, offset: int = 0,
+                          user_id: str | None = None) -> tuple[list[dict], int]:
     """List public templates. Returns (templates, total). Sort by hearts
     (most hearted), recent (newest), or relevant (text-search relevance via
-    LIKE on name+description+markdown+tags)."""
+    LIKE on name+description+markdown+tags).
+
+    Each returned template dict includes per-user ``hearted`` and
+    ``downloaded`` boolean flags for ``user_id`` (always False when
+    ``user_id`` is None) so the frontend can render the correct
+    heart/download button state after a page reload (Bug 4)."""
     _ensure_schema_once()
     if sort not in VALID_SORTS:
         sort = "hearts"
@@ -276,7 +290,56 @@ def list_public_templates(*, sort: str = "hearts", query: str | None = None,
     rows = db.execute(
         f"SELECT * FROM templates WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
         params + [page_limit, page_offset]).fetchall()
-    return [_row_to_dict(r) for r in rows], total
+    out = [_row_to_dict(r) for r in rows]
+    _annotate_user_flags(out, user_id)
+    return out, total
+
+
+def _annotate_user_flags(templates: list[dict], user_id: str | None) -> None:
+    """Annotate each template dict with per-user ``hearted`` and
+    ``downloaded`` boolean flags (in-place). Anonymous callers (no
+    user_id) get both flags set to False for every template.
+
+    This is the fix for Bug 4 (heart/download don't persist): the
+    list endpoints previously returned only the aggregate hearts/downloads
+    counts, so the frontend couldn't tell which templates the current
+    user had already hearted/downloaded — after a reload every heart
+    button appeared unhearted even though the row was in
+    ``template_hearts``. We do ONE bulk SELECT per table (keyed on the
+    template ids in the page) so this stays O(page_size) not O(N²)."""
+    if not templates:
+        return
+    ids = [t.get("id") for t in templates if t.get("id")]
+    if not ids:
+        return
+    # Initialise both flags to False (covers anonymous + no rows).
+    for t in templates:
+        t["hearted"] = False
+        t["downloaded"] = False
+    if not user_id:
+        return
+    db = _dbmod._db()
+    placeholders = ",".join("?" * len(ids))
+    try:
+        rows = db.execute(
+            f"SELECT template_id FROM template_hearts "
+            f"WHERE user_id = ? AND template_id IN ({placeholders})",
+            [user_id, *ids]).fetchall()
+        hearted_ids = {r["template_id"] for r in rows}
+        for t in templates:
+            if t.get("id") in hearted_ids:
+                t["hearted"] = True
+        rows = db.execute(
+            f"SELECT template_id FROM template_downloads "
+            f"WHERE user_id = ? AND template_id IN ({placeholders})",
+            [user_id, *ids]).fetchall()
+        downloaded_ids = {r["template_id"] for r in rows}
+        for t in templates:
+            if t.get("id") in downloaded_ids:
+                t["downloaded"] = True
+    except Exception:
+        # Best-effort: never break listing on a flag-lookup failure.
+        pass
 
 
 def get_template(template_id: str) -> dict | None:
@@ -873,7 +936,8 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             except ValueError:
                 offset = 0
             tpls, total = list_public_templates(
-                sort=sort, query=query, kind=kind, limit=limit, offset=offset)
+                sort=sort, query=query, kind=kind, limit=limit, offset=offset,
+                user_id=user_id)
             _json(handler, 200, {"templates": tpls, "total": total})
             return True
         if route == "/api/templates/<id>":
@@ -885,6 +949,10 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             if not tpl.get("is_public") and not _is_owner(tpl, user_id):
                 _json(handler, 404, {"error": f"no such template {tid!r}"})
                 return True
+            # Annotate with per-user hearted/downloaded flags (Bug 4) so the
+            # frontend can render the correct button state when a user opens
+            # a template detail view directly via URL.
+            _annotate_user_flags([tpl], user_id)
             _json(handler, 200, {"template": tpl})
             return True
         _json(handler, 404, {"error": "unknown GET route"})

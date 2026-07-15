@@ -97,22 +97,28 @@ AGENT_SYSTEM_PROMPT = (
 #   picker surfaces EVERY entry whose key is set, not just the first.
 #   Overridable via AGENT_OPEN_MODEL / AGENT_OPEN_BASE_URL / AGENT_OPEN_KEY_ENV.
 
-_open_models_cache: list[tuple[str, str, str, str | None, dict | None]] | None = None
+_open_models_cache: list[tuple[str, str, str, str | None, dict | None, str]] | None = None
 
 
-# Each entry: (env_var, label, litellm_model, base_url, extra_headers)
+# Each entry: (env_var, label, litellm_model, base_url, extra_headers, provider_name)
+# provider_name is the canonical catalog name (e.g. "cloudflare", "github-models")
+# used for provider-hint matching in _resolve_open_model — the env_var name and
+# the label's parenthesised suffix are NOT reliable for this (e.g. Cloudflare's
+# env_var is CF_API_TOKEN which reduces to "cf", not "cloudflare").
 
 
-def _build_open_models() -> list[tuple[str, str, str, str | None, dict | None]]:
+def _build_open_models() -> list[tuple[str, str, str, str | None, dict | None, str]]:
     """Build open model entries from providers_catalog.json dynamically.
 
     Each configured provider contributes ALL its models (env-var-gated), so
     every model from NVIDIA, Cloudflare, PrivateMode AI etc. is available in
     the agent without hardcoding model names.
 
-    Returns 5-tuples: (env_var, label, litellm_model, base_url, extra_headers).
-    extra_headers is a dict of HTTP headers the provider requires (e.g.
-    OpenRouter needs HTTP-Referer + X-Title for free models).
+    Returns 6-tuples: ``(env_var, label, litellm_model, base_url, extra_headers,
+    provider_name)``. ``extra_headers`` is a dict of HTTP headers the provider
+    requires (e.g. OpenRouter needs HTTP-Referer + X-Title for free models).
+    ``provider_name`` is the canonical catalog name (e.g. "cloudflare") used
+    for provider-hint matching in ``_resolve_open_model``.
     """
     global _open_models_cache
     # Re-probe if the cache is empty — the panel sync may not have completed
@@ -121,7 +127,7 @@ def _build_open_models() -> list[tuple[str, str, str, str | None, dict | None]]:
     if _open_models_cache is not None and len(_open_models_cache) > 0:
         return _open_models_cache
 
-    entries: list[tuple[str, str, str, str | None, dict | None]] = []
+    entries: list[tuple[str, str, str, str | None, dict | None, str]] = []
     catalog_path = HERE / "providers_catalog.json"
     try:
         with open(catalog_path, encoding="utf-8") as f:
@@ -152,13 +158,22 @@ def _build_open_models() -> list[tuple[str, str, str, str | None, dict | None]]:
         for model_id in prov.get("models", []):
             litellm_model = f"openai/{model_id}"
             label = f"{model_id} ({name})"
-            entries.append((env_var, label, litellm_model, base_url or None, extra_headers))
+            entries.append((env_var, label, litellm_model,
+                            base_url or None, extra_headers, name))
 
     # Also include dynamically synced models from providers with sync_config.
     from provider_sync import get_panel_sync_cache
     sync_cache = get_panel_sync_cache()
     if sync_cache:
-        seen: set[str] = set(m.split("/")[-1] for _, _, m, _, _ in entries)
+        # Dedupe by (provider_name, model_last_segment) so each provider can
+        # host its own copy of a shared model (e.g. both NVIDIA and Cloudflare
+        # expose "glm-5.2"). The previous dedup-by-last-segment kept only the
+        # first provider's copy, which broke provider-hint routing in
+        # _resolve_open_model: when the user picked "cloudflare/glm-5.2" the
+        # Cloudflare entry had been dropped, so Pass 2 found no match and Pass
+        # 3 returned NVIDIA's copy instead (the wrong-provider bug).
+        seen: set[tuple[str, str]] = set(
+            (pname, m.split("/")[-1]) for _, _, m, _, _, pname in entries)
         for prov in data.get("providers", []):
             name = prov["name"]
             sync_config = prov.get("sync_config")
@@ -180,10 +195,11 @@ def _build_open_models() -> list[tuple[str, str, str, str | None, dict | None]]:
             sheaders = prov.get("extra_headers") or None
             for mid in synced:
                 last = mid.split("/")[-1]
-                if last not in seen:
-                    seen.add(last)
+                key = (name, last)
+                if key not in seen:
+                    seen.add(key)
                     entries.append((senv, f"{mid} ({name})",
-                                    f"openai/{mid}", sbase or None, sheaders))
+                                    f"openai/{mid}", sbase or None, sheaders, name))
 
     _open_models_cache = entries
     return entries
@@ -203,39 +219,66 @@ def _resolve_open_model(user_model: str) -> tuple[str, str | None, str | None, s
     When the same model name exists on multiple providers, the first one in
     catalog order wins (same as _build_open_models dedup). To route to a
     specific provider, pass ``provider/model`` — the provider prefix is
-    matched against the env_var's provider name.
+    matched against the canonical catalog provider name (preferred), the
+    env_var's reduced name, and the label's parenthesised suffix.
 
     Returns ``(litellm_model, base_url, env_var, provider_name, extra_headers)``
-    or ``None``.
+    or ``None``. The 4th tuple element is the canonical catalog provider name
+    (e.g. "cloudflare") when known, falling back to the human-readable label
+    for back-compat with callers that display it.
     """
     if not user_model:
         return None
     user_last = user_model.split("/")[-1]
     # Also extract a provider hint if the user passed "provider/model"
     user_provider = user_model.split("/")[0] if "/" in user_model else ""
+    user_provider_lc = user_provider.lower()
+    # Normalise common separator mismatches: "github-models" vs "github_models"
+    # vs "githubmodels". The catalog uses dashes; env vars use underscores.
+    user_provider_norm = user_provider_lc.replace("-", "").replace("_", "")
     models = _build_open_models()
     # Pass 1: exact full match (canonical litellm string)
-    for _env, _label, model, base, extra in models:
+    for _env, _label, model, base, extra, _pname in models:
         if model == user_model:
-            return (model, base, _env, _label, extra)
-    # Pass 2: match by provider hint + last segment (e.g. "privatemodeai/kimi-k2.6")
+            return (model, base, _env, _pname or _label, extra)
+    # Pass 2: match by provider hint + last segment (e.g. "cloudflare/glm-5.2"
+    # or "privatemodeai/kimi-k2.6"). The provider hint is matched against
+    # ALL of: the canonical catalog provider_name (preferred — handles
+    # Cloudflare's CF_API_TOKEN → "cf" mismatch), the env_var's reduced name,
+    # and the label's parenthesised suffix. Without the provider_name check,
+    # Pass 2 fails for Cloudflare (env_var "CF_API_TOKEN" → "cf", which does
+    # not contain "cloudflare") and falls through to Pass 3, which returns
+    # the FIRST provider in catalog order (e.g. NVIDIA) — wrong provider.
     if user_provider:
-        for env, label, model, base, extra in models:
+        for env, label, model, base, extra, pname in models:
             model_last = model.split("/")[-1]
+            if model_last != user_last:
+                continue
+            # Canonical catalog provider name (e.g. "cloudflare").
+            pname_lc = (pname or "").lower()
+            pname_norm = pname_lc.replace("-", "").replace("_", "")
             # label looks like "kimi-k2.6 (PrivateMode AI)" — extract provider
             label_provider = ""
             if "(" in label and ")" in label:
                 label_provider = label[ label.index("(") + 1 : label.rindex(")") ].strip().lower()
             # env var maps to provider: PRIVATEMODEAI_API_KEY -> privatemodeai
             env_provider = env.lower().replace("_api_key", "").replace("_token", "").replace("_api_token", "")
-            if (model_last == user_last and
-                (user_provider.lower() in env_provider or
-                 user_provider.lower() in label_provider.lower())):
-                return (model, base, env, label, extra)
-    # Pass 3: last-segment match (bare logical names, partial names)
-    for env, label, model, base, extra in models:
+            env_provider_norm = env_provider.replace("-", "").replace("_", "")
+            if (user_provider_lc == pname_lc
+                    or user_provider_norm == pname_norm
+                    or user_provider_lc in env_provider
+                    or user_provider_norm in env_provider_norm
+                    or user_provider_lc in label_provider
+                    or user_provider_norm in label_provider.replace("-", "").replace("_", "")):
+                # Return the canonical provider name (4th element) so callers
+                # can display it; fall back to the label for back-compat.
+                return (model, base, env, pname or label, extra)
+    # Pass 3: last-segment match (bare logical names, partial names).
+    # Catalog order wins when the same model name exists on multiple providers
+    # AND no provider hint was supplied.
+    for env, label, model, base, extra, pname in models:
         if model.split("/")[-1] == user_last:
-            return (model, base, env, label, extra)
+            return (model, base, env, pname or label, extra)
     return None
 
 
@@ -254,7 +297,7 @@ def _pick_open_llm() -> tuple[str, str, str | None] | None:
         return (key_env,
                 os.environ.get("AGENT_OPEN_MODEL", "groq/llama-3.3-70b-versatile"),
                 os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or None)
-    for env_key, _label, model, base_url, _extra in _build_open_models():
+    for env_key, _label, model, base_url, _extra, _pname in _build_open_models():
         if os.environ.get(env_key, "").strip():
             model = os.environ.get("AGENT_OPEN_MODEL", "").strip() or model
             base_url = os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or base_url
@@ -286,12 +329,31 @@ def agent_models() -> list[dict]:
             out.append({"tier": "claude", "provider": "Anthropic", "model": model,
                         "label": label, "default": model == default_model})
     if _open_sdk_installed():
-        seen: set[str] = set()
-        for env_key, label, model, _base, _extra in _build_open_models():
-            if os.environ.get(env_key, "").strip() and model not in seen:
-                seen.add(model)
-                out.append({"tier": "open", "provider": label, "model": model,
-                            "label": label, "default": False})
+        # Dedupe by (provider_name, model) so each provider's copy of a shared
+        # model is surfaced separately (e.g. NVIDIA's glm-5.2 AND Cloudflare's
+        # glm-5.2). The frontend can route to a specific provider by sending
+        # "<provider_name>/<model_last_segment>" as the model id, which
+        # _resolve_open_model() Pass 2 matches against the canonical provider
+        # name. The previous dedup-by-model kept only the first provider's
+        # copy, which made provider-specific routing impossible.
+        seen: set[tuple[str, str]] = set()
+        for env_key, label, model, _base, _extra, pname in _build_open_models():
+            if not os.environ.get(env_key, "").strip():
+                continue
+            key = (pname or "", model)
+            if key in seen:
+                continue
+            seen.add(key)
+            # Build a provider-qualified model id the frontend can send back
+            # to route to THIS provider's copy (e.g. "cloudflare/glm-5.2").
+            # Falls back to the litellm model string when no provider name
+            # is known (back-compat for hand-written entries).
+            model_last = model.split("/")[-1]
+            provider_model = f"{pname}/{model_last}" if pname else model
+            out.append({"tier": "open", "provider": label, "model": model,
+                        "label": label, "provider_name": pname or None,
+                        "provider_model": provider_model,
+                        "default": False})
     if out and not any(m["default"] for m in out):
         out[0]["default"] = True
     return out
@@ -300,7 +362,7 @@ def agent_models() -> list[dict]:
 def _model_key_env(model: str) -> str | None:
     """Env var name for the API key of a chosen open model."""
     model_last = model.split("/")[-1]
-    for env_key, _label, m, _base, _extra in _build_open_models():
+    for env_key, _label, m, _base, _extra, _pname in _build_open_models():
         if m == model or m.split("/")[-1] == model_last:
             return env_key
     return None
@@ -308,7 +370,7 @@ def _model_key_env(model: str) -> str | None:
 def _model_base_url(model: str) -> str | None:
     """base_url for a chosen open model (matches the dynamic model list)."""
     model_last = model.split("/")[-1]
-    for _env, _label, m, base, _extra in _build_open_models():
+    for _env, _label, m, base, _extra, _pname in _build_open_models():
         if m == model or m.split("/")[-1] == model_last:
             return base
     return None
@@ -1404,7 +1466,13 @@ def tier_for_model(model: str | None) -> str | None:
     if model.startswith("claude"):
         return "claude" if (os.environ.get("ANTHROPIC_API_KEY", "").strip()
                             and _installed("claude_agent_sdk")) else agent_tier()
-    if any(m["model"] == model for m in agent_models()):
+    # Accept any of the formats the frontend may send: the litellm model
+    # string ("openai/glm-5.2"), the provider-qualified id
+    # ("cloudflare/glm-5.2"), or the bare last segment ("glm-5.2").
+    models = agent_models()
+    if any(m.get("model") == model or m.get("provider_model") == model
+           or m.get("model", "").split("/")[-1] == model.split("/")[-1]
+           for m in models):
         return "open"
     # Unknown model — fall back to whatever tier is available (mock if nothing
     # else) instead of returning None (which would raise RuntimeError).
@@ -1744,7 +1812,15 @@ class AgentSession:
         try:
             adapter.open()
         except Exception as exc:
-            self._set_status("error", detail=f"agent init failed: {_clip(str(exc), 300)}")
+            # Bug 2 (fresh-session no-response): emit BOTH a status="error"
+            # event AND a typed "error" event so the frontend definitely
+            # surfaces the failure (some clients only listen for the typed
+            # event). Without this, an init failure (e.g. missing provider
+            # key for the user's selected model) silently ends the turn and
+            # the user sees "I sent Hi but got no reply".
+            err_detail = f"agent init failed: {_clip(str(exc), 300)}"
+            self._set_status("error", detail=err_detail)
+            self.emit({"type": "error", "error": err_detail})
             return
         self._set_status("idle")
         while not self.closed:
@@ -1778,6 +1854,13 @@ class AgentSession:
                     pass
                 self._set_status("idle", detail="cost ceiling exceeded")
                 continue
+            # Track whether the adapter emitted any assistant text this turn.
+            # If it didn't (e.g. the LLM returned only tool calls without a
+            # final message, or returned an empty response), we emit a
+            # placeholder assistant event so the frontend doesn't sit waiting
+            # for a reply that will never come (Bug 2: "Hi → no reply").
+            assistant_emitted = False
+            pre_count = len(self.events)
             try:
                 adapter.turn(msg, self.emit)
                 if self._interrupting:
@@ -1788,9 +1871,27 @@ class AgentSession:
                 if self._interrupting:
                     self._set_status("idle", detail="interrupted")
                 else:
-                    self._set_status("error", detail=_clip(str(exc), 300))
+                    err_detail = _clip(str(exc), 300)
+                    # Bug 2: emit a typed "error" event too so the frontend
+                    # always shows feedback — never silently fail.
+                    self._set_status("error", detail=err_detail)
+                    self.emit({"type": "error", "error": err_detail})
             finally:
                 self._interrupting = False
+                # Check whether any assistant event was emitted during the
+                # turn (events appended after pre_count). If not, emit a
+                # placeholder so the user sees SOMETHING.
+                if not self._interrupting:
+                    with self.lock:
+                        for ev in self.events[pre_count:]:
+                            if ev.get("type") == "assistant":
+                                assistant_emitted = True
+                                break
+                    if not assistant_emitted:
+                        self.emit({"type": "assistant",
+                                   "text": "(no response from the model — "
+                                           "check that the provider key is "
+                                           "valid and the model name is correct)"})
                 # Bug 3: auto-generate a title for the chat session on the
                 # first completed turn. The chat session is created with
                 # title="New Chat" by _handle_agent_post; we replace it

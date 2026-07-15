@@ -1966,14 +1966,20 @@ class Handler(BaseHTTPRequestHandler):
                            if isinstance(chat_session_id, str) and chat_session_id.strip()
                            else None)
         if not chat_session_id:
-            # Auto-create a chat session for this turn
+            # Auto-create a chat session for this turn. Bug 2: the previous
+            # implementation swallowed ALL exceptions silently, so if the DB
+            # write failed (e.g. /data not writable, schema migration error)
+            # the user saw "no new chat created" with no diagnostic. Log the
+            # failure so it's visible in the Space logs.
             try:
                 import chat_routes
                 cs_user = self._require_user_from_jwt()
                 cs = chat_routes.create_chat_session(
                     model=model, workspace_id=workspace_id, user_id=cs_user)
                 chat_session_id = cs["id"]
-            except Exception:
+            except Exception as e:  # noqa: BLE001
+                log_event("agent_chat_session_create_error",
+                          error=repr(e)[:200])
                 chat_session_id = None
         # Research mode params (optional). When webSearch or deepResearch is
         # true, the session uses ResearchAdapter instead of the Claude/Strands
