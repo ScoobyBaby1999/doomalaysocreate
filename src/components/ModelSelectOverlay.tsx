@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useCallback, useRef, useState } from "react";
+import { useEffect, useMemo, useCallback, useRef, useState, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useModelStore, type ProviderGroup, type ProviderModel, type ModelAttributes, type CondensedHost, type CondensedModel } from "../lib/model-store";
 
@@ -231,7 +231,7 @@ function attributeSegments(a: ModelAttributes | undefined): AttrSegment[] | null
   return segs;
 }
 
-function ModelRow({
+const ModelRow = memo(function ModelRow({
   model,
   isSelected,
   onSelect,
@@ -249,41 +249,42 @@ function ModelRow({
   return (
     <button
       onClick={onSelect}
+      data-selected={isSelected ? "true" : undefined}
+      aria-pressed={isSelected}
       className={`
-        flex flex-col w-full text-left rounded px-1.5 transition-colors duration-100 cursor-pointer
-        ${isSelected ? "bg-primary/10" : dimmed ? "" : "hover:bg-muted/60"}
+        cv-auto flex flex-col w-full text-left rounded-xl px-2.5 py-2 min-h-[44px] transition-colors duration-100 cursor-pointer touch-target
+        ${isSelected ? "bg-accent/20 ring-1 ring-accent/40" : dimmed ? "" : "hover:bg-muted/40"}
         ${dimmed && !isSelected ? "opacity-35" : ""}
       `}
-      style={{ paddingTop: 3, paddingBottom: hasSub ? 3 : 3 }}
     >
-      <span className="flex items-center w-full" style={{ height: 20 }}>
+      <span className="flex items-center w-full">
         <span
-          className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
+          className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground bg-accent" : "text-transparent"}`}
           style={{
-            width: 14,
-            height: 14,
+            width: 16,
+            height: 16,
             fontSize: 0,
             border: isSelected ? "none" : "1.5px solid var(--border)",
-            backgroundColor: isSelected ? "var(--primary)" : "transparent",
+            backgroundColor: isSelected ? "#a855f7" : "transparent",
           }}
         >
           {isSelected && <IcoCheck />}
         </span>
 
         <span
-          className={`text-[11px] leading-none truncate flex-1 ${isSelected ? "text-primary font-medium" : "text-foreground"}`}
+          className={`text-[12px] leading-tight truncate flex-1 ${isSelected ? "text-white font-semibold" : "text-foreground"}`}
           title={model.id}
         >
           {model.displayName}
         </span>
 
-        <span className="flex-shrink-0 ml-1.5 text-[9px] text-muted-foreground tabular-nums">
+        <span className="flex-shrink-0 ml-1.5 text-[10px] text-muted-foreground tabular-nums">
           {fmtCtx(model.contextLength)}
         </span>
       </span>
 
       {hasSub && (
-        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-6 pr-1">
+        <div className="flex flex-wrap gap-x-1 gap-y-px mt-1 pl-6 pr-1">
           {segs && segs.map((s, i) =>
             s.text === " \u00b7 " ? null : (
               <span
@@ -306,7 +307,7 @@ function ModelRow({
       )}
     </button>
   );
-}
+});
 
 function ProviderBox({
   provider,
@@ -328,6 +329,7 @@ function ProviderBox({
   contextMin: number;
 }) {
   const [showDimmed, setShowDimmed] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
 
   const { matched, dimmed } = useMemo(() => {
     const allModels = provider.models;
@@ -356,7 +358,8 @@ function ProviderBox({
     };
   }, [provider.models, searchQuery, activeFilters, contextMin]);
 
-  const openSettings = useCallback(() => {
+  const openSettings = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
     useModelStore.getState().openProvidersDialog(provider.name);
   }, [provider.name]);
 
@@ -365,24 +368,40 @@ function ProviderBox({
 
   return (
     <div
-      className="flex flex-col rounded-lg border overflow-hidden"
+      className="flex flex-col rounded-2xl border overflow-hidden"
       style={{ borderColor: `${provider.color}30` }}
     >
+      {/* Provider header — tap to collapse/expand the model list.
+          The settings icon is a SIBLING button (not nested) so we don't
+          violate the "no interactive content inside a <button>" rule. */}
       <div
-        className="flex items-center gap-2 px-2.5 shrink-0"
-        style={{ height: 26, backgroundColor: `${provider.color}0d`, borderBottom: `1px solid ${provider.color}1f` }}
+        className="flex items-center gap-2 px-3 shrink-0 min-h-[44px]"
+        style={{ backgroundColor: `${provider.color}0d`, borderBottom: collapsed ? "none" : `1px solid ${provider.color}1f` }}
       >
-        <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: provider.color }} />
-        <span className="text-[11px] font-semibold text-foreground leading-none truncate">{provider.displayName}</span>
-        <span
-          className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
-          style={{ backgroundColor: provider.syncedLive ? "#22c55e" : "#f59e0b" }}
-          title={provider.syncedLive ? "synced live from provider API" : "config-sourced (no public live API)"}
-        />
-        <span className="text-[10px] text-muted-foreground leading-none ml-auto tabular-nums">{provider.models.length}</span>
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          className="touch-target flex items-center gap-2 flex-1 min-w-0 text-left rounded-lg"
+          aria-expanded={!collapsed}
+          aria-label={`${collapsed ? "Expand" : "Collapse"} ${provider.displayName}`}
+        >
+          <svg
+            width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+            className={`text-muted-foreground transition-transform duration-150 shrink-0 ${collapsed ? "" : "rotate-90"}`}
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+          <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: provider.color }} />
+          <span className="text-[12px] font-semibold text-foreground leading-none truncate flex-1">{provider.displayName}</span>
+          <span
+            className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+            style={{ backgroundColor: provider.syncedLive ? "#22c55e" : "#f59e0b" }}
+            title={provider.syncedLive ? "synced live from provider API" : "config-sourced (no public live API)"}
+          />
+          <span className="text-[11px] text-muted-foreground leading-none tabular-nums shrink-0">{provider.models.length}</span>
+        </button>
         <button
           onClick={openSettings}
-          className="flex items-center justify-center size-5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+          className="touch-target inline-flex items-center justify-center size-8 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
           aria-label={`Manage ${provider.displayName} privacy & keys`}
           title={`${provider.manageLabel} \u2197`}
         >
@@ -390,44 +409,47 @@ function ProviderBox({
         </button>
       </div>
 
-      <button
-        onClick={openSettings}
-        className="flex items-center gap-1.5 px-2.5 shrink-0 text-left hover:brightness-95 dark:hover:brightness-110 transition-all"
-        style={{
-          height: 24,
-          borderBottom: `1px solid ${confidenceDotColor(provider.privacy.confidence)}25`,
-          backgroundColor: `${confidenceDotColor(provider.privacy.confidence)}0d`,
-        }}
-        title={provider.privacy.notice}
-      >
-        <span className="shrink-0" style={{ color: confidenceDotColor(provider.privacy.confidence) }}>
-          <IcoShield />
-        </span>
-        <span className="text-[9px] leading-none text-muted-foreground truncate flex-1">
-          {provider.privacy.notice}
-        </span>
-      </button>
+      {/* Privacy notice — still tappable to open settings. */}
+      {!collapsed && (
+        <button
+          onClick={openSettings}
+          className="flex items-center gap-1.5 px-3 shrink-0 text-left hover:brightness-95 dark:hover:brightness-110 transition-all min-h-[32px]"
+          style={{
+            borderBottom: `1px solid ${confidenceDotColor(provider.privacy.confidence)}25`,
+            backgroundColor: `${confidenceDotColor(provider.privacy.confidence)}0d`,
+          }}
+          title={provider.privacy.notice}
+        >
+          <span className="shrink-0" style={{ color: confidenceDotColor(provider.privacy.confidence) }}>
+            <IcoShield />
+          </span>
+          <span className="text-[10px] leading-none text-muted-foreground truncate flex-1 py-2">
+            {provider.privacy.notice}
+          </span>
+        </button>
+      )}
 
-      <div className="flex flex-col gap-px p-1 max-h-[340px] overflow-y-auto">
-        {empty ? (
-          <div className="flex items-center justify-center h-10 text-[10px] text-muted-foreground/50">
-            no models synced
-          </div>
-        ) : (
-          <>
+      {!collapsed && (
+        <div className="flex flex-col gap-px p-1.5 max-h-[50vh] overflow-y-auto">
+          {empty ? (
+            <div className="flex items-center justify-center h-12 text-[11px] text-muted-foreground/50">
+              no models synced
+            </div>
+          ) : (
+            <>
 {matched.map((m) => (
-              <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id && (!condensedView ? selectedProviderName === provider.name : true)} onSelect={() => onSelect(m, provider.name)} />
-            ))}
-            {hasDimmed && (
-              <>
-                <button
-                  onClick={() => setShowDimmed((v) => !v)}
-                  className="flex items-center gap-1.5 px-1.5 py-1 mt-0.5 border-t border-border/30 text-[9px] text-muted-foreground/50 hover:text-muted-foreground/80 transition-colors cursor-pointer select-none"
-                >
-                  <span
-                    className="text-[10px] leading-none transition-transform duration-150"
-                    style={{ transform: showDimmed ? "rotate(90deg)" : "rotate(0deg)" }}
+                <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id && (!condensedView ? selectedProviderName === provider.name : true)} onSelect={() => onSelect(m, provider.name)} />
+              ))}
+              {hasDimmed && (
+                <>
+                  <button
+                    onClick={() => setShowDimmed((v) => !v)}
+                    className="touch-target flex items-center gap-1.5 px-2 py-1.5 mt-0.5 border-t border-border/30 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors cursor-pointer select-none min-h-[36px] w-full text-left"
                   >
+                    <span
+                      className="text-[10px] leading-none transition-transform duration-150"
+                      style={{ transform: showDimmed ? "rotate(90deg)" : "rotate(0deg)" }}
+                    >
                     {"\u25b8"}
                   </span>
                   <span className="text-[9px] leading-none">
@@ -442,11 +464,12 @@ function ProviderBox({
           </>
         )}
       </div>
+      )}
     </div>
   );
 }
 
-function CondensedModelRow({
+const CondensedModelRow = memo(function CondensedModelRow({
   model,
   isSelected,
   onSelect,
@@ -492,24 +515,25 @@ function CondensedModelRow({
   const topHost = localOrder[0];
 
   return (
-    <div className="flex flex-col w-full text-left rounded px-1.5 transition-colors duration-100"
-      style={{ paddingTop: 3, paddingBottom: hasSub ? 3 : 3 }}
+    <div
+      className="cv-auto flex flex-col w-full text-left rounded-xl px-2.5 py-2 min-h-[44px] transition-colors duration-100"
+      data-selected={isSelected ? "true" : undefined}
     >
-      <span className="flex items-center w-full" style={{ height: 20 }}>
-        <button onClick={onSelect} className="flex items-center flex-1 min-w-0 cursor-pointer text-left">
+      <span className="flex items-center w-full">
+        <button onClick={onSelect} data-selected={isSelected ? "true" : undefined} aria-pressed={isSelected} className="touch-target flex items-center flex-1 min-w-0 cursor-pointer text-left rounded-lg">
           <span
             className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
-            style={{ width: 14, height: 14, fontSize: 0, border: isSelected ? "none" : "1.5px solid var(--border)", backgroundColor: isSelected ? "var(--primary)" : "transparent" }}
+            style={{ width: 16, height: 16, fontSize: 0, border: isSelected ? "none" : "1.5px solid var(--border)", backgroundColor: isSelected ? "#a855f7" : "transparent" }}
           >
             {isSelected && <IcoCheck />}
           </span>
           <span
-            className={`text-[11px] leading-none truncate flex-1 ${isSelected ? "text-primary font-medium" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
+            className={`text-[12px] leading-tight truncate flex-1 ${isSelected ? "text-white font-semibold" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
             title={model.logical}
           >
             {model.displayName}
           </span>
-          <span className="flex-shrink-0 mr-2 text-[9px] text-muted-foreground tabular-nums">
+          <span className="flex-shrink-0 mr-2 text-[10px] text-muted-foreground tabular-nums">
             {fmtCtx(model.contextLength)}
           </span>
         </button>
@@ -517,48 +541,50 @@ function CondensedModelRow({
 
       {topHost && !expanded && (
         <button onClick={onToggleExpand}
-          className="flex items-center gap-1.5 w-full pl-6 pr-1 py-0.5 rounded text-[10px] transition-colors hover:bg-muted/30 cursor-pointer text-left"
-          title={localOrder.length > 1 ? "Click to show all provider options" : "Only one provider available"}
+          className="touch-target flex items-center gap-1.5 w-full pl-7 pr-1 py-1 min-h-[36px] rounded-lg text-[11px] transition-colors hover:bg-muted/30 cursor-pointer text-left"
+          title={localOrder.length > 1 ? "Tap to show all provider options" : "Only one provider available"}
         >
           <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: topHost.color }} />
           <span className="truncate text-foreground/80 min-w-0">{topHost.modelId}</span>
           <span className="tabular-nums text-muted-foreground/60 shrink-0">{fmtCtx(topHost.contextLength)}</span>
-          <span className="text-muted-foreground/50 shrink-0">{topHost.providerDisplayName}</span>
+          <span className="text-muted-foreground/50 shrink-0 hidden sm:inline">{topHost.providerDisplayName}</span>
           {localOrder.length > 1 && <span className="ml-auto text-muted-foreground/40 text-[9px] shrink-0">{"\u25be"}</span>}
         </button>
       )}
 
       {expanded && (
-        <div className="flex flex-col gap-0.5 pl-6 pr-1 mt-0.5">
+        <div className="flex flex-col gap-0.5 pl-7 pr-1 mt-0.5">
           {localOrder.map((host, i) => (
             <div key={`${host.provider}-${host.modelId}`}
-              className="flex items-center gap-1.5 py-0.5 rounded text-[10px]"
+              className="flex items-center gap-1.5 py-1 min-h-[36px] rounded-lg text-[11px]"
               style={{ opacity: host.hasApiKey ? 1 : 0.4 }}
             >
-              <span className="inline-flex items-center justify-center size-3.5 rounded-full text-[7px] font-bold shrink-0"
+              <span className="inline-flex items-center justify-center size-4 rounded-full text-[8px] font-bold shrink-0"
                 style={{ backgroundColor: `${host.color}30`, color: host.color }}>
                 {i + 1}
               </span>
               <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: host.color }} />
               <span className="truncate text-foreground/80 flex-1 min-w-0">{host.modelId}</span>
               <span className="tabular-nums text-muted-foreground/60 shrink-0 mr-1">{fmtCtx(host.contextLength)}</span>
-              <span className="text-muted-foreground/50 shrink-0">{host.providerDisplayName}</span>
+              <span className="text-muted-foreground/50 shrink-0 hidden sm:inline">{host.providerDisplayName}</span>
               <div className="flex gap-px ml-1 shrink-0">
                 <button
                   onClick={(e) => { e.stopPropagation(); moveUp(i); }}
                   disabled={i === 0}
-                  className="size-4 flex items-center justify-center rounded text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+                  className="touch-target size-6 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
                   title="Higher priority"
+                  aria-label="Move provider up"
                 >
-                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
                 </button>
                 <button
                   onClick={(e) => { e.stopPropagation(); moveDown(i); }}
                   disabled={i === localOrder.length - 1}
-                  className="size-4 flex items-center justify-center rounded text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+                  className="touch-target size-6 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
                   title="Lower priority"
+                  aria-label="Move provider down"
                 >
-                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
                 </button>
               </div>
             </div>
@@ -567,7 +593,7 @@ function CondensedModelRow({
       )}
 
       {hasSub && (
-        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-6 pr-1">
+        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-7 pr-1">
           {segs && segs.map((s, i) =>
             s.text === " \u00b7 " ? null : (
               <span key={i} className="text-[9px] leading-none px-1 py-px rounded-sm"
@@ -585,7 +611,7 @@ function CondensedModelRow({
       )}
     </div>
   );
-}
+});
 
 function condensedModelMatchesFilters(model: CondensedModel, activeFilters: string[], contextMin: number): boolean {
   if (contextMin > 0 && model.contextLength < contextMin) return false;
@@ -801,6 +827,16 @@ export function ModelSelectOverlay() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [expandedLogical, setExpandedLogical] = useState<string | null>(null);
 
+  // Debounce the search input (200ms) so typing fast doesn't re-filter the
+  // whole model list on every keystroke. `searchQuery` (the store value) is
+  // what the <input> binds to; `debouncedQuery` is what actually drives the
+  // filtering memos + ProviderBox/CondensedList props.
+  const [debouncedQuery, setDebouncedQuery] = useState(searchQuery);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(searchQuery), 200);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
   useEffect(() => {
     if (providers.length === 0 && !loading) fetchProviders();
   }, [providers.length, loading, fetchProviders]);
@@ -843,10 +879,10 @@ export function ModelSelectOverlay() {
 
   const filteredCount = useMemo(() => {
     const target = pricingFilter === "free" ? visibleProviders : providers;
-    if (!searchQuery.trim() && activeFilters.length === 0 && contextMin === 0)
+    if (!debouncedQuery.trim() && activeFilters.length === 0 && contextMin === 0)
       return target.reduce((s, p) => s + p.models.length, 0);
     let count = 0;
-    const q = searchQuery.toLowerCase().trim();
+    const q = debouncedQuery.toLowerCase().trim();
     for (const p of target) {
       for (const m of p.models) {
         const matchesSearch =
@@ -859,7 +895,7 @@ export function ModelSelectOverlay() {
       }
     }
     return count;
-  }, [providers, visibleProviders, searchQuery, totalModels, activeFilters, contextMin, pricingFilter]);
+  }, [providers, visibleProviders, debouncedQuery, totalModels, activeFilters, contextMin, pricingFilter]);
 
   const selectedDisplayName = useMemo(() => {
     if (!selectedModelId) return null;
@@ -880,149 +916,155 @@ export function ModelSelectOverlay() {
     <AnimatePresence>
       {overlayOpen && (
         <>
+          {/* Backdrop — tap to close (or collapse the expanded condensed row). */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm"
+            className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm"
             onClick={() => { if (expandedLogical) setExpandedLogical(null); else closeOverlay(); }}
             aria-hidden="true"
           />
 
+          {/* Sheet container — slides up from the bottom on mobile (full-width
+              bottom sheet with rounded-t-3xl), centers as a modal on desktop.
+              `items-end sm:items-center` anchors the sheet to the bottom on
+              mobile and centers it on sm:+. The inner sheet slides from
+              y:100% (fully below viewport) up to y:0 — works for both
+              layouts because the sheet is anchored to its container edge. */}
           <motion.div
-            initial={{ opacity: 0, scale: 0.97, y: 8 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.97, y: 8 }}
-            transition={{ duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 pointer-events-none"
+            initial={{ opacity: 0, y: "100%" }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: "100%" }}
+            transition={{ duration: 0.25, ease: [0.19, 1, 0.22, 1] }}
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6 pointer-events-none"
           >
             <div
-              className="pointer-events-auto w-full max-w-3xl flex flex-col rounded-xl border border-border/70 bg-background/95 backdrop-blur-xl shadow-2xl shadow-black/20 overflow-hidden"
-              style={{ height: "min(82vh, 640px)" }}
+              className="pointer-events-auto w-full sm:max-w-3xl flex flex-col bg-background/97 backdrop-blur-xl shadow-2xl shadow-black/40 overflow-hidden rounded-t-3xl sm:rounded-2xl border-t sm:border border-border/70 max-h-[92dvh] sm:max-h-[82vh]"
               onClick={(e) => e.stopPropagation()}
               role="dialog"
               aria-modal="true"
               aria-label="Select a model"
             >
-              <div className="flex items-center justify-between gap-3 px-3.5 shrink-0" style={{ height: 40, borderBottom: "1px solid var(--border)" }}>
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="text-[12px] font-semibold text-foreground shrink-0">Select</span>
+              {/* Mobile drag-handle (visual only — no drag gesture wired up,
+                  but the affordance signals "bottom sheet" to the user). */}
+              <div className="sm:hidden flex justify-center pt-2 pb-1 shrink-0">
+                <span className="w-10 h-1 rounded-full bg-muted-foreground/30" />
+              </div>
+
+              {/* ── Sticky header: title + view toggle + close ─────────── */}
+              <div className="flex items-center gap-2 px-3 sm:px-4 py-2 shrink-0 border-b border-border/60">
+                <span className="text-[14px] font-semibold text-foreground shrink-0">Select a model</span>
+                <div className="flex items-center gap-1 ml-1">
                   <button
                     onClick={() => setCondensedView(false)}
-                    className={`text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors shrink-0 ${!condensedView ? "bg-foreground/10 border-foreground/30 text-foreground font-medium" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+                    className={`touch-target text-[11px] leading-none px-3 h-7 rounded-full border transition-colors shrink-0 ${!condensedView ? "bg-accent/15 border-accent/40 text-accent font-medium" : "border-border text-muted-foreground hover:text-foreground"}`}
+                    aria-pressed={!condensedView}
                   >
                     Providers
                   </button>
                   <button
                     onClick={() => setCondensedView(true)}
-                    className={`text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors shrink-0 ${condensedView ? "bg-foreground/10 border-foreground/30 text-foreground font-medium" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+                    className={`touch-target text-[11px] leading-none px-3 h-7 rounded-full border transition-colors shrink-0 ${condensedView ? "bg-accent/15 border-accent/40 text-accent font-medium" : "border-border text-muted-foreground hover:text-foreground"}`}
+                    aria-pressed={condensedView}
                   >
                     Models
                   </button>
-                  {!condensedView && !loading && providers.length > 0 && (
-                    <>
-                      <button
-                        onClick={() => openProvidersDialog()}
-                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
-                        title="Providers & privacy settings"
-                      >
-                        <IcoSettings />
-                        <span className="hidden sm:inline">Privacy</span>
-                      </button>
-                      <button
-                        onClick={() => refreshProviders()}
-                        disabled={refreshing}
-                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-60 shrink-0"
-                         title={refreshing ? "syncing" : `${syncedLabel} \u00b7 ${liveCount}/${totalCount} providers live \u00b7 click to re-sync`}
-                      >
-                        <IcoRefresh spinning={refreshing} />
-                        <span className="hidden md:inline">{refreshing ? "syncing" : syncedLabel || "sync"}</span>
-                      </button>
-                    </>
-                  )}
-                  {condensedView && (
-                    <>
-                      <button
-                        onClick={() => openProvidersDialog()}
-                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
-                        title="Providers & privacy settings"
-                      >
-                        <IcoSettings />
-                        <span className="hidden sm:inline">Privacy</span>
-                      </button>
-                      <button
-                        onClick={() => fetchCondensedModels(true)}
-                        className="inline-flex items-center gap-1 ml-0.5 px-1.5 py-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
-                        title="Refresh condensed catalog"
-                      >
-                        <IcoRefresh />
-                        <span className="hidden md:inline">refresh</span>
-                      </button>
-                    </>
-                  )}
-                  {!loading && providers.length > 0 && (
-                    <>
-                      <span className="w-px h-3 bg-border/40 mx-0.5 shrink-0" />
-                      <button
-                        onClick={() => setPricingFilter("free")}
-                        className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
-                        style={{
-                          borderColor: pricingFilter === "free" ? "#22c55e50" : "var(--border)",
-                          backgroundColor: pricingFilter === "free" ? "#22c55e15" : "transparent",
-                          color: pricingFilter === "free" ? "#22c55e" : "var(--muted-foreground)",
-                        }}
-                        aria-pressed={pricingFilter === "free"}
-                      >
-                        Free
-                      </button>
-                      <button
-                        onClick={() => setPricingFilter("paid")}
-                        className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
-                        style={{
-                          borderColor: pricingFilter === "paid" ? "#f59e0b50" : "var(--border)",
-                          backgroundColor: pricingFilter === "paid" ? "#f59e0b15" : "transparent",
-                          color: pricingFilter === "paid" ? "#f59e0b" : "var(--muted-foreground)",
-                        }}
-                        aria-pressed={pricingFilter === "paid"}
-                      >
-                        Paid
-                      </button>
-                    </>
-                  )}
                 </div>
-
-                <div className="flex items-center gap-2">
-                  <div className="relative">
-                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/60">
-                      <IcoSearch />
-                    </span>
-                    <input
-                      ref={inputRef}
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="search"
-                      className="pl-8 pr-3 h-7 w-32 sm:w-44 text-[12px] bg-muted/20 border border-border/50 rounded-lg outline-none focus:border-ring/40 focus:bg-muted/40 transition-colors placeholder:text-muted-foreground/50"
-                    />
+                <div className="flex-1" />
+                {/* Sync + privacy quick-actions (desktop only — mobile gets
+                    them inside the list via provider headers). */}
+                {!loading && providers.length > 0 && (
+                  <div className="hidden sm:flex items-center gap-1">
+                    <button
+                      onClick={() => openProvidersDialog()}
+                      className="touch-target inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+                      title="Providers & privacy settings"
+                    >
+                      <IcoSettings />
+                      <span>Privacy</span>
+                    </button>
+                    <button
+                      onClick={() => condensedView ? fetchCondensedModels(true) : refreshProviders()}
+                      disabled={refreshing && !condensedView}
+                      className="touch-target inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-60 shrink-0"
+                      title={condensedView ? "Refresh condensed catalog" : (refreshing ? "syncing" : `${syncedLabel} \u00b7 ${liveCount}/${totalCount} providers live \u00b7 click to re-sync`)}
+                    >
+                      <IcoRefresh spinning={refreshing && !condensedView} />
+                      <span>{condensedView ? "refresh" : (refreshing ? "syncing" : syncedLabel || "sync")}</span>
+                    </button>
                   </div>
+                )}
+                {/* Pricing pills — desktop only (mobile gets them in the
+                    filter chip row below). */}
+                {!loading && providers.length > 0 && (
+                  <div className="hidden sm:flex items-center gap-1 ml-1">
+                    <span className="w-px h-4 bg-border/40 mx-0.5 shrink-0" />
+                    <button
+                      onClick={() => setPricingFilter("free")}
+                      className="touch-target text-[11px] leading-none px-2.5 h-7 rounded-full border transition-colors"
+                      style={{
+                        borderColor: pricingFilter === "free" ? "#22c55e50" : "var(--border)",
+                        backgroundColor: pricingFilter === "free" ? "#22c55e15" : "transparent",
+                        color: pricingFilter === "free" ? "#22c55e" : "var(--muted-foreground)",
+                      }}
+                      aria-pressed={pricingFilter === "free"}
+                    >
+                      Free
+                    </button>
+                    <button
+                      onClick={() => setPricingFilter("paid")}
+                      className="touch-target text-[11px] leading-none px-2.5 h-7 rounded-full border transition-colors"
+                      style={{
+                        borderColor: pricingFilter === "paid" ? "#f59e0b50" : "var(--border)",
+                        backgroundColor: pricingFilter === "paid" ? "#f59e0b15" : "transparent",
+                        color: pricingFilter === "paid" ? "#f59e0b" : "var(--muted-foreground)",
+                      }}
+                      aria-pressed={pricingFilter === "paid"}
+                    >
+                      Paid
+                    </button>
+                  </div>
+                )}
+                {/* Close — large touch target, always visible. */}
+                <button
+                  onClick={closeOverlay}
+                  className="touch-target flex items-center justify-center size-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+                  aria-label="Close model select"
+                >
+                  <IcoX />
+                </button>
+              </div>
 
-                  <button
-                    onClick={closeOverlay}
-                    className="flex items-center justify-center size-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
-                    aria-label="Close"
-                  >
-                    <IcoX />
-                  </button>
+              {/* ── Sticky search bar ───────────────────────────────────
+                  Large (h-11) input with 16px font on mobile so iOS Safari
+                  doesn't auto-zoom on focus. The actual filtering uses the
+                  debounced value (200ms after the last keystroke). */}
+              <div className="px-3 sm:px-4 pt-2 pb-2 shrink-0 border-b border-border/60 bg-surface/40">
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/70">
+                    <IcoSearch />
+                  </span>
+                  <input
+                    ref={inputRef}
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search models, providers, capabilities…"
+                    className="w-full pl-9 pr-3 h-11 text-[16px] sm:text-[14px] bg-surface2 border border-border rounded-2xl outline-none focus:border-accent focus:bg-surface3 transition-colors placeholder:text-muted-foreground/60"
+                    aria-label="Search models"
+                  />
                 </div>
               </div>
 
+              {/* ── Filter chip row — horizontally scrollable ────────── */}
               {providers.length > 0 && (
-                <div className="flex items-center gap-1.5 px-3.5 py-1 shrink-0 overflow-x-auto border-b border-border/30" style={{ height: 30 }}>
+                <div className="flex items-center gap-1.5 px-3 sm:px-4 py-2 shrink-0 overflow-x-auto no-scrollbar border-b border-border/60">
                   {FILTER_PILLS.map((f) => (
                     <button
                       key={f.id}
                       onClick={() => toggleFilter(f.id)}
-                      className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+                      className="touch-target shrink-0 text-[11px] leading-none px-3 h-7 rounded-full border transition-colors inline-flex items-center"
                       style={{
                         borderColor: activeFilters.includes(f.id) ? `${f.color}50` : "var(--border)",
                         backgroundColor: activeFilters.includes(f.id) ? `${f.color}15` : "transparent",
@@ -1033,12 +1075,12 @@ export function ModelSelectOverlay() {
                       {f.label}
                     </button>
                   ))}
-                  <span className="w-px h-3 bg-border/40 mx-0.5 shrink-0" />
+                  <span className="w-px h-4 bg-border/40 mx-0.5 shrink-0" />
                   {CONTEXT_OPTIONS.map((c) => (
                     <button
                       key={c.value}
                       onClick={() => setContextMin(c.value)}
-                      className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+                      className="touch-target shrink-0 text-[11px] leading-none px-3 h-7 rounded-full border transition-colors inline-flex items-center"
                       style={{
                         borderColor: contextMin === c.value ? "#14b8a680" : "var(--border)",
                         backgroundColor: contextMin === c.value ? "#14b8a615" : "transparent",
@@ -1049,10 +1091,36 @@ export function ModelSelectOverlay() {
                       {c.label}
                     </button>
                   ))}
+                  {/* Pricing pills — mobile-only here (desktop has them in header). */}
+                  <span className="sm:hidden w-px h-4 bg-border/40 mx-0.5 shrink-0" />
+                  <button
+                    onClick={() => setPricingFilter("free")}
+                    className="sm:hidden touch-target shrink-0 text-[11px] leading-none px-3 h-7 rounded-full border transition-colors inline-flex items-center"
+                    style={{
+                      borderColor: pricingFilter === "free" ? "#22c55e50" : "var(--border)",
+                      backgroundColor: pricingFilter === "free" ? "#22c55e15" : "transparent",
+                      color: pricingFilter === "free" ? "#22c55e" : "var(--muted-foreground)",
+                    }}
+                    aria-pressed={pricingFilter === "free"}
+                  >
+                    Free
+                  </button>
+                  <button
+                    onClick={() => setPricingFilter("paid")}
+                    className="sm:hidden touch-target shrink-0 text-[11px] leading-none px-3 h-7 rounded-full border transition-colors inline-flex items-center"
+                    style={{
+                      borderColor: pricingFilter === "paid" ? "#f59e0b50" : "var(--border)",
+                      backgroundColor: pricingFilter === "paid" ? "#f59e0b15" : "transparent",
+                      color: pricingFilter === "paid" ? "#f59e0b" : "var(--muted-foreground)",
+                    }}
+                    aria-pressed={pricingFilter === "paid"}
+                  >
+                    Paid
+                  </button>
                   {anyFilterActive && (
                     <button
                       onClick={() => { activeFilters.forEach((f) => toggleFilter(f)); setContextMin(0); }}
-                      className="shrink-0 text-[9px] leading-none px-1.5 py-0.5 rounded text-muted-foreground/60 hover:text-foreground hover:bg-muted/40 transition-colors ml-auto"
+                      className="touch-target shrink-0 text-[11px] leading-none px-2.5 h-7 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-muted/40 transition-colors ml-auto"
                     >
                       clear
                     </button>
@@ -1061,7 +1129,7 @@ export function ModelSelectOverlay() {
                     <>
                       <button
                         onClick={() => setHideUnavailable(!hideUnavailable)}
-                        className="shrink-0 text-[10px] leading-none px-2 py-0.5 rounded-full border transition-colors"
+                        className={`touch-target shrink-0 text-[11px] leading-none px-3 h-7 rounded-full border transition-colors inline-flex items-center ${anyFilterActive ? "" : "ml-auto"}`}
                         style={{
                           borderColor: hideUnavailable ? "#22c55e50" : "var(--border)",
                           backgroundColor: hideUnavailable ? "#22c55e15" : "transparent",
@@ -1071,40 +1139,41 @@ export function ModelSelectOverlay() {
                       >
                         {hideUnavailable ? "Available" : "All models"}
                       </button>
-                      <span className="text-[9px] text-muted-foreground/50 shrink-0 tabular-nums ml-auto">
+                      <span className="text-[10px] text-muted-foreground/60 shrink-0 tabular-nums">
                         {condensedModels.length} models
                       </span>
                     </>
                   )}
                   {!condensedView && !loading && (
-                    <span className="text-[9px] text-muted-foreground/50 ml-auto shrink-0 tabular-nums">
+                    <span className={`text-[10px] text-muted-foreground/60 shrink-0 tabular-nums ${anyFilterActive ? "" : "ml-auto"}`}>
                       {filteredCount} models
                     </span>
                   )}
                 </div>
               )}
 
-              <div className="flex-1 min-h-0 overflow-y-auto">
+              {/* ── List area — flex-1 scroll ────────────────────────── */}
+              <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
                 {!condensedView && loading && (
-                  <div className="flex items-center justify-center h-full">
-                    <span className="inline-block size-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
-                    <span className="ml-2 text-[11px] text-muted-foreground">fetching</span>
+                  <div className="flex items-center justify-center h-full py-12">
+                    <span className="inline-block size-5 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
+                    <span className="ml-2 text-[12px] text-muted-foreground">fetching providers…</span>
                   </div>
                 )}
 
                 {condensedView && loading && (
-                  <div className="flex items-center justify-center h-full">
-                    <span className="inline-block size-4 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
-                    <span className="ml-2 text-[11px] text-muted-foreground">fetching</span>
+                  <div className="flex items-center justify-center h-full py-12">
+                    <span className="inline-block size-5 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
+                    <span className="ml-2 text-[12px] text-muted-foreground">fetching models…</span>
                   </div>
                 )}
 
                 {!condensedView && error && (
-                  <div className="flex flex-col items-center justify-center h-full gap-2">
-                    <span className="text-[11px] text-destructive">{error}</span>
+                  <div className="flex flex-col items-center justify-center h-full gap-3 py-12">
+                    <span className="text-[13px] text-destructive">{error}</span>
                     <button
                       onClick={fetchProviders}
-                      className="text-[11px] text-foreground underline underline-offset-2 hover:text-primary"
+                      className="touch-target text-[12px] text-accent underline underline-offset-2 hover:text-accentLight px-3 h-9"
                     >
                       retry
                     </button>
@@ -1112,7 +1181,9 @@ export function ModelSelectOverlay() {
                 )}
 
                 {!condensedView && !loading && !error && (
-                  <div className="p-3 overflow-y-auto max-h-full">
+                  <div className="p-3 sm:p-4">
+                    {/* Mobile: single column (vertical list of cards).
+                        Desktop: 2-column masonry. */}
                     <div className="sm:columns-2 columns-1" style={{ columnGap: '0.75rem' }}>
                       {visibleProviders.map((p) => (
                         <div key={p.name} className="break-inside-avoid mb-3 min-w-0">
@@ -1122,7 +1193,7 @@ export function ModelSelectOverlay() {
                             selectedProviderName={selectedProviderName}
                             condensedView={condensedView}
                             onSelect={handleSelect}
-                            searchQuery={searchQuery}
+                            searchQuery={debouncedQuery}
                             activeFilters={activeFilters}
                             contextMin={contextMin}
                           />
@@ -1133,10 +1204,10 @@ export function ModelSelectOverlay() {
                 )}
 
                 {condensedView && !loading && (
-                  <div className="p-3 relative">
+                  <div className="p-3 sm:p-4 relative">
                     <CondensedList
                       models={condensedModels}
-                      searchQuery={searchQuery}
+                      searchQuery={debouncedQuery}
                       activeFilters={activeFilters}
                       contextMin={contextMin}
                       hideUnavailable={hideUnavailable}
@@ -1149,14 +1220,17 @@ export function ModelSelectOverlay() {
                 )}
               </div>
 
-              <div className="flex items-center justify-between px-3.5 shrink-0" style={{ height: 30, borderTop: "1px solid var(--border)" }}>
-                <span className="text-[10px] text-muted-foreground truncate">
-                  click to select &nbsp;<kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close{totalCount > 0 ? ` &nbsp;${totalCount} provider${totalCount === 1 ? "" : "s"} &nbsp;synced ${liveCount}/${totalCount}` : ""}
+              {/* ── Footer — selected model + esc hint ───────────────── */}
+              <div className="flex items-center justify-between gap-2 px-3 sm:px-4 py-2 shrink-0 border-t border-border/60 bg-surface/40 safe-bottom">
+                <span className="text-[10px] sm:text-[11px] text-muted-foreground truncate">
+                  <span className="hidden sm:inline">tap to select &nbsp;</span>
+                  <kbd className="px-1 py-px rounded bg-muted border border-border text-[9px] font-mono">esc</kbd> to close
+                  {totalCount > 0 ? ` &nbsp;${totalCount} provider${totalCount === 1 ? "" : "s"} &nbsp;synced ${liveCount}/${totalCount}` : ""}
                 </span>
                 {selectedDisplayName && (
-                  <span className="text-[10px] text-primary font-medium flex items-center gap-1">
+                  <span className="text-[11px] sm:text-[12px] text-accent font-medium flex items-center gap-1 shrink-0">
                     <IcoDot />
-                    {selectedDisplayName}
+                    <span className="truncate max-w-[40vw] sm:max-w-[200px]">{selectedDisplayName}</span>
                   </span>
                 )}
               </div>

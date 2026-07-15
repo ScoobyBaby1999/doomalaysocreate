@@ -44,7 +44,7 @@ const KIND_LABELS: Record<string, string> = {
 };
 
 const KIND_COLORS: Record<string, string> = {
-  websearch: "#5b8cff",
+  websearch: "#a855f7",
   deepresearch: "#a855f7",
   judge: "#f59e0b",
   chat: "#22c55e",
@@ -333,7 +333,7 @@ export function TemplateLibrary({
                     Template Library
                   </span>
                   {/* Tabs */}
-                  <div className="flex items-center bg-surface2 rounded-md p-0.5 ml-2">
+                  <div className="flex items-center bg-surface2 rounded-xl p-0.5 ml-2">
                     <button
                       onClick={() => setTab("mine")}
                       className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
@@ -369,7 +369,7 @@ export function TemplateLibrary({
                 </div>
                 <button
                   onClick={onClose}
-                  className="text-muted-foreground hover:text-foreground p-1.5 rounded-md hover:bg-surface2 transition-colors shrink-0"
+                  className="text-muted-foreground hover:text-foreground p-1.5 rounded-xl hover:bg-surface2 transition-colors shrink-0"
                   title="Close"
                   aria-label="Close"
                 >
@@ -423,13 +423,13 @@ export function TemplateLibrary({
                                 if (e.key === "Enter") loadExplore();
                               }}
                               placeholder="Search templates…"
-                              className="w-full pl-7 pr-2 py-1.5 rounded-md bg-surface2 border border-border text-[12px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
+                              className="w-full pl-7 pr-2 py-1.5 rounded-xl bg-surface2 border border-border text-[12px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
                             />
                           </div>
                           <select
                             value={sort}
                             onChange={(e) => setSort(e.target.value as Sort)}
-                            className="text-[11px] bg-surface2 border border-border rounded-md px-1.5 py-1.5 text-muted-foreground outline-none focus:border-accent shrink-0"
+                            className="text-[11px] bg-surface2 border border-border rounded-xl px-1.5 py-1.5 text-muted-foreground outline-none focus:border-accent shrink-0"
                             title="Sort by"
                           >
                             <option value="hearts">Most Hearted</option>
@@ -441,7 +441,7 @@ export function TemplateLibrary({
                       <select
                         value={kindFilter}
                         onChange={(e) => setKindFilter(e.target.value)}
-                        className="text-[11px] bg-surface2 border border-border rounded-md px-1.5 py-1.5 text-muted-foreground outline-none focus:border-accent shrink-0"
+                        className="text-[11px] bg-surface2 border border-border rounded-xl px-1.5 py-1.5 text-muted-foreground outline-none focus:border-accent shrink-0"
                         title="Filter by kind"
                       >
                         <option value="">All kinds</option>
@@ -454,7 +454,7 @@ export function TemplateLibrary({
                       {tab === "mine" && (
                         <button
                           onClick={() => setCreating(true)}
-                          className="text-[11px] px-2 py-1.5 rounded-md bg-accent text-white hover:bg-accent/90 transition-colors shrink-0 flex items-center gap-1"
+                          className="text-[11px] px-2 py-1.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors shrink-0 flex items-center gap-1"
                           title="Create a new template"
                         >
                           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -482,7 +482,7 @@ export function TemplateLibrary({
                             cta={
                               <button
                                 onClick={() => setCreating(true)}
-                                className="text-[12px] px-3 py-1.5 rounded-md bg-accent text-white hover:bg-accent/90 transition-colors"
+                                className="text-[12px] px-3 py-1.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors"
                               >
                                 Create your first template
                               </button>
@@ -568,7 +568,7 @@ export function TemplateLibrary({
                         <span className="text-[11px] font-medium truncate flex-1">{selected.name}</span>
                         <button
                           onClick={() => setSelected(null)}
-                          className="text-muted-foreground hover:text-foreground p-1 rounded-md hover:bg-surface2 shrink-0"
+                          className="text-muted-foreground hover:text-foreground p-1 rounded-xl hover:bg-surface2 shrink-0"
                           aria-label="Close preview"
                         >
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -805,7 +805,7 @@ function TemplateCard({
         {onApply && (
           <button
             onClick={(e) => { e.stopPropagation(); onApply(t); }}
-            className="text-[10px] px-2 py-0.5 rounded-md bg-accent text-white hover:bg-accent/90 transition-colors font-medium"
+            className="text-[10px] px-2 py-0.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors font-medium"
             title="Use this template in the current chat tool"
           >
             Use
@@ -907,7 +907,7 @@ function TemplatePreview({
       <div className="px-3 py-2 border-t border-border shrink-0 flex items-center gap-1.5 flex-wrap">
         <button
           onClick={() => onApply(t)}
-          className="text-[11px] px-3 py-1.5 rounded-md bg-accent text-white hover:bg-accent/90 transition-colors font-medium flex items-center gap-1.5"
+          className="text-[11px] px-3 py-1.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors font-medium flex items-center gap-1.5"
         >
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="20 6 9 17 4 12" />
@@ -917,7 +917,7 @@ function TemplatePreview({
         {onHeart && (
           <button
             onClick={() => onHeart(t)}
-            className={`text-[11px] px-2 py-1.5 rounded-md border transition-colors flex items-center gap-1 ${
+            className={`text-[11px] px-2 py-1.5 rounded-xl border transition-colors flex items-center gap-1 ${
               t.hearted
                 ? "border-red-400/40 text-red-400 bg-red-400/10"
                 : "border-border text-muted-foreground hover:text-red-400 hover:border-red-400/40"
@@ -933,7 +933,7 @@ function TemplatePreview({
         {onDownload && !t.downloaded && (
           <button
             onClick={() => onDownload(t)}
-            className="text-[11px] px-2 py-1.5 rounded-md border border-border text-muted-foreground hover:text-accent hover:border-accent/40 transition-colors flex items-center gap-1"
+            className="text-[11px] px-2 py-1.5 rounded-xl border border-border text-muted-foreground hover:text-accent hover:border-accent/40 transition-colors flex items-center gap-1"
             title="Download — creates a local copy you can edit"
           >
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -945,7 +945,7 @@ function TemplatePreview({
           </button>
         )}
         {onDownload && t.downloaded && (
-          <span className="text-[11px] px-2 py-1.5 rounded-md border border-emerald-400/40 text-emerald-400 flex items-center gap-1">
+          <span className="text-[11px] px-2 py-1.5 rounded-xl border border-emerald-400/40 text-emerald-400 flex items-center gap-1">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <polyline points="20 6 9 17 4 12" />
             </svg>
@@ -1089,7 +1089,7 @@ function TemplateEditor({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. Repo Audit"
-            className="w-full px-2.5 py-1.5 rounded-md bg-surface2 border border-border text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
+            className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
           />
         </div>
 
@@ -1102,7 +1102,7 @@ function TemplateEditor({
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="Short one-line summary"
-            className="w-full px-2.5 py-1.5 rounded-md bg-surface2 border border-border text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
+            className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
           />
         </div>
 
@@ -1115,7 +1115,7 @@ function TemplateEditor({
               value={kind}
               onChange={(e) => setKind(e.target.value as TemplateKind)}
               disabled={!!existing}
-              className="w-full px-2.5 py-1.5 rounded-md bg-surface2 border border-border text-[12.5px] text-foreground outline-none focus:border-accent disabled:opacity-60"
+              className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[12.5px] text-foreground outline-none focus:border-accent disabled:opacity-60"
             >
               {ALL_KINDS.map((k) => (
                 <option key={k} value={k}>
@@ -1133,7 +1133,7 @@ function TemplateEditor({
               value={tagsInput}
               onChange={(e) => setTagsInput(e.target.value)}
               placeholder="audit, security, refactor"
-              className="w-full px-2.5 py-1.5 rounded-md bg-surface2 border border-border text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
+              className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent"
             />
           </div>
         </div>
@@ -1147,12 +1147,12 @@ function TemplateEditor({
             onChange={(e) => setMarkdown(e.target.value)}
             rows={12}
             placeholder="Write the prompt markdown here. Use {{variables}} for substitution, sections with ## headers, etc."
-            className="w-full px-2.5 py-1.5 rounded-md bg-surface2 border border-border text-[12px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent font-mono leading-relaxed resize-y min-h-[200px]"
+            className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[12px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent font-mono leading-relaxed resize-y min-h-[200px]"
           />
           <div className="mt-1 text-[10px] text-muted-foreground/60">
             Preview:
           </div>
-          <div className="mt-1 px-3 py-2 rounded-md border border-border bg-surface2/50 max-h-[200px] overflow-y-auto">
+          <div className="mt-1 px-3 py-2 rounded-xl border border-border bg-surface2/50 max-h-[200px] overflow-y-auto">
             <Markdown text={markdown || "_Markdown preview will appear here._"} />
           </div>
         </div>
@@ -1179,14 +1179,14 @@ function TemplateEditor({
       <div className="px-3 py-2 border-t border-border shrink-0 flex items-center gap-2 justify-end">
         <button
           onClick={onCancel}
-          className="text-[11px] px-3 py-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors"
+          className="text-[11px] px-3 py-1.5 rounded-xl text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors"
         >
           Cancel
         </button>
         <button
           onClick={handleSave}
           disabled={saving}
-          className="text-[11px] px-3 py-1.5 rounded-md bg-accent text-white hover:bg-accent/90 transition-colors font-medium disabled:opacity-50"
+          className="text-[11px] px-3 py-1.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors font-medium disabled:opacity-50"
         >
           {saving ? "Saving…" : existing ? "Save changes" : "Create template"}
         </button>

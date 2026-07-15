@@ -56,15 +56,16 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   onRetry,
 }: ChatMessageBubbleProps) {
   // -- User message: right-aligned bubble with pending indicator ----------
+  //  Purple bubble + white text — high contrast on the dark surface.
   if (message.role === "user") {
     return (
-      <div className="flex justify-end px-4 py-1.5 group fade-in">
+      <div className="flex justify-end px-2 sm:px-4 py-1.5 group fade-in">
         <div className="flex flex-col items-end gap-0.5 max-w-[85%]">
           <div
-            className={`rounded-2xl rounded-br-md px-4 py-2.5 text-[14.5px] leading-relaxed whitespace-pre-wrap break-words ${
+            className={`rounded-3xl rounded-br-lg px-4 py-2.5 text-[15px] sm:text-[14.5px] leading-relaxed whitespace-pre-wrap break-words shadow-sm ${
               message.pending
-                ? "bg-accent/10 text-foreground/70 italic"
-                : "bg-accent/15 text-foreground"
+                ? "bg-accent/20 text-foreground/70 italic"
+                : "bg-purple-600 text-white"
             }`}
           >
             {message.content}
@@ -87,7 +88,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       message.tokensReasoning != null ||
       typeof message.costUsd === "number";
     return (
-      <div className="flex justify-start px-4 py-1.5 group">
+      <div className="flex justify-start px-2 sm:px-4 py-1.5 group">
         <div className="flex gap-2.5 max-w-[92%] fade-in">
           <Avatar kind="assistant" />
           <div className="flex-1 min-w-0 pt-0.5">
@@ -102,7 +103,8 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
                 <span>{stageLabel(message.stage)}</span>
               </div>
             )}
-            <div className="text-[14.5px] leading-relaxed text-foreground">
+            {/* Assistant bubble — dark surface, lighter text, rounded-2xl. */}
+            <div className="rounded-3xl rounded-tl-lg px-4 py-2.5 bg-zinc-800/80 text-[15px] sm:text-[14.5px] leading-relaxed text-zinc-100">
               <Markdown text={message.content} />
               {message.isStreaming && (
                 <span className="inline-block w-[6px] h-[15px] ml-0.5 bg-accent animate-pulse align-middle rounded-sm" />
@@ -112,17 +114,18 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
             {message.sources && message.sources.length > 0 && (
               <SourcesPanel sources={message.sources} />
             )}
-            {/* Meta + actions row — visible on hover */}
+            {/* Meta + actions row — always visible on mobile (no hover),
+                subtle on desktop. Buttons are ≥44px touch targets. */}
             {!message.isStreaming && message.content.trim() && (
-              <div className="flex items-center gap-2 mt-1 opacity-0 group-hover:opacity-100 transition-opacity flex-wrap">
+              <div className="flex items-center gap-1 mt-1.5 flex-wrap">
                 <CopyButton text={message.content} />
                 {onRetry && <RetryButton onClick={onRetry} />}
                 {hasMeta && <MessageMeta message={message} />}
               </div>
             )}
-            {/* Even when streaming, show meta on hover for live cost tracking */}
+            {/* Even when streaming, show meta for live cost tracking */}
             {message.isStreaming && hasMeta && (
-              <div className="flex items-center gap-2 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="flex items-center gap-2 mt-1.5">
                 <MessageMeta message={message} />
               </div>
             )}
@@ -136,7 +139,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   if (message.role === "thinking") {
     const preview = message.content.slice(0, 80).replace(/\n/g, " ");
     return (
-      <div className="px-4 py-1 fade-in">
+      <div className="px-2 sm:px-4 py-1 fade-in">
         <Collapsible
           label={
             message.isStreaming
@@ -163,8 +166,8 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       const isDiffContent = !message.isError && isDiff(message.content);
       if (isDiffContent) {
         return (
-          <div className="px-4 py-1 fade-in">
-            <div className="rounded-lg border border-border overflow-hidden max-w-2xl">
+          <div className="px-2 sm:px-4 py-1 fade-in">
+            <div className="rounded-2xl border border-border overflow-hidden max-w-2xl">
               <div className="px-3 py-1.5 text-[11px] text-muted-foreground border-b border-border bg-surface/50 font-medium">
                 Diff
               </div>
@@ -174,7 +177,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         );
       }
       return (
-        <div className="px-4 py-1 fade-in">
+        <div className="px-2 sm:px-4 py-1 fade-in">
           <Collapsible
             label={message.isError ? "Result (error)" : "Result"}
             kind={message.isError ? "error" : "result"}
@@ -189,14 +192,14 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
 
     // Tool use indicator (no result yet)
     return (
-      <div className="px-4 py-0.5">
+      <div className="px-2 sm:px-4 py-0.5">
         <div className="flex items-center gap-2 text-[11.5px] text-muted-foreground">
           <span className="flex items-center gap-1.5">
             <ToolIcon name={message.toolName || "tool"} />
             <span className="font-medium text-accent/90">{message.toolName}</span>
           </span>
           {message.toolSummary ? (
-            <span className="font-mono text-[10.5px] truncate max-w-[300px] opacity-70">
+            <span className="font-mono text-[10.5px] truncate max-w-[200px] sm:max-w-[300px] opacity-70">
               {message.toolSummary}
             </span>
           ) : null}
@@ -209,8 +212,8 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   if (message.role === "status") {
     if (message.isError) {
       return (
-        <div className="px-4 py-1.5">
-          <div className="max-w-2xl mx-auto rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2.5 text-[13px] text-red-300 flex items-start gap-2">
+        <div className="px-2 sm:px-4 py-1.5">
+          <div className="max-w-2xl mx-auto rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-2.5 text-[13px] text-red-300 flex items-start gap-2">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 shrink-0">
               <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
             </svg>
@@ -220,7 +223,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       );
     }
     return (
-      <div className="px-4 py-1 text-center">
+      <div className="px-2 sm:px-4 py-1 text-center">
         <span className="text-[10.5px] text-muted-foreground/70 italic">
           {message.content}
         </span>
@@ -231,8 +234,8 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   // -- Panel message ------------------------------------------------------
   if (message.role === "panel") {
     return (
-      <div className="px-4 py-1.5">
-        <div className="max-w-2xl mx-auto rounded-xl border border-border bg-surface/40 overflow-hidden">
+      <div className="px-2 sm:px-4 py-1.5">
+        <div className="max-w-2xl mx-auto rounded-2xl border border-border bg-surface/40 overflow-hidden">
           <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-surface/60">
             <span
               className={`h-2 w-2 rounded-full ${
@@ -263,8 +266,8 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
 function Avatar({ kind }: { kind: "assistant" | "user" }) {
   if (kind === "assistant") {
     return (
-      <div className="shrink-0 w-7 h-7 rounded-md bg-accent/15 flex items-center justify-center">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5b8cff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <div className="shrink-0 w-8 h-8 sm:w-7 sm:h-7 rounded-xl bg-accent/15 flex items-center justify-center">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#a855f7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M12 2a10 10 0 0 1 10 10c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2z" />
           <path d="M12 16v-4" />
           <path d="M12 8h.01" />
@@ -296,10 +299,10 @@ function Collapsible({
   const labelClass =
     kind === "error" ? "text-red-300" : "text-muted-foreground";
   return (
-    <div className={`rounded-lg border ${borderClass} max-w-2xl overflow-hidden`}>
+    <div className={`rounded-2xl border ${borderClass} max-w-2xl overflow-hidden`}>
       <button
         onClick={() => setOpen((o) => !o)}
-        className={`w-full text-left text-[11px] px-3 py-1.5 font-medium ${labelClass} hover:bg-surface/40 transition-colors flex items-center gap-2`}
+        className={`touch-target w-full text-left text-[11.5px] px-3 py-2 min-h-[40px] font-medium ${labelClass} hover:bg-surface/40 transition-colors flex items-center gap-2`}
       >
         <svg
           width="9"
@@ -392,19 +395,20 @@ function CopyButton({ text }: { text: string }) {
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       }}
-      className="text-[9px] px-1.5 py-0.5 rounded text-muted-foreground/60 hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1"
+      className="touch-target h-8 px-2.5 rounded-xl text-[11px] text-muted-foreground/70 hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1"
       title="Copy to clipboard"
+      aria-label="Copy to clipboard"
     >
       {copied ? (
         <>
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="20 6 9 17 4 12" />
           </svg>
           Copied
         </>
       ) : (
         <>
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
           </svg>
@@ -419,10 +423,11 @@ function RetryButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="text-[9px] px-1.5 py-0.5 rounded text-muted-foreground/60 hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1"
+      className="touch-target h-8 px-2.5 rounded-xl text-[11px] text-muted-foreground/70 hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1"
       title="Retry this turn"
+      aria-label="Retry this turn"
     >
-      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <polyline points="23 4 23 10 17 10" />
         <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
       </svg>
@@ -477,7 +482,7 @@ function MessageMeta({ message }: { message: ChatMessage }) {
   }
   if (parts.length === 0) return null;
   return (
-    <div className="flex items-center gap-2 text-[9px] text-muted-foreground/60 font-mono tabular-nums">
+    <div className="flex items-center gap-2 text-[10px] text-muted-foreground/60 font-mono tabular-nums px-1">
       {parts}
     </div>
   );
@@ -491,7 +496,7 @@ function SourcesPanel({ sources }: { sources: ChatSource[] }) {
     <div className="mt-1.5 max-w-2xl">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+        className="touch-target flex items-center gap-1.5 h-7 px-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
       >
         <svg
           width="9"
@@ -515,7 +520,7 @@ function SourcesPanel({ sources }: { sources: ChatSource[] }) {
         </span>
       </button>
       {open && (
-        <div className="mt-1 rounded-lg border border-border bg-surface/30 overflow-hidden">
+        <div className="mt-1 rounded-2xl border border-border bg-surface/30 overflow-hidden">
           {sources.map((s, i) => {
             const host = (() => {
               try {
@@ -530,14 +535,14 @@ function SourcesPanel({ sources }: { sources: ChatSource[] }) {
                 href={s.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="block px-3 py-2 hover:bg-surface2 transition-colors border-b border-border/50 last:border-b-0 group"
+                className="block px-3 py-2.5 min-h-[44px] hover:bg-surface2 transition-colors border-b border-border/50 last:border-b-0 group"
                 title={s.url}
               >
                 <div className="flex items-center gap-1.5">
                   <span className="text-[10px] text-muted-foreground/60 font-mono shrink-0">
                     {i + 1}.
                   </span>
-                  <span className="text-[11px] text-accent font-medium truncate flex-1">
+                  <span className="text-[12px] text-accent font-medium truncate flex-1">
                     {s.name || host}
                   </span>
                   <svg
@@ -555,9 +560,9 @@ function SourcesPanel({ sources }: { sources: ChatSource[] }) {
                     <path d="M7 17 17 7" />
                   </svg>
                 </div>
-                <div className="text-[9px] text-muted-foreground/50 ml-4 truncate">{host}</div>
+                <div className="text-[10px] text-muted-foreground/50 ml-4 truncate">{host}</div>
                 {s.snippet && (
-                  <div className="text-[10px] text-muted-foreground/70 mt-1 ml-4 line-clamp-2">
+                  <div className="text-[11px] text-muted-foreground/70 mt-1 ml-4 line-clamp-2">
                     {s.snippet}
                   </div>
                 )}

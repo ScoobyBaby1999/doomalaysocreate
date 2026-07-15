@@ -31,7 +31,7 @@ const CATEGORIES = [
 const LEVEL_COLORS: Record<string, string> = {
   ERROR: "text-rose-300 bg-rose-500/10",
   WARN: "text-amber-300 bg-amber-500/10",
-  INFO: "text-blue-300 bg-blue-500/10",
+  INFO: "text-purple-300 bg-purple-500/10",
   DEBUG: "text-muted bg-surface2",
 };
 

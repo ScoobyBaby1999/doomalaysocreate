@@ -162,7 +162,7 @@ export function SessionSidebar({
           <div className="flex items-center gap-1.5">
             <button
               onClick={onNew}
-              className="flex items-center gap-1 text-[11.5px] px-2.5 py-1.5 rounded-md bg-accent text-white hover:bg-accent/90 transition-colors font-medium"
+              className="flex items-center gap-1 text-[11.5px] px-2.5 py-1.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors font-medium"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="12" y1="5" x2="12" y2="19" />
@@ -172,7 +172,7 @@ export function SessionSidebar({
             </button>
             <button
               onClick={onClose}
-              className="text-muted-foreground hover:text-foreground p-1.5 rounded-md hover:bg-surface2 transition-colors"
+              className="text-muted-foreground hover:text-foreground p-1.5 rounded-xl hover:bg-surface2 transition-colors"
               title="Close"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -205,7 +205,7 @@ export function SessionSidebar({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search chats…"
-              className="w-full pl-8 pr-3 py-1.5 text-[12px] bg-surface2 rounded-md border border-border focus:border-accent focus:outline-none placeholder:text-muted-foreground/60"
+              className="w-full pl-8 pr-3 py-1.5 text-[12px] bg-surface2 rounded-xl border border-border focus:border-accent focus:outline-none placeholder:text-muted-foreground/60"
             />
           </div>
         </div>
@@ -361,7 +361,7 @@ function SessionRow({
     >
       {/* Chat icon */}
       <div
-        className={`shrink-0 w-7 h-7 rounded-md flex items-center justify-center transition-colors ${
+        className={`shrink-0 w-7 h-7 rounded-xl flex items-center justify-center transition-colors ${
           isActive ? "bg-accent/20" : "bg-surface2"
         }`}
       >
@@ -447,7 +447,7 @@ function SessionRow({
                 e.stopPropagation();
                 onTogglePin(session.id);
               }}
-              className={`p-1 rounded-md transition-all hover:bg-surface2 hover:text-foreground ${
+              className={`p-1 rounded-xl transition-all hover:bg-surface2 hover:text-foreground ${
                 isPinned ? "text-amber-400/80" : "text-muted-foreground opacity-0 group-hover:opacity-100"
               } ${isActive ? "opacity-100" : ""}`}
               title={isPinned ? "Unpin" : "Pin to top"}
@@ -462,7 +462,7 @@ function SessionRow({
               e.stopPropagation();
               onRename(session);
             }}
-            className={`p-1 rounded-md transition-all hover:bg-surface2 hover:text-foreground ${
+            className={`p-1 rounded-xl transition-all hover:bg-surface2 hover:text-foreground ${
               isActive
                 ? "text-muted-foreground opacity-100"
                 : "text-muted-foreground opacity-0 group-hover:opacity-100"
@@ -478,7 +478,7 @@ function SessionRow({
               e.stopPropagation();
               onDelete(session.id);
             }}
-            className={`p-1 rounded-md transition-all hover:bg-red-500/15 hover:text-red-300 ${
+            className={`p-1 rounded-xl transition-all hover:bg-red-500/15 hover:text-red-300 ${
               isActive
                 ? "text-muted-foreground opacity-100"
                 : "text-muted-foreground opacity-0 group-hover:opacity-100"

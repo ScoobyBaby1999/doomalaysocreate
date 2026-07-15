@@ -2,33 +2,115 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: dark; }
+/* ─── Theme tokens (shadcn-style CSS vars, purple/black) ──────────────
+ * These back the `bg-primary`, `text-foreground`, `text-muted-foreground`,
+ * `border-ring`, `text-destructive`, `bg-background`, `bg-muted` classes
+ * used by the model select overlay + inline `var(--*)` styles. */
+:root {
+  color-scheme: dark;
+  --background: #0a0a0a;
+  --foreground: #f3f4f6;
+  --muted: #241433;
+  --muted-foreground: #a1a1aa;
+  --surface: #1a1024;
+  --surface-2: #241433;
+  --border: #3b0764;
+  --border-soft: #2a1740;
+  --primary: #a855f7;          /* purple-500 */
+  --primary-hover: #9333ea;    /* purple-600 */
+  --primary-foreground: #ffffff;
+  --accent: #c084fc;           /* purple-400 */
+  --ring: #a855f7;
+  --destructive: #f43f5e;
+  --radius: 0.75rem;
+}
+
 html, body, #root { height: 100%; }
+
+html {
+  /* Lock zoom on mobile — the meta viewport also does this, but
+   * `text-size-adjust: 100%` stops iOS Safari from inflating text in
+   * landscape. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
-  background: #0b0d10;
-  color: #e6e9ee;
+  background: var(--background);
+  color: var(--foreground);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
+  /* Stop bounce-scroll / pull-to-refresh from yanking the layout. */
   overscroll-behavior: none;
+  /* No text selection emulation on tap-hold for non-interactive text —
+   * keeps the chat feeling native. */
+  -webkit-touch-callout: none;
 }
-/* markdown */
+
+/* All interactive elements get `touch-action: manipulation` by default —
+ * this removes the 300ms tap delay on mobile without disabling pinch-zoom
+ * (which we already disabled via the viewport meta). Buttons/links/etc.
+ * should feel instant. */
+button, a, [role="button"], input, select, textarea, label {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Min touch target enforcement ───────────────────────────────────
+ * Any element marked with `.touch-target` (or our icon buttons) is
+ * guaranteed ≥ 44×44 px on mobile. Apply `min-h-[44px]` etc. in JSX for
+ * one-offs; this is the default for elements with the `touch-target` class. */
+.touch-target {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Native input/textarea already handle their own sizing, but make sure
+ * they don't shrink below comfortable tap height on mobile. */
+input, textarea, select {
+  min-height: 36px;
+  font-size: 16px; /* ≥16px stops iOS Safari from auto-zooming on focus */
+}
+@media (min-width: 640px) {
+  input, textarea, select { font-size: 14px; }
+}
+
+/* ── Markdown ──────────────────────────────────────────────────────── */
 .md p { margin: 0 0 0.6rem; line-height: 1.55; }
 .md h1,.md h2,.md h3 { margin: 0.8rem 0 0.4rem; font-weight: 600; line-height: 1.3; }
 .md ul,.md ol { margin: 0 0 0.6rem 1.1rem; }
 .md li { margin: 0.15rem 0; }
-.md code { background: #1b2026; padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.85em; }
-.md pre { background: #0e1116; border: 1px solid #262d36; border-radius: 8px; padding: 0.75rem; overflow-x: auto; margin: 0 0 0.6rem; }
-.md pre code { background: none; padding: 0; font-size: 0.8rem; line-height: 1.5; }
-.md a { color: #5b8cff; }
+.md code {
+  background: #2e1a40;
+  padding: 0.1em 0.35em;
+  border-radius: 6px;
+  font-size: 0.85em;
+  color: #d8b4fe;
+}
+.md pre {
+  background: #0a0a0a;
+  border: 1px solid #3b0764;
+  border-left: 3px solid #a855f7;
+  border-radius: 12px;
+  padding: 0.75rem;
+  overflow-x: auto;
+  margin: 0 0 0.6rem;
+}
+.md pre code { background: none; padding: 0; font-size: 0.8rem; line-height: 1.5; color: #f3f4f6; }
+.md a { color: #c084fc; text-decoration: none; border-bottom: 1px solid rgba(192,132,252,0.3); transition: border-color 0.15s ease; }
+.md a:hover { border-bottom-color: rgba(192,132,252,0.8); }
 .md table { border-collapse: collapse; margin: 0 0 0.6rem; display: block; overflow-x: auto; }
-.md th,.md td { border: 1px solid #262d36; padding: 0.3rem 0.5rem; }
+.md th,.md td { border: 1px solid #3b0764; padding: 0.3rem 0.5rem; }
 
-/* diff2html minimal dark theme */
+/* ── diff2html minimal dark theme (recoloured to purple) ──────────── */
 .d2h-wrapper { font-size: 11px; line-height: 1.4; }
-.d2h-file-header { background: #14191e; border-bottom: 1px solid #262d36; padding: 4px 8px; display: flex; align-items: center; gap: 8px; }
+.d2h-file-header { background: #1a1024; border-bottom: 1px solid #3b0764; padding: 4px 8px; display: flex; align-items: center; gap: 8px; }
 .d2h-file-header.d2h-sticky { position: static !important; }
-.d2h-file-name { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; color: #88929e; }
+.d2h-file-name { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; color: #a1a1aa; }
 .d2h-file-stats { display: none; }
 .d2h-lines-added { color: #34d399; font-size: 10px; margin-left: auto; }
 .d2h-lines-deleted { color: #f87171; font-size: 10px; }
@@ -38,29 +120,29 @@ body {
 .d2h-code-side-line { padding: 0 6px; white-space: pre; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; line-height: 1.5; }
 .d2h-ins { background: #064e3b; }
 .d2h-del { background: #7f1d1d; }
-.d2h-info { background: #1e293b; color: #64748b; }
-.d2h-cntx { color: #88929e; }
-.d2h-code-line-prefix { color: #475569; user-select: none; }
+.d2h-info { background: #1a1024; color: #a1a1aa; }
+.d2h-cntx { color: #a1a1aa; }
+.d2h-code-line-prefix { color: #5b21b6; user-select: none; }
 .d2h-code-line-ctn { color: #c8d0da; }
 .d2h-emptyplaceholder { display: none; }
 .d2h-tag { display: none; }
 
-/* ─── Improved styling ─────────────────────────────────────────── */
+/* ── Improved styling ─────────────────────────────────────────────── */
 
 /* Smooth scrolling */
 * { scroll-behavior: smooth; }
 
-/* Better scrollbars */
+/* Slim purple scrollbars */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #262d36; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #363f4a; }
+::-webkit-scrollbar-thumb { background: #3b0764; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #5b21b6; }
 
 /* Card hover effects */
 .card-hover { transition: all 0.15s ease; }
-.card-hover:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+.card-hover:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(168,85,247,0.15); }
 
-/* Tab active indicator */
+/* Tab active indicator (purple underline) */
 .tab-active { position: relative; }
 .tab-active::after {
   content: '';
@@ -69,7 +151,7 @@ body {
   left: 25%;
   right: 25%;
   height: 2px;
-  background: #5b8cff;
+  background: #a855f7;
   border-radius: 1px;
 }
 
@@ -87,9 +169,16 @@ body {
 }
 .fade-in { animation: fade-in 0.2s ease-out; }
 
-/* Better focus rings */
+/* Slide-up animation for bottom-sheet overlays (mobile model select) */
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.slide-up { animation: slide-up 0.22s cubic-bezier(0.19, 1, 0.22, 1); }
+
+/* Better focus rings (purple) */
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
-  outline: 2px solid #5b8cff;
+  outline: 2px solid #a855f7;
   outline-offset: 1px;
 }
 
@@ -122,60 +211,66 @@ button { user-select: none; }
   font-weight: 600;
 }
 
-/* Safe area insets for mobile */
+/* Safe area insets for mobile (notches + home indicator) */
 @supports (padding: env(safe-area-inset-bottom)) {
   nav { padding-bottom: env(safe-area-inset-bottom); }
+  .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+  .safe-top { padding-top: env(safe-area-inset-top); }
 }
 
-/* ─── Glassmorphism + advanced styling ──────────────────────────── */
-
-/* Glassmorphism for header */
+/* ── Glassmorphism for header + bottom nav (purple-tinted) ────────── */
 header {
   backdrop-filter: blur(12px) saturate(1.2);
   -webkit-backdrop-filter: blur(12px) saturate(1.2);
-  background: rgba(11, 13, 16, 0.7);
+  background: rgba(10, 10, 10, 0.78);
 }
-
-/* Glassmorphism for bottom nav */
 nav {
   backdrop-filter: blur(12px) saturate(1.2);
   -webkit-backdrop-filter: blur(12px) saturate(1.2);
-  background: rgba(11, 13, 16, 0.8);
+  background: rgba(10, 10, 10, 0.85);
 }
 
-/* Smooth transitions on all interactive elements */
+/* Smooth transitions on interactive elements */
 button, input, select, textarea {
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
 }
 
-/* Better placeholder styling */
+/* Active-press feedback for touch — shrinks very slightly so taps feel responsive */
+button:active:not(:disabled), [role="button"]:active {
+  transform: scale(0.97);
+}
+
+/* Better placeholder styling (purple-tinted) */
 input::placeholder, textarea::placeholder {
-  color: rgba(230, 233, 238, 0.25);
+  color: rgba(243, 244, 246, 0.3);
   transition: color 0.15s ease;
 }
 input:focus::placeholder, textarea:focus::placeholder {
-  color: rgba(230, 233, 238, 0.15);
+  color: rgba(243, 244, 246, 0.18);
 }
 
-/* Active tab glow effect */
+/* Active tab glow effect (purple) */
 nav button[class*="text-accent"] {
-  text-shadow: 0 0 8px rgba(91, 140, 255, 0.3);
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.4);
 }
 
 /* Message bubble max-width for readability */
 .max-w-\[85\%\] { max-width: 85%; }
 
-/* Subtle gradient on buttons */
+/* Purple gradient on primary action buttons */
 button[class*="bg-accent"] {
-  background-image: linear-gradient(135deg, rgba(91, 140, 255, 1), rgba(91, 140, 255, 0.85));
+  background-image: linear-gradient(135deg, #a855f7, #9333ea);
 }
 button[class*="bg-accent"]:hover {
-  background-image: linear-gradient(135deg, rgba(91, 140, 255, 0.9), rgba(91, 140, 255, 0.75));
+  background-image: linear-gradient(135deg, #9333ea, #7e22ce);
+}
+button[class*="bg-accent"]:active {
+  background-image: linear-gradient(135deg, #7e22ce, #6b21a8);
 }
 
-/* Loading skeleton */
+/* Loading skeleton (purple-tinted shimmer) */
 .skeleton {
-  background: linear-gradient(90deg, #1b2026 25%, #262d36 50%, #1b2026 75%);
+  background: linear-gradient(90deg, #1a1024 25%, #241433 50%, #1a1024 75%);
   background-size: 200% 100%;
   animation: skeleton-shimmer 1.5s infinite;
 }
@@ -184,22 +279,10 @@ button[class*="bg-accent"]:hover {
   100% { background-position: -200% 0; }
 }
 
-/* Better code block styling */
-.md pre {
-  border-left: 3px solid #5b8cff;
-}
+/* Improved code block styling — purple left border */
+.md pre { border-left: 3px solid #a855f7; }
 
-/* Improved link styling */
-.md a {
-  text-decoration: none;
-  border-bottom: 1px solid rgba(91, 140, 255, 0.3);
-  transition: border-color 0.15s ease;
-}
-.md a:hover {
-  border-bottom-color: rgba(91, 140, 255, 0.8);
-}
-
-/* Tooltip styling */
+/* Tooltip styling (purple-tinted) */
 [title] {
   text-decoration: none;
   position: relative;
@@ -210,10 +293,11 @@ button[class*="bg-accent"]:hover {
   bottom: 100%;
   left: 50%;
   transform: translateX(-50%);
-  background: #1b2026;
-  color: #e6e9ee;
+  background: #241433;
+  color: #f3f4f6;
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: 6px;
+  border: 1px solid #3b0764;
   font-size: 10px;
   white-space: pre;
   pointer-events: none;
@@ -230,12 +314,12 @@ kbd {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   font-size: 9px;
   line-height: 1;
-  color: rgba(230, 233, 238, 0.5);
+  color: rgba(243, 244, 246, 0.5);
 }
 
-/* Better empty state */
+/* Better empty state — purple glow */
 .empty-state-icon {
-  filter: drop-shadow(0 0 12px rgba(91, 140, 255, 0.15));
+  filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.25));
 }
 
 /* Improved message spacing */
@@ -247,7 +331,7 @@ kbd {
 textarea {
   resize: none;
   -webkit-appearance: none;
-  border-radius: 12px;
+  border-radius: 14px;
 }
 
 /* Improved scrollbar for code blocks */
@@ -255,7 +339,7 @@ textarea {
   height: 4px;
 }
 .md pre::-webkit-scrollbar-thumb {
-  background: #363f4a;
+  background: #5b21b6;
   border-radius: 2px;
 }
 
@@ -266,12 +350,53 @@ textarea {
 }
 .status-pulse { animation: status-pulse 1.5s ease-in-out infinite; }
 
-/* Better focus visible */
+/* Better focus visible (purple) */
 *:focus-visible {
-  outline: 2px solid rgba(91, 140, 255, 0.5);
+  outline: 2px solid rgba(168, 85, 247, 0.55);
   outline-offset: 2px;
-  border-radius: 4px;
+  border-radius: 6px;
 }
 
 /* Prevent layout shift on lazy-loaded content */
 img { max-width: 100%; height: auto; }
+
+/* ── Virtualization-like perf for long lists ────────────────────────
+ * Apply `.cv-auto` to list items so the browser skips rendering
+ * off-screen children. Cheap + works without a virtualizer dependency. */
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: 64px;
+}
+
+/* ── No horizontal scroll anywhere — critical for mobile-first ──── */
+html, body { overflow-x: hidden; max-width: 100vw; }
+#root { max-width: 100vw; }
+
+/* Hide horizontal scrollbar inside filter chip rows while keeping them
+ * horizontally scrollable. */
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; height: 0; width: 0; }
+
+/* ── Selected-state contrast fix ───────────────────────────────────
+ * The model select overlay's selected rows used `text-primary` (purple)
+ * on `bg-primary/10` (very pale purple) — purple-on-purple was
+ * unreadable. Force white text on selected states globally. */
+[data-selected="true"], .is-selected {
+  color: #ffffff !important;
+}
+[data-selected="true"] .sel-icon {
+  color: #ffffff;
+}
+
+/* ── iOS Safari: stop the keyboard from pushing the input off-screen ─
+ * Use 100dvh on the chat root so the layout shrinks when the soft
+ * keyboard appears. */
+.h-dvh { height: 100dvh; }
+.min-h-dvh { min-height: 100dvh; }
+
+/* ── Pointer event hygiene: critical touch-click fix ───────────────
+ * Some chat-panel elements were missing pointer events because of
+ * overlapping absolutely-positioned children. Make sure that any
+ * element marked `.pointer-pass` always receives pointer events (used
+ * on the scroll container and message list wrappers). */
+.pointer-pass { pointer-events: auto; }

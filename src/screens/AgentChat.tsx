@@ -33,12 +33,12 @@ export function AgentChat({ settings }: { settings: Settings }) {
       if (m)
         return {
           label: m.displayName || m.id,
-          color: p.color || "#5b8cff",
+          color: p.color || "#a855f7",
         };
     }
     return {
       label: selectedModelId.split("/").pop() || selectedModelId,
-      color: "#5b8cff",
+      color: "#a855f7",
     };
   })();
 
@@ -338,266 +338,328 @@ export function AgentChat({ settings }: { settings: Settings }) {
     runJudge(clientRef.current, undefined, effectiveModelId || undefined);
   }, [runJudge, effectiveModelId]);
 
+  // Mobile header: secondary tools (files, panel, queue, export, workspace,
+  // verification, token usage, status) collapse into a tappable bar that
+  // defaults to closed on phones but is always visible on `sm:`+.
+  const [toolsBarOpen, setToolsBarOpen] = useState(false);
+
   return (
-    <div className="flex flex-col h-full relative bg-bg">
-      {/* Header */}
-      <header className="flex items-center gap-2 px-3 h-11 border-b border-border shrink-0 bg-surface/50">
-        {/* Session menu toggle */}
-        <button
-          onClick={() => setSidebarOpen(!sidebarOpen)}
-          className={`p-1.5 rounded-md transition-colors ${
-            sidebarOpen
-              ? "text-accent bg-accent/10"
-              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
-          }`}
-          title="Chat sessions"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="3" y1="6" x2="21" y2="6" />
-            <line x1="3" y1="12" x2="21" y2="12" />
-            <line x1="3" y1="18" x2="21" y2="18" />
-          </svg>
-        </button>
-
-        {/* Active session title (truncated) */}
-        <div className="text-[12.5px] font-medium text-foreground truncate max-w-[140px]">
-          {activeSessionId
-            ? sessions.find((s) => s.id === activeSessionId)?.title || "New Chat"
-            : "New Chat"}
-        </div>
-
-        {/* Workspace selector — lets the user pick which sandbox the agent
-            works in. Shows the current workspace title (or "No workspace")
-            and a dropdown to switch. */}
-        <div className="relative ml-auto">
+    <div className="flex flex-col h-full relative bg-bg min-h-0">
+      {/* ── Compact mobile-first header ──────────────────────────────
+       *  Row 1 (always visible): menu · model badge · context circle ·
+       *    price gauge · stop/new. Everything else lives in the
+       *    collapsible Row 2 below.
+       *  Row 2 (collapsible on mobile, always open on desktop): files,
+       *    panel, queue, export, workspace, verification, token usage,
+       *    status indicator.
+       *  All icon buttons are ≥44×44 (touch-target friendly). */}
+      <header className="flex flex-col shrink-0 border-b border-border bg-surface/60 backdrop-blur safe-top">
+        {/* Row 1 — essentials */}
+        <div className="flex items-center gap-1.5 px-2 sm:px-3 h-12 sm:h-11">
+          {/* Session menu toggle */}
           <button
-            onClick={() => setWsOpen((v) => !v)}
-            disabled={running}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[160px]"
-            title={workspaceId || "No workspace (ephemeral)"}
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            aria-label="Chat sessions"
+            title="Chat sessions"
+            className={`touch-target shrink-0 w-10 h-10 sm:w-9 sm:h-9 rounded-xl transition-colors ${
+              sidebarOpen
+                ? "text-accent bg-accent/15"
+                : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+            }`}
           >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-muted-foreground">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
             </svg>
-            <span className="truncate">
-              {workspaceId
-                ? (workspaces.find((w) => w.id === workspaceId)?.title || "Workspace")
-                : "No workspace"}
+          </button>
+
+          {/* Active session title (truncated) — hidden on the smallest
+              screens so the model badge has breathing room. */}
+          <div className="hidden xs:block text-[12px] font-medium text-foreground truncate max-w-[120px] sm:max-w-[140px]">
+            {activeSessionId
+              ? sessions.find((s) => s.id === activeSessionId)?.title || "New Chat"
+              : "New Chat"}
+          </div>
+
+          {/* Spacer pushes the model badge toward the center/right. */}
+          <div className="flex-1" />
+
+          {/* Model selector — compact pill, large touch target. */}
+          <button
+            onClick={() => !running && openOverlay()}
+            disabled={running}
+            aria-label="Select model"
+            title={selectedProviderName || "Select model"}
+            className="touch-target shrink-0 flex items-center gap-1.5 px-2.5 h-9 rounded-xl border border-border hover:border-accent/60 transition-colors text-[12px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[44vw] sm:max-w-[200px] bg-surface2/60"
+          >
+            <span
+              className="w-2.5 h-2.5 rounded-full shrink-0 ring-2 ring-background"
+              style={{ background: modelDisplay?.color || "#a855f7" }}
+            />
+            <span className="truncate text-accent font-medium">
+              {modelDisplay?.label || "Select model"}
             </span>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground shrink-0">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
-          {wsOpen && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setWsOpen(false)} />
-              <div className="absolute right-0 top-full mt-1 z-50 min-w-[200px] max-w-[280px] rounded-lg border border-border bg-surface shadow-lg overflow-hidden">
-                <button
-                  onClick={() => { setWorkspaceId(null); setWsOpen(false); }}
-                  className={`w-full text-left px-3 py-2 text-[11.5px] hover:bg-accent/10 transition-colors ${!workspaceId ? "text-accent font-medium" : ""}`}
-                >
-                  No workspace (ephemeral)
-                </button>
-                {workspaces.map((ws) => (
-                  <button
-                    key={ws.id}
-                    onClick={() => { setWorkspaceId(ws.id); setWsOpen(false); }}
-                    className={`w-full text-left px-3 py-2 text-[11.5px] hover:bg-accent/10 transition-colors truncate ${workspaceId === ws.id ? "text-accent font-medium" : ""}`}
-                  >
-                    <div className="truncate">{ws.title}</div>
-                    {ws.source_repo && <div className="text-[9px] text-muted-foreground truncate">{ws.source_repo}</div>}
-                  </button>
-                ))}
-                {workspaces.length === 0 && (
-                  <div className="px-3 py-2 text-[10px] text-muted-foreground">
-                    No workspaces. Connect GitHub in the Workspaces tab.
-                  </div>
-                )}
-              </div>
-            </>
+
+          {/* Context usage circle — uses the selected model's REAL
+              contextLength. Hidden on the very smallest screens so the
+              header doesn't crowd. */}
+          {lastUsage && (
+            <div className="hidden xs:block shrink-0">
+              <ContextCircle
+                used={lastUsage.total_tokens}
+                max={modelContextLength}
+              />
+            </div>
           )}
+
+          {/* PriceGauge — current message cost / session total. */}
+          <div className="shrink-0">
+            <PriceGauge
+              currentCost={lastMsgCost}
+              totalCost={sessionCost}
+              isFree={modelIsFree}
+            />
+          </div>
+
+          {/* Stop / New — primary action, large tap target. */}
+          {running ? (
+            <button
+              onClick={handleStop}
+              aria-label="Stop"
+              title="Stop"
+              className="touch-target shrink-0 flex items-center gap-1.5 px-3 h-9 rounded-xl bg-red-500/15 text-red-300 hover:bg-red-500/25 transition-colors font-medium text-[12px]"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12" rx="1.5" />
+              </svg>
+              <span className="hidden sm:inline">Stop</span>
+            </button>
+          ) : (
+            <button
+              onClick={handleNewSession}
+              aria-label="New chat"
+              title="New chat"
+              className="touch-target shrink-0 flex items-center gap-1.5 px-3 h-9 rounded-xl bg-accent/15 text-accent hover:bg-accent/25 transition-colors font-medium text-[12px]"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              <span className="hidden sm:inline">New</span>
+            </button>
+          )}
+
+          {/* "More" toggle — only visible on mobile, opens the secondary
+              tools row. */}
+          <button
+            onClick={() => setToolsBarOpen((v) => !v)}
+            aria-label="More tools"
+            aria-expanded={toolsBarOpen}
+            title="More tools"
+            className={`touch-target sm:hidden shrink-0 w-10 h-10 rounded-xl transition-colors ${
+              toolsBarOpen
+                ? "text-accent bg-accent/15"
+                : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+            }`}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="5" r="1.5" fill="currentColor" />
+              <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+              <circle cx="12" cy="19" r="1.5" fill="currentColor" />
+            </svg>
+          </button>
         </div>
 
-        {/* Model selector */}
-        <button
-          onClick={() => !running && openOverlay()}
-          disabled={running}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[200px]"
-          title={selectedProviderName || "Select model"}
+        {/* Row 2 — secondary tools. Collapsed by default on mobile,
+            always visible on sm:+. Horizontally scrollable if needed. */}
+        <div
+          className={`${
+            toolsBarOpen ? "flex" : "hidden"
+          } sm:flex items-center gap-1.5 px-2 sm:px-3 pb-2 sm:pb-1.5 pt-1 sm:pt-0 sm:h-10 overflow-x-auto no-scrollbar border-t border-border/50 sm:border-t-0`}
         >
-          <span
-            className="w-2 h-2 rounded-full shrink-0"
-            style={{ background: modelDisplay?.color || "#5b8cff" }}
-          />
-          <span className="truncate text-accent">
-            {modelDisplay?.label || "Select model"}
-          </span>
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground shrink-0">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-        </button>
-
-        {/* Model verification badge — shows what the backend ACTUALLY resolved.
-            If resolvedModel differs from requestedModel, show a warning so the
-            user knows the model they picked isn't the one running. */}
-        {resolvedModel && (
-          <div className="flex flex-col items-end gap-0.5 ml-1" title={`Verified: ${resolvedProvider || "?"} → ${resolvedModel}`}>
-            <span className="text-[9px] text-emerald-400/80 font-mono tabular-nums flex items-center gap-0.5">
-              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-              {resolvedProvider || "unknown"}
-            </span>
-            {requestedModel && resolvedModel &&
-             requestedModel.split("/").pop()?.toLowerCase() !== resolvedModel.split("/").pop()?.toLowerCase() && (
-              <span className="text-[8px] text-amber-400/90 font-mono" title={`Requested ${requestedModel} but backend resolved to ${resolvedModel}`}>
-                ⚠ redirected
+          {/* Workspace selector */}
+          <div className="relative shrink-0">
+            <button
+              onClick={() => setWsOpen((v) => !v)}
+              disabled={running}
+              title={workspaceId || "No workspace (ephemeral)"}
+              className="touch-target shrink-0 flex items-center gap-1.5 px-2.5 h-8 rounded-lg border border-border hover:border-accent/60 transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[160px]"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-muted-foreground">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+              </svg>
+              <span className="truncate">
+                {workspaceId
+                  ? (workspaces.find((w) => w.id === workspaceId)?.title || "Workspace")
+                  : "No workspace"}
               </span>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground shrink-0">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+            {wsOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setWsOpen(false)} />
+                <div className="absolute right-0 top-full mt-1 z-50 min-w-[200px] max-w-[280px] rounded-xl border border-border bg-surface shadow-xl overflow-hidden">
+                  <button
+                    onClick={() => { setWorkspaceId(null); setWsOpen(false); }}
+                    className={`w-full text-left px-3 py-2.5 text-[12px] hover:bg-accent/10 transition-colors ${!workspaceId ? "text-accent font-medium" : ""}`}
+                  >
+                    No workspace (ephemeral)
+                  </button>
+                  {workspaces.map((ws) => (
+                    <button
+                      key={ws.id}
+                      onClick={() => { setWorkspaceId(ws.id); setWsOpen(false); }}
+                      className={`w-full text-left px-3 py-2.5 text-[12px] hover:bg-accent/10 transition-colors truncate ${workspaceId === ws.id ? "text-accent font-medium" : ""}`}
+                    >
+                      <div className="truncate">{ws.title}</div>
+                      {ws.source_repo && <div className="text-[10px] text-muted-foreground truncate">{ws.source_repo}</div>}
+                    </button>
+                  ))}
+                  {workspaces.length === 0 && (
+                    <div className="px-3 py-2.5 text-[11px] text-muted-foreground">
+                      No workspaces. Connect GitHub in the Workspaces tab.
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
-        )}
 
-        {/* PriceGauge — current message cost / session total. Free models
-            show FREE. Uses REAL cost data from the API. */}
-        <PriceGauge
-          currentCost={lastMsgCost}
-          totalCost={sessionCost}
-          isFree={modelIsFree}
-        />
-
-        {/* Token usage indicator with hover breakdown */}
-        {lastUsage && (
-          <div
-            className="flex items-center gap-1 text-[10px] text-muted-foreground tabular-nums cursor-help"
-            title={`Token breakdown:\nInput: ${lastUsage.input_tokens.toLocaleString()}\nOutput: ${lastUsage.output_tokens.toLocaleString()}\nTotal: ${lastUsage.total_tokens.toLocaleString()}${lastUsage.reasoning_tokens ? `\nReasoning: ${lastUsage.reasoning_tokens.toLocaleString()}` : ""}`}
-          >
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-60">
-              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
-            </svg>
-            {lastUsage.total_tokens.toLocaleString()}
-          </div>
-        )}
-
-        {/* Status indicator — shows what the agent is doing */}
-        {running ? (
-          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-            <span className="flex gap-0.5">
-              <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "0ms" }} />
-              <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "120ms" }} />
-              <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "240ms" }} />
-            </span>
-            <span className="capitalize status-pulse">{status === "starting" ? "starting…" : "working…"}</span>
-          </div>
-        ) : status === "error" ? (
-          <div className="flex items-center gap-1 text-[10px] text-rose-400">
-            <span className="size-1 rounded-full bg-rose-400" />
-            <span>error</span>
-          </div>
-        ) : null}
-
-        {/* Context usage circle — uses the selected model's REAL
-            contextLength (was hardcoded 128000). 44px, percentage in the
-            center, color shift green→amber→red, pulses at ≥100%. */}
-        {lastUsage && (
-          <ContextCircle
-            used={lastUsage.total_tokens}
-            max={modelContextLength}
-          />
-        )}
-
-        {/* Files */}
-        <button
-          onClick={() => setFileDrawerOpen(!fileDrawerOpen)}
-          className={`p-1.5 rounded-md transition-colors ${
-            fileDrawerOpen
-              ? "text-accent bg-accent/10"
-              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
-          }`}
-          title="Files"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M13.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
-            <polyline points="13 2 13 9 20 9" />
-          </svg>
-        </button>
-
-        <button
-          onClick={() => setPanelDrawerOpen(!panelDrawerOpen)}
-          className={`p-1.5 rounded-md transition-colors ${
-            panelDrawerOpen
-              ? "text-accent bg-accent/10"
-              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
-          }`}
-          title="Panel invocations"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-          </svg>
-        </button>
-
-        {/* QueueMonitor toggle — badge shows active job count */}
-        <button
-          onClick={() => setQueueMonitorOpen(!queueMonitorOpen)}
-          className={`p-1.5 rounded-md transition-colors relative ${
-            queueMonitorOpen
-              ? "text-accent bg-accent/10"
-              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
-          }`}
-          title="Queue monitor"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" />
-          </svg>
-          {jobs.filter((j) => j.status === "queued" || j.status === "running").length > 0 && (
-            <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-accent text-white text-[9px] font-mono flex items-center justify-center">
-              {jobs.filter((j) => j.status === "queued" || j.status === "running").length}
-            </span>
+          {/* Model verification badge — shows what the backend ACTUALLY resolved. */}
+          {resolvedModel && (
+            <div className="flex flex-col items-end gap-0.5 shrink-0" title={`Verified: ${resolvedProvider || "?"} → ${resolvedModel}`}>
+              <span className="text-[10px] text-emerald-400/80 font-mono tabular-nums flex items-center gap-0.5">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                {resolvedProvider || "unknown"}
+              </span>
+              {requestedModel && resolvedModel &&
+               requestedModel.split("/").pop()?.toLowerCase() !== resolvedModel.split("/").pop()?.toLowerCase() && (
+                <span className="text-[9px] text-amber-400/90 font-mono" title={`Requested ${requestedModel} but backend resolved to ${resolvedModel}`}>
+                  ⚠ redirected
+                </span>
+              )}
+            </div>
           )}
-          {suggestions.length > 0 && !jobs.some((j) => j.status === "queued" || j.status === "running") && (
-            <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-amber-400 animate-pulse" />
-          )}
-        </button>
 
-        {running ? (
+          {/* Token usage indicator */}
+          {lastUsage && (
+            <div
+              className="flex items-center gap-1 text-[11px] text-muted-foreground tabular-nums cursor-help shrink-0"
+              title={`Token breakdown:\nInput: ${lastUsage.input_tokens.toLocaleString()}\nOutput: ${lastUsage.output_tokens.toLocaleString()}\nTotal: ${lastUsage.total_tokens.toLocaleString()}${lastUsage.reasoning_tokens ? `\nReasoning: ${lastUsage.reasoning_tokens.toLocaleString()}` : ""}`}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-60">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+              </svg>
+              {lastUsage.total_tokens.toLocaleString()}
+            </div>
+          )}
+
+          {/* Status indicator — shows what the agent is doing */}
+          {running ? (
+            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground shrink-0">
+              <span className="flex gap-0.5">
+                <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "0ms" }} />
+                <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "120ms" }} />
+                <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "240ms" }} />
+              </span>
+              <span className="capitalize status-pulse">{status === "starting" ? "starting…" : "working…"}</span>
+            </div>
+          ) : status === "error" ? (
+            <div className="flex items-center gap-1 text-[11px] text-rose-400 shrink-0">
+              <span className="size-1 rounded-full bg-rose-400" />
+              <span>error</span>
+            </div>
+          ) : null}
+
+          {/* Files */}
           <button
-            onClick={handleStop}
-            className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-md bg-red-500/15 text-red-300 hover:bg-red-500/25 transition-colors font-medium shrink-0"
+            onClick={() => setFileDrawerOpen(!fileDrawerOpen)}
+            aria-label="Files"
+            title="Files"
+            className={`touch-target shrink-0 w-9 h-9 rounded-xl transition-colors ${
+              fileDrawerOpen
+                ? "text-accent bg-accent/15"
+                : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+            }`}
           >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="6" width="12" height="12" rx="1" />
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M13.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+              <polyline points="13 2 13 9 20 9" />
             </svg>
-            Stop
           </button>
-        ) : (
+
+          {/* Panel invocations */}
           <button
-            onClick={handleNewSession}
-            className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-md bg-accent/15 text-accent hover:bg-accent/25 transition-colors font-medium shrink-0"
+            onClick={() => setPanelDrawerOpen(!panelDrawerOpen)}
+            aria-label="Panel invocations"
+            title="Panel invocations"
+            className={`touch-target shrink-0 w-9 h-9 rounded-xl transition-colors ${
+              panelDrawerOpen
+                ? "text-accent bg-accent/15"
+                : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+            }`}
           >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
             </svg>
-            New
           </button>
-        )}
-        {messages.length > 0 && (
+
+          {/* QueueMonitor toggle — badge shows active job count */}
           <button
-            onClick={handleExport}
-            className="flex items-center gap-1 text-[11px] px-2 py-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors shrink-0"
-            title="Export conversation as markdown"
+            onClick={() => setQueueMonitorOpen(!queueMonitorOpen)}
+            aria-label="Queue monitor"
+            title="Queue monitor"
+            className={`touch-target shrink-0 w-9 h-9 rounded-xl transition-colors relative ${
+              queueMonitorOpen
+                ? "text-accent bg-accent/15"
+                : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+            }`}
           >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" />
             </svg>
+            {jobs.filter((j) => j.status === "queued" || j.status === "running").length > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-[16px] px-1 rounded-full bg-accent text-white text-[10px] font-mono flex items-center justify-center">
+                {jobs.filter((j) => j.status === "queued" || j.status === "running").length}
+              </span>
+            )}
+            {suggestions.length > 0 && !jobs.some((j) => j.status === "queued" || j.status === "running") && (
+              <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-amber-400 animate-pulse" />
+            )}
           </button>
-        )}
+
+          {/* Export — only when there are messages */}
+          {messages.length > 0 && (
+            <button
+              onClick={handleExport}
+              aria-label="Export conversation"
+              title="Export conversation as markdown"
+              className="touch-target shrink-0 w-9 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+            </button>
+          )}
+        </div>
       </header>
 
-      {/* Messages area */}
+      {/* Messages area — flex-1 scrollable region. We use `overscroll-contain`
+         * so a fling-scroll inside the message list doesn't yank the body
+         * (which would reveal the bottom-nav behind the keyboard). */}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto min-h-0 scroll-smooth"
+        className="flex-1 overflow-y-auto min-h-0 scroll-smooth overscroll-contain pointer-pass"
       >
         {isLoadingMessages && messages.length === 0 ? (
           <div className="flex items-center justify-center h-full">
@@ -609,7 +671,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
         ) : messages.length === 0 && !isBusy ? (
           <EmptyState onSend={handleSend} />
         ) : (
-          <div className="py-3 max-w-3xl mx-auto">
+          <div className="py-3 sm:py-4 px-2 sm:px-4 max-w-3xl mx-auto">
             {messages.map((msg, i) => (
               <ChatMessageBubble
                 key={msg.id}
@@ -634,10 +696,10 @@ export function AgentChat({ settings }: { settings: Settings }) {
             {running &&
               messages.length > 0 &&
               messages[messages.length - 1].role === "user" && (
-                <div className="px-4 py-2.5">
+                <div className="px-3 sm:px-4 py-2.5">
                   <div className="flex items-center gap-2.5">
-                    <div className="shrink-0 w-7 h-7 rounded-md bg-accent/15 flex items-center justify-center">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5b8cff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <div className="shrink-0 w-8 h-8 rounded-xl bg-accent/15 flex items-center justify-center">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a855f7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M12 2a10 10 0 0 1 10 10c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2z" />
                         <path d="M12 16v-4" />
                         <path d="M12 8h.01" />
@@ -659,19 +721,19 @@ export function AgentChat({ settings }: { settings: Settings }) {
       {queueCount > 0 && (
         <div className="border-t border-border bg-accent/5 px-3 py-2 shrink-0">
           <div className="flex items-center gap-2 text-[11.5px] text-accent">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse shrink-0">
               <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
             </svg>
-            <span className="font-medium">
+            <span className="font-medium shrink-0">
               {queueCount} message{queueCount !== 1 ? "s" : ""} queued
             </span>
-            <div className="flex-1 truncate text-muted-foreground/80">
+            <div className="flex-1 truncate text-muted-foreground/80 min-w-0">
               Next: {queue[0]?.text.slice(0, 80)}
               {queue[0] && queue[0].text.length > 80 ? "…" : ""}
             </div>
             <button
               onClick={() => queue.forEach((q) => dequeueMessage(q.id))}
-              className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-surface2 transition-colors"
+              className="touch-target shrink-0 text-muted-foreground hover:text-foreground px-2.5 h-7 rounded-lg hover:bg-surface2 transition-colors text-[11px]"
               title="Clear queue"
             >
               Clear
@@ -682,21 +744,21 @@ export function AgentChat({ settings }: { settings: Settings }) {
 
       {/* Error banner */}
       {error && (
-        <div className="border-t border-red-500/30 bg-red-500/10 px-4 py-2.5 text-[13px] text-red-300 flex items-center gap-3 shrink-0">
+        <div className="border-t border-red-500/30 bg-red-500/10 px-3 sm:px-4 py-2.5 text-[13px] text-red-300 flex items-center gap-2 sm:gap-3 shrink-0">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
             <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
-          <span className="flex-1">{error}</span>
+          <span className="flex-1 min-w-0">{error}</span>
           <button
             onClick={() => useChatStore.setState({ error: null })}
-            className="text-red-300/70 hover:text-red-200 px-2 py-0.5 text-[11px]"
+            className="touch-target shrink-0 text-red-300/70 hover:text-red-200 px-2.5 h-7 rounded-lg text-[11px]"
           >
             dismiss
           </button>
           {lastUserMsgRef.current && (
             <button
               onClick={() => handleSend(lastUserMsgRef.current)}
-              className="px-3 py-1 rounded-md border border-red-500/40 text-[11px] hover:bg-red-500/20 transition-colors shrink-0"
+              className="touch-target shrink-0 px-3 h-7 rounded-xl border border-red-500/40 text-[11px] hover:bg-red-500/20 transition-colors"
             >
               Retry
             </button>
@@ -704,13 +766,20 @@ export function AgentChat({ settings }: { settings: Settings }) {
         </div>
       )}
 
-      {/* Input area */}
-      <div className="border-t border-border bg-surface/30 pt-2 pb-3 px-3 shrink-0">
-        {/* Tool bar — sits ABOVE the input. ToolIcons renders the unified
-            effort / web / deep / judge popovers, with capability dimming.
-            Reset clears all tool overrides. Queue/Stop toggles what happens
-            when the user presses Enter while a turn is in flight. */}
-        <div className="flex items-center gap-1 max-w-3xl mx-auto mb-1.5 px-1 min-h-[26px]">
+      {/* ── Input area — fixed at the bottom of the chat column ──────
+         *  On mobile this is the most-touched region, so:
+         *    • textarea is `rounded-2xl` and ≥48px tall
+         *    • send button is 48×48 (min touch target) and uses BOTH
+         *      `onClick` + `onPointerDown` so it fires immediately on
+         *      touch (removing the 300ms delay even on older browsers).
+         *    • tool bar above the input is horizontally scrollable so it
+         *      never wraps and pushes the input off-screen on phones.
+         *    • safe-area-inset padding keeps the input above the iOS home
+         *      indicator.
+         */}
+      <div className="border-t border-border bg-surface/40 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] px-2 sm:px-3 shrink-0">
+        {/* Tool bar — horizontally scrollable on mobile. */}
+        <div className="flex items-center gap-1 max-w-3xl mx-auto mb-1.5 px-1 min-h-[36px] overflow-x-auto no-scrollbar">
           <ToolIcons
             effort={effort}
             webSearch={webSearch}
@@ -731,20 +800,17 @@ export function AgentChat({ settings }: { settings: Settings }) {
           />
 
           {/* Mode toggle (compact pill) — kept here because it's an execution
-              mode, not a tool. Hidden on narrow viewports. */}
+              mode, not a tool. */}
           <ModePill mode={mode} setMode={setMode} disabled={running} />
-
-          {/* Spacer pushes Reset + Queue/Stop toggle to the right. */}
-          <div className="flex-1" />
 
           {/* Reset — only visible when a tool override is active. */}
           {toolsDirty && (
             <button
               onClick={resetTools}
-              className="text-[10px] px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1 shrink-0"
+              className="touch-target shrink-0 text-[11px] px-2.5 h-7 rounded-xl text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1"
               title="Reset all tool selections"
             >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="23 4 23 10 17 10" />
                 <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
               </svg>
@@ -752,11 +818,15 @@ export function AgentChat({ settings }: { settings: Settings }) {
             </button>
           )}
 
+          {/* Spacer pushes Queue/Stop toggle to the right (desktop only —
+              on mobile the toolbar scrolls horizontally instead). */}
+          <div className="hidden sm:flex flex-1" />
+
           {/* Queue / Stop mode toggle (default: Queue). */}
-          <div className="flex items-center bg-surface2 rounded-md p-0.5 text-[10px] shrink-0" title="What happens when you press Enter while the agent is busy">
+          <div className="flex items-center bg-surface2 rounded-xl p-0.5 text-[11px] shrink-0" title="What happens when you press Enter while the agent is busy">
             <button
               onClick={() => setBusyMode("queue")}
-              className={`px-2 py-0.5 rounded transition-colors ${
+              className={`touch-target px-2.5 h-7 rounded-lg transition-colors ${
                 busyMode === "queue" ? "bg-accent text-white" : "text-muted-foreground hover:text-foreground"
               }`}
             >
@@ -764,7 +834,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
             </button>
             <button
               onClick={() => setBusyMode("stop")}
-              className={`px-2 py-0.5 rounded transition-colors ${
+              className={`touch-target px-2.5 h-7 rounded-lg transition-colors ${
                 busyMode === "stop" ? "bg-accent text-white" : "text-muted-foreground hover:text-foreground"
               }`}
             >
@@ -774,14 +844,14 @@ export function AgentChat({ settings }: { settings: Settings }) {
 
           {/* Queued message count — appears when there's anything in the queue. */}
           {queueCount > 0 && (
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-accent/15 text-accent font-mono tabular-nums shrink-0">
+            <span className="text-[11px] px-2.5 h-6 inline-flex items-center rounded-full bg-accent/15 text-accent font-mono tabular-nums shrink-0">
               {queueCount} queued
             </span>
           )}
         </div>
 
-        {/* Input row — textarea + send/stop button */}
-        <div className="flex items-end gap-1.5 max-w-3xl mx-auto">
+        {/* Input row — textarea + send/stop button. */}
+        <div className="flex items-end gap-2 max-w-3xl mx-auto">
           <textarea
             ref={inputRef}
             value={inputText}
@@ -795,13 +865,29 @@ export function AgentChat({ settings }: { settings: Settings }) {
                   : "Type to replace the running turn… (Enter to stop + send)"
                 : "Ask the agent to build, edit, run, or pack something…"
             }
-            className="flex-1 resize-none bg-surface2 border border-border rounded-xl px-3.5 py-2.5 text-[14.5px] leading-relaxed outline-none focus:border-accent min-h-[40px] max-h-[160px] transition-colors placeholder:text-muted-foreground/60"
+            className="flex-1 resize-none bg-surface2 border border-border rounded-2xl px-4 py-3 text-[16px] sm:text-[14.5px] leading-relaxed outline-none focus:border-accent min-h-[48px] max-h-[160px] transition-colors placeholder:text-muted-foreground/60"
           />
 
+          {/* Send / Stop / Queue — primary action button.
+              • 48×48px (≥44px touch target).
+              • Uses BOTH `onClick` (mouse) and `onPointerDown` (touch) so
+                taps fire instantly with no 300ms delay. The pointer handler
+                ignores non-primary buttons + scrolling gestures so it never
+                double-fires with onClick. */}
           <button
             onClick={() => (running ? handleStop() : handleSend())}
+            onPointerDown={(e) => {
+              // Only fire on primary touch / left-click, never on a scroll
+              // gesture. Use e.button===0 (primary) and pointerType check
+              // so a pen eraser or right-click doesn't trigger.
+              if (e.button !== 0) return;
+              if (e.pointerType === "mouse") return; // let onClick handle mouse
+              e.preventDefault();
+              (running ? handleStop() : handleSend());
+            }}
             disabled={!running && !inputText.trim()}
-            className={`h-10 px-4 rounded-xl font-medium text-[13px] disabled:opacity-40 disabled:cursor-not-allowed shrink-0 transition-all flex items-center gap-1.5 ${
+            aria-label={running ? "Stop" : isBusy ? "Queue message" : "Send message"}
+            className={`touch-target w-12 h-12 sm:w-12 sm:h-12 rounded-2xl font-medium text-[13px] disabled:opacity-40 disabled:cursor-not-allowed shrink-0 transition-all flex items-center justify-center gap-1.5 ${
               running
                 ? "bg-red-500/90 text-white hover:bg-red-500"
                 : "bg-accent text-white hover:bg-accent/90"
@@ -809,34 +895,28 @@ export function AgentChat({ settings }: { settings: Settings }) {
             title={running ? "Stop" : "Send (or queue if busy)"}
           >
             {running ? (
-              <>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-                  <rect x="6" y="6" width="12" height="12" rx="1" />
-                </svg>
-                Stop
-              </>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
             ) : isBusy ? (
-              <>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="12" y1="5" x2="12" y2="19" />
-                  <line x1="5" y1="12" x2="19" y2="12" />
-                </svg>
-                Queue
-              </>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
             ) : (
-              <>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="22" y1="2" x2="10" y2="14" />
-                  <polygon points="22 2 15 22 10 14 2 9 22 2" />
-                </svg>
-                Send
-              </>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="22" y1="2" x2="10" y2="14" />
+                <polygon points="22 2 15 22 10 14 2 9 22 2" />
+              </svg>
             )}
+            <span className="hidden sm:inline">
+              {running ? "Stop" : isBusy ? "Queue" : "Send"}
+            </span>
           </button>
         </div>
 
-        {/* Keyboard shortcut hint */}
-        <div className="flex items-center justify-center gap-3 mt-1 text-[9px] text-muted-foreground/40">
+        {/* Keyboard shortcut hint — hidden on mobile (no keyboard). */}
+        <div className="hidden sm:flex items-center justify-center gap-3 mt-1 text-[9px] text-muted-foreground/40">
           <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Enter</kbd> to send</span>
           <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Shift+Enter</kbd> for newline</span>
           {isBusy && (
@@ -925,9 +1005,10 @@ function ModePill({
       <button
         onClick={() => !disabled && setOpen((o) => !o)}
         disabled={disabled}
-        className={`flex items-center gap-1 px-2 py-1 rounded-md text-[10px] transition-colors ${
+        aria-label={`Execution mode: ${mode}`}
+        className={`touch-target flex items-center gap-1 px-2.5 h-7 rounded-xl text-[11px] transition-colors ${
           open
-            ? "text-accent bg-accent/10"
+            ? "text-accent bg-accent/15"
             : "text-muted-foreground hover:text-foreground hover:bg-surface2"
         } disabled:opacity-50 disabled:cursor-not-allowed capitalize`}
         title={`Execution mode: ${mode}`}
@@ -940,21 +1021,21 @@ function ModePill({
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-full left-0 mb-1 z-50 w-48 rounded-lg border border-border bg-surface shadow-xl p-1.5">
-            <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Execution Mode</div>
+          <div className="absolute bottom-full left-0 mb-1 z-50 w-56 rounded-xl border border-border bg-surface shadow-xl p-1.5">
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Execution Mode</div>
             {(["auto", "build", "plan"] as const).map((m) => (
               <button
                 key={m}
                 onClick={() => { setMode(m); setOpen(false); }}
-                className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+                className={`w-full text-left px-3 py-2 rounded-lg text-[12px] transition-colors ${
                   mode === m ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <span className="capitalize">{m}</span>
-                  {mode === m && <span className="text-[9px]">●</span>}
+                  {mode === m && <span className="text-[10px] text-accent">●</span>}
                 </div>
-                <div className="text-[9px] opacity-60 mt-0.5">
+                <div className="text-[10px] opacity-60 mt-0.5">
                   {m === "auto" ? "Execute autonomously" : m === "build" ? "Step-by-step with confirmation" : "Plan first, wait for approval"}
                 </div>
               </button>
@@ -981,10 +1062,10 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
   ];
 
   return (
-    <div className="flex flex-col items-center justify-center h-full px-6 py-8 overflow-y-auto">
+    <div className="flex flex-col items-center justify-center h-full px-4 sm:px-6 py-6 sm:py-8 overflow-y-auto">
       <div className="max-w-lg w-full text-center">
         {/* Icon */}
-        <div className="w-16 h-16 rounded-2xl bg-accent/10 flex items-center justify-center mx-auto mb-5 empty-state-icon">
+        <div className="w-16 h-16 rounded-3xl bg-accent/10 flex items-center justify-center mx-auto mb-5 empty-state-icon">
           <svg
             width="32"
             height="32"
@@ -1011,13 +1092,13 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
           and can invoke the judge panel for critiques.
         </p>
 
-        {/* Suggestions */}
+        {/* Suggestions — tap targets ≥44px, rounded-2xl cards. */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-left">
           {suggestions.map((s, i) => (
             <button
               key={i}
               onClick={() => onSend(s.text)}
-              className="flex items-start gap-2.5 text-left text-[12px] px-3 py-2.5 rounded-xl border border-border hover:border-accent/50 hover:bg-accent/5 transition-all text-muted-foreground hover:text-foreground leading-relaxed card-hover"
+              className="flex items-start gap-2.5 text-left text-[12.5px] px-3.5 py-3 min-h-[44px] rounded-2xl border border-border hover:border-accent/60 hover:bg-accent/5 transition-all text-muted-foreground hover:text-foreground leading-relaxed card-hover"
             >
               <span className="text-base shrink-0">{s.icon}</span>
               <span>{s.text}</span>
@@ -1025,8 +1106,8 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
           ))}
         </div>
 
-        {/* Tips */}
-        <div className="mt-6 flex items-center justify-center gap-4 text-[10px] text-muted-foreground/50">
+        {/* Tips — hidden on mobile (no keyboard) */}
+        <div className="hidden sm:flex mt-6 items-center justify-center gap-4 text-[10px] text-muted-foreground/50">
           <span className="flex items-center gap-1">
             <kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Enter</kbd>
             to send

@@ -138,9 +138,9 @@ export function ToolIcons({
   const deepActive = capabilities.deepResearch || capabilities.extendedThinking;
 
   const btn = (k: Exclude<PopoverKind, null>) =>
-    `p-2 rounded-lg transition-colors ${
+    `touch-target w-9 h-9 rounded-xl transition-colors ${
       active === k
-        ? "text-accent bg-accent/10"
+        ? "text-accent bg-accent/15"
         : "text-muted-foreground hover:text-foreground hover:bg-surface2"
     }`;
 
@@ -158,6 +158,7 @@ export function ToolIcons({
           onClick={() => !disabled && setActive(active === "effort" ? null : "effort")}
           className={`${btn("effort")} ${!effortActive ? "opacity-40" : ""}`}
           title={`Effort: ${effort}${!effortActive ? " (not supported by this model)" : ""}`}
+          aria-label={`Effort: ${effort}${!effortActive ? " (not supported)" : ""}`}
           disabled={disabled && active !== "effort"}
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -173,15 +174,15 @@ export function ToolIcons({
               <button
                 key={e}
                 onClick={() => { setEffort(e); setActive(null); }}
-                className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+                className={`touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors ${
                   effort === e ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <span className="capitalize">{e}</span>
-                  {effort === e && <span className="text-[9px]">●</span>}
+                  {effort === e && <span className="text-[10px] text-accent">●</span>}
                 </div>
-                <div className="text-[9.5px] opacity-70 mt-0.5 leading-snug">
+                <div className="text-[10px] opacity-70 mt-0.5 leading-snug">
                   {EFFORT_DESCRIPTIONS[e]}
                 </div>
               </button>
@@ -216,7 +217,7 @@ export function ToolIcons({
             </div>
             <button
               onClick={() => { toggleWebSearch(); setWebTemplate(""); setActive(null); }}
-              className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+              className={`touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors ${
                 webSearch && !webTemplate ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-surface2"
               }`}
             >
@@ -224,7 +225,7 @@ export function ToolIcons({
                 <span>Regular Web Search</span>
                 <span className={`size-1.5 rounded-full ${webSearch && !webTemplate ? "bg-accent" : "bg-muted-foreground/30"}`} />
               </div>
-              <div className="text-[9px] opacity-60 mt-0.5">Agent can search the web during its turn</div>
+              <div className="text-[10px] opacity-60 mt-0.5">Agent can search the web during its turn</div>
             </button>
 
             {isCustomWebTemplate && (
@@ -252,7 +253,7 @@ export function ToolIcons({
                   setActive(null);
                   onOpenTemplateLibrary("websearch");
                 }}
-                className="w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors text-accent hover:bg-accent/10 flex items-center gap-1.5"
+                className="touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors text-accent hover:bg-accent/10 flex items-center gap-1.5"
                 title="Browse web search templates from the library"
               >
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -290,7 +291,7 @@ export function ToolIcons({
             </div>
             <button
               onClick={() => { toggleDeepResearch(); setDeepTemplate(""); setActive(null); }}
-              className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+              className={`touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors ${
                 deepResearch && !deepTemplate ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-surface2"
               }`}
             >
@@ -298,7 +299,7 @@ export function ToolIcons({
                 <span>Default</span>
                 <span className={`size-1.5 rounded-full ${deepResearch && !deepTemplate ? "bg-accent" : "bg-muted-foreground/30"}`} />
               </div>
-              <div className="text-[9px] opacity-60 mt-0.5">Extended reasoning + web ReAct loop</div>
+              <div className="text-[10px] opacity-60 mt-0.5">Extended reasoning + web ReAct loop</div>
             </button>
             <div className="text-[9px] uppercase tracking-wide text-muted-foreground/50 px-2 pt-2 pb-1 border-t border-border/50 mt-1">
               Template Overrides
@@ -309,15 +310,15 @@ export function ToolIcons({
                 <button
                   key={t.id}
                   onClick={() => { if (!deepResearch) toggleDeepResearch(); setDeepTemplate(t.id); setActive(null); }}
-                  className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+                  className={`touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors ${
                     deepResearch && deepTemplate === t.id ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-surface2"
                   } ${!supported ? "opacity-50" : ""}`}
                 >
                   <div className="flex items-center justify-between">
                     <span className="font-medium">{t.label}</span>
-                    {deepResearch && deepTemplate === t.id && <span className="text-[9px]">●</span>}
+                    {deepResearch && deepTemplate === t.id && <span className="text-[10px] text-accent">●</span>}
                   </div>
-                  <div className="text-[9px] opacity-60 mt-0.5">
+                  <div className="text-[10px] opacity-60 mt-0.5">
                     {t.description}
                     {!supported && <span className="text-amber-400/70"> · not supported</span>}
                   </div>
@@ -350,7 +351,7 @@ export function ToolIcons({
                   setActive(null);
                   onOpenTemplateLibrary("deepresearch");
                 }}
-                className="w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors text-accent hover:bg-accent/10 flex items-center gap-1.5"
+                className="touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors text-accent hover:bg-accent/10 flex items-center gap-1.5"
                 title="Browse deep research templates from the library"
               >
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -398,7 +399,7 @@ export function ToolIcons({
                 <button
                   key={n}
                   onClick={() => setJudgeCount(n)}
-                  className={`size-7 rounded text-[11px] font-medium transition-colors ${
+                  className={`touch-target flex-1 h-10 rounded-xl text-[12px] font-medium transition-colors ${
                     judgeCount === n
                       ? "bg-accent text-white"
                       : "bg-surface2 text-muted-foreground hover:text-foreground"
@@ -415,15 +416,15 @@ export function ToolIcons({
               <button
                 key={t.id}
                 onClick={() => setJudgeTemplate(t.id)}
-                className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
+                className={`touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors ${
                   judgeTemplate === t.id ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-surface2"
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <span className="font-medium">{t.label}</span>
-                  {judgeTemplate === t.id && <span className="text-[9px]">●</span>}
+                  {judgeTemplate === t.id && <span className="text-[10px] text-accent">●</span>}
                 </div>
-                <div className="text-[9px] opacity-60 mt-0.5">{t.description}</div>
+                <div className="text-[10px] opacity-60 mt-0.5">{t.description}</div>
               </button>
             ))}
 
@@ -451,7 +452,7 @@ export function ToolIcons({
                   setActive(null);
                   onOpenTemplateLibrary("judge");
                 }}
-                className="w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors text-accent hover:bg-accent/10 flex items-center gap-1.5"
+                className="touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors text-accent hover:bg-accent/10 flex items-center gap-1.5"
                 title="Browse judge templates from the library"
               >
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -470,9 +471,9 @@ export function ToolIcons({
                   // Fire on next tick so the popover closes first.
                   setTimeout(() => onRunJudge(), 0);
                 }}
-                className="w-full py-2 rounded-md bg-accent text-white text-[11px] font-medium hover:bg-accent/90 transition-colors flex items-center justify-center gap-1.5"
+                className="touch-target w-full py-3 rounded-2xl bg-accent text-white text-[12px] font-medium hover:bg-accent/90 transition-colors flex items-center justify-center gap-1.5"
               >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <polygon points="5 3 19 12 5 21 5 3" />
                 </svg>
                 Run {judgeCount} judge{judgeCount !== 1 ? "s" : ""}
@@ -502,7 +503,7 @@ function Popover({
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className={`absolute bottom-full ${align === "right" ? "right-0" : "left-0"} mb-1 z-50 ${width} rounded-lg border border-border bg-surface shadow-xl p-1.5 max-h-[460px] overflow-y-auto`}
+        className={`absolute bottom-full ${align === "right" ? "right-0" : "left-0"} mb-1 z-50 ${width} rounded-2xl border border-border bg-surface shadow-xl p-1.5 max-h-[60vh] sm:max-h-[460px] overflow-y-auto`}
       >
         {children}
       </div>

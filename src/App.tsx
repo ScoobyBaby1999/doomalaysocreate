@@ -31,9 +31,9 @@ export default function App() {
   const selectedProviderName = useModelStore((s) => s.selectedProviderName);
   const providers = useModelStore((s) => s.providers);
   const selectedProviderColor = (() => {
-    if (!selectedProviderName) return "#5b8cff";
+    if (!selectedProviderName) return "#a855f7";
     const p = providers.find((g) => g.name === selectedProviderName);
-    return p?.color || "#5b8cff";
+    return p?.color || "#a855f7";
   })();
 
   useEffect(() => {
@@ -189,8 +189,8 @@ export default function App() {
   if (!hasCredentials && !manualSetup) {
     return (
       <div className="flex flex-col h-full">
-        <header className="flex items-center px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content">
-          <span className="font-semibold tracking-tight">doomalaysocreate</span>
+        <header className="flex items-center px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content bg-surface/60 backdrop-blur">
+          <span className="font-semibold tracking-tight text-foreground">doomalaysocreate</span>
           <span className="ml-2 text-[11px] text-muted">panel · agentic coder</span>
         </header>
         <main className="flex-1 min-h-0">
@@ -212,16 +212,17 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-full">
-       <header className="flex items-center gap-2 px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content">
-         <span className="font-semibold tracking-tight">doomalaysocreate</span>
-         <span className="text-[11px] text-muted">panel · agentic coder</span>
+       <header className="flex items-center gap-2 px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content bg-surface/60 backdrop-blur">
+         <span className="font-semibold tracking-tight text-foreground">doomalaysocreate</span>
+         <span className="text-[11px] text-muted hidden sm:inline">panel · agentic coder</span>
          <button
            onClick={openOverlay}
-           className="ml-auto flex items-center gap-1.5 px-2 py-1 rounded-lg border border-border hover:border-accent transition-colors text-[11px]"
+           className="touch-target ml-auto flex items-center gap-1.5 px-3 h-9 rounded-xl border border-border hover:border-accent/60 transition-colors text-[12px] bg-surface2/60"
            title="Select provider model"
+           aria-label="Select provider model"
          >
-           <span className="w-2 h-2 rounded-full" style={{ background: selectedProviderColor || "#5b8cff" }} />
-           <span className="text-muted max-w-[80px] truncate">{selectedModelId || selectedProviderName || "Model"}</span>
+           <span className="w-2.5 h-2.5 rounded-full ring-2 ring-background" style={{ background: selectedProviderColor || "#a855f7" }} />
+           <span className="text-muted max-w-[80px] sm:max-w-[160px] truncate">{selectedModelId || selectedProviderName || "Model"}</span>
          </button>
        </header>
 
@@ -243,13 +244,15 @@ export default function App() {
         )}
       </main>
 
-      <nav className="flex border-t border-border overflow-x-auto">
+      <nav className="flex border-t border-border overflow-x-auto no-scrollbar">
         {(["agentchat", "conscious", "workspaces", "memory", "benchmarks", "settings", "debug"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`flex-1 py-2 text-sm capitalize flex flex-col items-center gap-0.5 min-w-[55px] ${
-              tab === t ? "text-accent" : "text-muted"
+            aria-label={t}
+            aria-current={tab === t ? "page" : undefined}
+            className={`flex-1 min-h-[52px] py-2 text-sm capitalize flex flex-col items-center justify-center gap-0.5 min-w-[55px] transition-colors ${
+              tab === t ? "text-accent" : "text-muted hover:text-foreground"
             }`}
           >
             {t === "agentchat" ? (

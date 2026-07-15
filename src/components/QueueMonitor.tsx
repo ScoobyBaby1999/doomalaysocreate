@@ -73,7 +73,7 @@ export function QueueMonitor({
           </div>
           <button
             onClick={onClose}
-            className="text-muted-foreground hover:text-foreground p-1.5 rounded-md hover:bg-surface2 transition-colors"
+            className="text-muted-foreground hover:text-foreground p-1.5 rounded-xl hover:bg-surface2 transition-colors"
             title="Close"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -178,7 +178,7 @@ function SuggestionRow({
   return (
     <button
       onClick={onApply}
-      className="w-full text-left px-2 py-1.5 rounded-md hover:bg-surface2 transition-colors group flex items-start gap-2"
+      className="w-full text-left px-2 py-1.5 rounded-xl hover:bg-surface2 transition-colors group flex items-start gap-2"
       title="Click to fill the input box"
     >
       <span className="text-[11px] mt-0.5 shrink-0">{kindIcon}</span>

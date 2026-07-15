@@ -124,9 +124,9 @@ function layoutAgents(agents: Agent[]): Record<string, NodePos> {
 // ---------------------------------------------------------------------------
 
 const STATUS_COLORS: Record<string, string> = {
-  idle: "#8b95a3", running: "#5b8cff", waiting: "#f59e0b",
+  idle: "#8b95a3", running: "#a855f7", waiting: "#f59e0b",
   done: "#10b981", failed: "#ef4444", pending: "#f59e0b",
-  claimed: "#5b8cff", in_progress: "#5b8cff",
+  claimed: "#a855f7", in_progress: "#a855f7",
 };
 
 function StatusIcon({ status, size, color }: { status: string; size: number; color: string }) {
@@ -261,7 +261,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
       <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-surface">
         <div className="flex items-center gap-2 min-w-0">
           <div className="w-8 h-8 rounded-lg bg-accent/20 flex items-center justify-center shrink-0">
-            <Icon.Brain size={16} color="#5b8cff" />
+            <Icon.Brain size={16} color="#a855f7" />
           </div>
           <div className="relative min-w-0">
             <div className="flex items-center gap-1">
@@ -283,7 +283,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
                   ) : workspaces.map((w) => (
                     <button key={w.id} onClick={() => { setSelectedWsId(w.id); setWorkspaceOpen(false); }}
                       className={`w-full text-left px-3 py-2.5 text-xs flex items-center gap-2 hover:bg-surface transition-colors ${w.id === selectedWsId ? "text-accent bg-accent/10" : "text-text"}`}>
-                      <Icon.Folder size={12} color={w.id === selectedWsId ? "#5b8cff" : "#8b95a3"} />
+                      <Icon.Folder size={12} color={w.id === selectedWsId ? "#a855f7" : "#8b95a3"} />
                       <span className="truncate">{w.title}</span>
                     </button>
                   ))}
@@ -322,7 +322,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
       <div className="flex-1 relative overflow-hidden">
         {loading || creating ? (
           <div className="absolute inset-0 flex items-center justify-center">
-            <Icon.Loader size={24} color="#5b8cff" />
+            <Icon.Loader size={24} color="#a855f7" />
           </div>
         ) : (
           <>
@@ -335,7 +335,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
                 const pulsing = pulseTime && Date.now() - pulseTime < 3000;
                 return (
                   <line key={key} x1={`${op.x}%`} y1={`${op.y}%`} x2={`${sp.x}%`} y2={`${sp.y}%`}
-                    stroke={pulsing ? "#5b8cff" : "#262d36"} strokeWidth={pulsing ? 2 : 1}
+                    stroke={pulsing ? "#a855f7" : "#3b0764"} strokeWidth={pulsing ? 2 : 1}
                     className={pulsing ? "animate-pulse" : ""}
                     style={{ transition: "stroke 0.3s, stroke-width 0.3s" }} />
                 );
@@ -542,7 +542,7 @@ function DrawerPanel({ entries, agents, onClose }: {
       <div className="fixed top-0 right-0 bottom-0 w-full max-w-sm bg-surface border-l border-border z-50 flex flex-col">
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <div className="flex items-center gap-2">
-            <Icon.Folder size={16} color="#5b8cff" />
+            <Icon.Folder size={16} color="#a855f7" />
             <span className="text-sm font-semibold text-text">All Outputs</span>
             <span className="text-[10px] text-muted">({entries.length})</span>
           </div>

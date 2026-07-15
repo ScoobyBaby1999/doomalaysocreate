@@ -97,7 +97,7 @@ function ProviderCard({ provider }: { provider: ProviderGroup }) {
             href={provider.settingsUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[11px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
             style={{ backgroundColor: provider.color }}
           >
             <IcoKey /> {provider.manageLabel}
@@ -160,7 +160,7 @@ export function ProvidersDialog() {
                 </div>
                 <button
                   onClick={closeProvidersDialog}
-                  className="flex items-center justify-center size-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                  className="flex items-center justify-center size-6 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
                   aria-label="Close"
                 >
                   <IcoX />
@@ -169,7 +169,7 @@ export function ProvidersDialog() {
 
               <div className="flex-1 min-h-0 overflow-y-auto">
                 <div className="flex flex-col gap-3 p-4">
-                  <div className="rounded-md border border-dashed border-border/60 bg-muted/30 px-3 py-2">
+                  <div className="rounded-xl border border-dashed border-border/60 bg-muted/30 px-3 py-2">
                     <p className="text-[10px] leading-snug text-muted-foreground">
                       <span className="font-semibold text-foreground">Temporary providers screen.</span> Use the
                       buttons below to open each provider&apos;s console and disable data-retention / training

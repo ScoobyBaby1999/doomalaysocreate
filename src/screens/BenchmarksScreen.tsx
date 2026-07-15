@@ -145,7 +145,7 @@ export function BenchmarksScreen({ settings }: { settings: Settings }) {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search models…"
-          className="w-full bg-surface2 border border-border rounded-md px-2.5 py-1 text-xs text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent/50 transition-colors"
+          className="w-full bg-surface2 border border-border rounded-xl px-2.5 py-1 text-xs text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent/50 transition-colors"
         />
         <div className="flex items-center gap-1.5 flex-wrap">
           {/* Capability filters */}
@@ -176,7 +176,7 @@ export function BenchmarksScreen({ settings }: { settings: Settings }) {
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as SortBy)}
-            className="bg-surface2 border border-border rounded-md px-2 py-0.5 text-[10px] text-foreground outline-none ml-auto"
+            className="bg-surface2 border border-border rounded-xl px-2 py-0.5 text-[10px] text-foreground outline-none ml-auto"
           >
             <option value="context">Sort: Context</option>
             <option value="cost">Sort: Cost/1M</option>
