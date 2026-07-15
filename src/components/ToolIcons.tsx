@@ -3,13 +3,17 @@
  *
  * Popovers:
  *  - Effort (Gauge icon): low/med/high/max. Dims to 40% opacity if the
- *    selected model's capabilities don't include "effort".
- *  - Web Search (Globe icon): Regular Web Search + 4 template overrides
- *    (Breadth Search, Deep Dive, Compare & Contrast, Fact Check).
- *  - Deep Research (Telescope icon): Default + ReAct Loop + Extended Thinking.
- *    Dims if the model doesn't support deepResearch/extendedThinking.
+ *    selected model's capabilities don't include "effort". Descriptions only
+ *    — judge counts moved to the Judge popover.
+ *  - Web Search (Globe icon): "Regular Web Search" + "Browse Templates…"
+ *    (opens the TemplateLibrary overlay filtered to kind=websearch).
+ *    Dims if the model doesn't support webSearch.
+ *  - Deep Research (Telescope icon): Default + ReAct Loop + Extended Thinking
+ *    + "Browse Templates…" (filtered to kind=deepresearch). Dims if the model
+ *    doesn't support deepResearch/extendedThinking.
  *  - Judge (Gavel icon): SEPARATE icon with judge count (1-6 buttons) +
- *    template (Critique/Verify/Improve/Debate) + Run button. Fires
+ *    4 quick-pick templates (Critique/Verify/Improve/Debate) +
+ *    "Browse Templates…" (filtered to kind=judge) + Run button. Fires
  *    onRunJudge(input?) when the user clicks Run.
  *
  * All popovers close on outside-click via a fixed-position overlay.
@@ -23,9 +27,12 @@ export interface ToolIconsProps {
   effort: "low" | "med" | "high" | "max";
   webSearch: boolean;
   deepResearch: boolean;
-  webTemplate: "" | "breadth" | "deepdive" | "compare" | "factcheck";
-  deepTemplate: "" | "react" | "extended";
-  judge: { count: number; template: "critique" | "verify" | "improve" | "debate" };
+  /** Accepts legacy IDs ("breadth" | "deepdive" | "compare" | "factcheck") OR
+   *  a template library template id. */
+  webTemplate: string;
+  /** Accepts legacy IDs ("react" | "extended") OR a template library id. */
+  deepTemplate: string;
+  judge: { count: number; template: string };
 
   // Capabilities — derived from the selected model's `capabilities` array.
   // When a capability is false/missing, the corresponding icon dims to 40%.
@@ -43,24 +50,27 @@ export interface ToolIconsProps {
   setEffort: (e: "low" | "med" | "high" | "max") => void;
   toggleWebSearch: () => void;
   toggleDeepResearch: () => void;
-  setWebTemplate: (t: "" | "breadth" | "deepdive" | "compare" | "factcheck") => void;
-  setDeepTemplate: (t: "" | "react" | "extended") => void;
-  setJudge: (cfg: Partial<{ count: number; template: "critique" | "verify" | "improve" | "debate" }>) => void;
+  setWebTemplate: (t: string) => void;
+  setDeepTemplate: (t: string) => void;
+  setJudge: (cfg: Partial<{ count: number; template: string }>) => void;
 
   /** Fire the judge panel. If no input is provided, the store uses inputText. */
   onRunJudge: (input?: string) => void;
+
+  /** Open the TemplateLibrary overlay pre-filtered by kind
+   *  ("websearch" | "deepresearch" | "judge" | "chat" | "custom" | ""). */
+  onOpenTemplateLibrary: (kind: string) => void;
 }
 
-const WEB_TEMPLATES: {
-  id: "breadth" | "deepdive" | "compare" | "factcheck";
-  label: string;
-  description: string;
-}[] = [
-  { id: "breadth", label: "Breadth Search", description: "Wide net — discover every angle of a topic via parallel sub-agents" },
-  { id: "deepdive", label: "Deep Dive", description: "One source, drilled all the way down with follow-up questions" },
-  { id: "compare", label: "Compare & Contrast", description: "Two competing options evaluated head-to-head with criteria" },
-  { id: "factcheck", label: "Fact Check", description: "Cross-reference a claim against multiple authoritative sources" },
-];
+/** Effort level descriptions — kept in sync with the backend's effort budget
+ *  table (lib/research_templates.py EFFORT_BUDGETS). NO judge counts here —
+ *  those moved to the Judge popover. */
+const EFFORT_DESCRIPTIONS: Record<"low" | "med" | "high" | "max", string> = {
+  low: "Quick answer, light reasoning. Minimal thinking budget.",
+  med: "Balanced — the default. Moderate reasoning.",
+  high: "Deep reasoning, longer answer. More thinking steps.",
+  max: "Maximum reasoning budget. Slowest, most thorough.",
+};
 
 const DEEP_TEMPLATES: {
   id: "react" | "extended";
@@ -98,6 +108,7 @@ export function ToolIcons({
   setDeepTemplate,
   setJudge,
   onRunJudge,
+  onOpenTemplateLibrary,
 }: ToolIconsProps) {
   const [active, setActive] = useState<PopoverKind>(null);
   // Judge popover tracks the in-progress count/template separately so the
@@ -133,6 +144,12 @@ export function ToolIcons({
         : "text-muted-foreground hover:text-foreground hover:bg-surface2"
     }`;
 
+  // Helper to determine if a custom template (non-legacy) is currently
+  // selected — used to render the "Using: <id>" affordance.
+  const isCustomWebTemplate = webTemplate && !["breadth", "deepdive", "compare", "factcheck"].includes(webTemplate);
+  const isCustomDeepTemplate = deepTemplate && !["react", "extended"].includes(deepTemplate);
+  const isCustomJudgeTemplate = judge.template && !["critique", "verify", "improve", "debate"].includes(judge.template);
+
   return (
     <div className="flex items-center gap-0.5 shrink-0 mb-0.5">
       {/* ─── Effort ─────────────────────────────────────────── */}
@@ -148,7 +165,7 @@ export function ToolIcons({
           </svg>
         </button>
         {active === "effort" && (
-          <Popover onClose={() => setActive(null)} align="left" width="w-48">
+          <Popover onClose={() => setActive(null)} align="left" width="w-60">
             <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">
               Effort Level
             </div>
@@ -162,9 +179,10 @@ export function ToolIcons({
               >
                 <div className="flex items-center justify-between">
                   <span className="capitalize">{e}</span>
-                  <span className="text-[9px] opacity-60">
-                    {e === "low" ? "1 judge" : e === "med" ? "3 judges" : e === "high" ? "5 judges" : "all judges"}
-                  </span>
+                  {effort === e && <span className="text-[9px]">●</span>}
+                </div>
+                <div className="text-[9.5px] opacity-70 mt-0.5 leading-snug">
+                  {EFFORT_DESCRIPTIONS[e]}
                 </div>
               </button>
             ))}
@@ -192,7 +210,7 @@ export function ToolIcons({
           </svg>
         </button>
         {active === "web" && (
-          <Popover onClose={() => setActive(null)} align="left" width="w-60">
+          <Popover onClose={() => setActive(null)} align="left" width="w-64">
             <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">
               Web Search
             </div>
@@ -208,24 +226,42 @@ export function ToolIcons({
               </div>
               <div className="text-[9px] opacity-60 mt-0.5">Agent can search the web during its turn</div>
             </button>
-            <div className="text-[9px] uppercase tracking-wide text-muted-foreground/50 px-2 pt-2 pb-1 border-t border-border/50 mt-1">
-              Template Overrides
-            </div>
-            {WEB_TEMPLATES.map((t) => (
+
+            {isCustomWebTemplate && (
+              <div className="mx-2 mt-1 px-1.5 py-1 rounded bg-accent/10 border border-accent/30 text-[10px] text-accent flex items-center gap-1">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                <span className="truncate">Using template: {webTemplate.slice(0, 18)}</span>
+                <button
+                  onClick={() => setWebTemplate("")}
+                  className="ml-auto opacity-70 hover:opacity-100"
+                  title="Clear template"
+                >
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            )}
+
+            <div className="border-t border-border/50 mt-1 pt-1">
               <button
-                key={t.id}
-                onClick={() => { if (!webSearch) toggleWebSearch(); setWebTemplate(t.id); setActive(null); }}
-                className={`w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors ${
-                  webSearch && webTemplate === t.id ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-surface2"
-                }`}
+                onClick={() => {
+                  if (!webSearch) toggleWebSearch();
+                  setActive(null);
+                  onOpenTemplateLibrary("websearch");
+                }}
+                className="w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors text-accent hover:bg-accent/10 flex items-center gap-1.5"
+                title="Browse web search templates from the library"
               >
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">{t.label}</span>
-                  {webSearch && webTemplate === t.id && <span className="text-[9px]">●</span>}
-                </div>
-                <div className="text-[9px] opacity-60 mt-0.5">{t.description}</div>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M4 4v16a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.343a2 2 0 0 0-.586-1.414l-4.343-4.343A2 2 0 0 0 15.657 2H6a2 2 0 0 0-2 2z" />
+                  <path d="M14 2v6h6" />
+                </svg>
+                <span>Browse Templates…</span>
               </button>
-            ))}
+            </div>
           </Popover>
         )}
       </div>
@@ -248,7 +284,7 @@ export function ToolIcons({
           </svg>
         </button>
         {active === "deep" && (
-          <Popover onClose={() => setActive(null)} align="left" width="w-60">
+          <Popover onClose={() => setActive(null)} align="left" width="w-64">
             <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">
               Deep Research
             </div>
@@ -288,6 +324,42 @@ export function ToolIcons({
                 </button>
               );
             })}
+
+            {isCustomDeepTemplate && (
+              <div className="mx-2 mt-1 px-1.5 py-1 rounded bg-accent/10 border border-accent/30 text-[10px] text-accent flex items-center gap-1">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                <span className="truncate">Using template: {deepTemplate.slice(0, 18)}</span>
+                <button
+                  onClick={() => setDeepTemplate("")}
+                  className="ml-auto opacity-70 hover:opacity-100"
+                  title="Clear template"
+                >
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            )}
+
+            <div className="border-t border-border/50 mt-1 pt-1">
+              <button
+                onClick={() => {
+                  if (!deepResearch) toggleDeepResearch();
+                  setActive(null);
+                  onOpenTemplateLibrary("deepresearch");
+                }}
+                className="w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors text-accent hover:bg-accent/10 flex items-center gap-1.5"
+                title="Browse deep research templates from the library"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M4 4v16a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.343a2 2 0 0 0-.586-1.414l-4.343-4.343A2 2 0 0 0 15.657 2H6a2 2 0 0 0-2 2z" />
+                  <path d="M14 2v6h6" />
+                </svg>
+                <span>Browse Templates…</span>
+              </button>
+            </div>
             <div className="text-[9px] text-muted-foreground/50 px-2 py-1 mt-1 border-t border-border/50">
               Uses more tokens + longer timeouts for thorough analysis
             </div>
@@ -315,7 +387,7 @@ export function ToolIcons({
           </svg>
         </button>
         {active === "judge" && (
-          <Popover onClose={() => setActive(null)} align="left" width="w-64">
+          <Popover onClose={() => setActive(null)} align="left" width="w-72">
             <div className="flex items-center justify-between px-2 py-1">
               <span className="text-[9px] uppercase tracking-wide text-muted-foreground/60">Judge Panel</span>
               <span className="text-[9px] text-muted-foreground/50">Fan-out + merge</span>
@@ -337,7 +409,7 @@ export function ToolIcons({
               ))}
             </div>
             <div className="text-[9px] uppercase tracking-wide text-muted-foreground/50 px-2 pt-1 pb-1 border-t border-border/50">
-              Template
+              Template (quick picks)
             </div>
             {JUDGE_TEMPLATES.map((t) => (
               <button
@@ -354,6 +426,42 @@ export function ToolIcons({
                 <div className="text-[9px] opacity-60 mt-0.5">{t.description}</div>
               </button>
             ))}
+
+            {isCustomJudgeTemplate && (
+              <div className="mx-2 mt-1 px-1.5 py-1 rounded bg-accent/10 border border-accent/30 text-[10px] text-accent flex items-center gap-1">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                <span className="truncate">Custom template set</span>
+                <button
+                  onClick={() => setJudgeTemplate("critique")}
+                  className="ml-auto opacity-70 hover:opacity-100"
+                  title="Reset to default"
+                >
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            )}
+
+            <div className="border-t border-border/50 mt-1 pt-1">
+              <button
+                onClick={() => {
+                  setActive(null);
+                  onOpenTemplateLibrary("judge");
+                }}
+                className="w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors text-accent hover:bg-accent/10 flex items-center gap-1.5"
+                title="Browse judge templates from the library"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M4 4v16a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.343a2 2 0 0 0-.586-1.414l-4.343-4.343A2 2 0 0 0 15.657 2H6a2 2 0 0 0-2 2z" />
+                  <path d="M14 2v6h6" />
+                </svg>
+                <span>Browse Templates…</span>
+              </button>
+            </div>
+
             <div className="border-t border-border/50 mt-1 p-2">
               <button
                 onClick={() => {
@@ -394,7 +502,7 @@ function Popover({
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className={`absolute bottom-full ${align === "right" ? "right-0" : "left-0"} mb-1 z-50 ${width} rounded-lg border border-border bg-surface shadow-xl p-1.5 max-h-[420px] overflow-y-auto`}
+        className={`absolute bottom-full ${align === "right" ? "right-0" : "left-0"} mb-1 z-50 ${width} rounded-lg border border-border bg-surface shadow-xl p-1.5 max-h-[460px] overflow-y-auto`}
       >
         {children}
       </div>

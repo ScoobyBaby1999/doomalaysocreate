@@ -59,6 +59,13 @@ export type AgentEvent =
       type: "steering";
       guidance: string;
       detail: string;
+    }
+  | {
+      i: number;
+      ts: number;
+      type: "title";
+      title: string;
+      session_id: string;
     };
 
 /** Monitor SSE events — emitted by the backend's /api/monitor stream.

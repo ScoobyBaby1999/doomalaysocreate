@@ -28,6 +28,7 @@ import {
   type MonitorJob,
   type MonitorSuggestion,
 } from "../api/agent";
+import type { Template, TemplateKind } from "../api/templates";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -112,7 +113,9 @@ function savePinned(ids: string[]): void {
 /** Judge-panel configuration exposed by the ToolIcons "Judge" popover. */
 export interface JudgeConfig {
   count: number; // 1-6
-  template: "critique" | "verify" | "improve" | "debate";
+  /** Accepts a legacy template id ("critique" | "verify" | "improve" |
+   *  "debate") OR a template library template id. */
+  template: string;
 }
 
 export type BusyMode = "queue" | "stop";
@@ -147,10 +150,13 @@ export interface ChatState {
   webSearch: boolean;
   deepResearch: boolean;
   mode: "auto" | "build" | "plan";
-  /** Web-search template override (empty = regular). */
-  webTemplate: "" | "breadth" | "deepdive" | "compare" | "factcheck";
-  /** Deep-research template override (empty = default). */
-  deepTemplate: "" | "react" | "extended";
+  /** Web-search template override (empty = regular). Accepts legacy IDs
+   *  ("breadth" | "deepdive" | "compare" | "factcheck") OR a template
+   *  library template id (so library templates flow through to the backend). */
+  webTemplate: string;
+  /** Deep-research template override (empty = default). Accepts legacy IDs
+   *  ("react" | "extended") OR a template library template id. */
+  deepTemplate: string;
   /** Judge-panel configuration for the chat-integrated popover. */
   judge: JudgeConfig;
   /** What happens when the user presses Enter while busy:
@@ -173,6 +179,11 @@ export interface ChatState {
   queueMonitorOpen: boolean;
   jobs: MonitorJob[];
   suggestions: MonitorSuggestion[];
+
+  // Template Library overlay (browse/create/heart/download templates)
+  templateLibraryOpen: boolean;
+  templateLibraryKind: string; // 'websearch' | 'deepresearch' | 'judge' | 'chat' | 'custom' | ''
+  templateLibraryTab: "mine" | "explore";
 
   // Derived
   cost: number | null;
@@ -210,8 +221,8 @@ export interface ChatState {
   toggleWebSearch: () => void;
   toggleDeepResearch: () => void;
   setMode: (mode: "auto" | "build" | "plan") => void;
-  setWebTemplate: (t: "" | "breadth" | "deepdive" | "compare" | "factcheck") => void;
-  setDeepTemplate: (t: "" | "react" | "extended") => void;
+  setWebTemplate: (t: string) => void;
+  setDeepTemplate: (t: string) => void;
   setJudge: (cfg: Partial<JudgeConfig>) => void;
   setBusyMode: (m: BusyMode) => void;
   /** Reset all tool selections (effort=med, web=off, deep=off, templates cleared). */
@@ -222,6 +233,14 @@ export interface ChatState {
   setQueueMonitorOpen: (open: boolean) => void;
   setWorkspaceId: (id: string | null) => void;
   togglePin: (sessionId: string) => void;
+
+  // Template Library actions
+  openTemplateLibrary: (kind: string) => void;
+  closeTemplateLibrary: () => void;
+  setTemplateLibraryTab: (tab: "mine" | "explore") => void;
+  /** Apply a template to the current chat tool (sets the appropriate
+   *  template slot based on the template's kind). */
+  applyTemplate: (template: Template) => void;
 
   // Core operations
   loadSessions: (client: AgentClient) => Promise<void>;
@@ -826,6 +845,12 @@ export const useChatStore = create<ChatState>()(
       requestedModel: null,
       workspaceId: null,
 
+      // Template Library overlay — closed by default, no kind filter, on the
+      // "My Templates" tab.
+      templateLibraryOpen: false,
+      templateLibraryKind: "",
+      templateLibraryTab: "mine",
+
       _agentSessionId: null,
       _streamController: null,
       _lastEventSeq: 0,
@@ -855,6 +880,50 @@ export const useChatStore = create<ChatState>()(
       setFileDrawerOpen: (open) => set({ fileDrawerOpen: open }),
       setPanelDrawerOpen: (open) => set({ panelDrawerOpen: open }),
       setQueueMonitorOpen: (open) => set({ queueMonitorOpen: open }),
+      // Template Library actions
+      openTemplateLibrary: (kind) =>
+        set({ templateLibraryOpen: true, templateLibraryKind: kind || "" }),
+      closeTemplateLibrary: () => set({ templateLibraryOpen: false }),
+      setTemplateLibraryTab: (tab) => set({ templateLibraryTab: tab }),
+      applyTemplate: (template) => {
+        // Route the template to the correct tool slot based on its kind.
+        // The frontend stores a single "current" template per kind; the
+        // backend's chat endpoint accepts web_template / deep_template /
+        // judge.template per turn (see AgentClient.send). The backend treats
+        // a non-legacy string as a template library template id and looks
+        // it up; legacy ids ("breadth", "react", "critique", etc.) still
+        // work as before.
+        const kind = template.kind as TemplateKind;
+        switch (kind) {
+          case "websearch":
+            set({
+              webSearch: true,
+              webTemplate: template.id,
+              templateLibraryOpen: false,
+            });
+            break;
+          case "deepresearch":
+            set({
+              deepResearch: true,
+              deepTemplate: template.id,
+              templateLibraryOpen: false,
+            });
+            break;
+          case "judge":
+            set({
+              judge: { count: get().judge.count, template: template.id },
+              templateLibraryOpen: false,
+            });
+            break;
+          case "chat":
+          case "custom":
+          default:
+            // For chat/custom templates we just close the library. A future
+            // iteration could prepend the template markdown to the input.
+            set({ templateLibraryOpen: false });
+            break;
+        }
+      },
       togglePin: (sessionId) => {
         const cur = get().pinnedSessionIds;
         const next = cur.includes(sessionId)
@@ -1421,9 +1490,26 @@ async function _runTurn(
 
   // Buffer events for batch persistence at turn end.
   let bufferedEvents: AgentEvent[] = [];
-  // Use the stored cursor so we don't replay the whole transcript every turn.
-  // The cursor resets to 0 only when a new agent session is created.
+  // The SSE cursor — bumped as events arrive. We read the initial value from
+  // the store, but RESET it to 0 below when we detect a NEW agent session
+  // (see "new session" guard after client.send).
   let since = get()._lastEventSeq || 0;
+  // Capture the PREVIOUS agent session id so we can detect a session change
+  // (e.g. when the user switches models mid-conversation and the backend
+  // spins up a fresh agent session). On change: abort the old stream, reset
+  // the cursor to 0 so we replay every event from the new session.
+  const prevAgentSid = get()._agentSessionId;
+
+  // Bug 2 fix: abort any lingering stream controller from the previous turn
+  // before we start a new one. The `finally` block of the previous turn also
+  // aborts, but a slow/racing stream could still be emitting events when we
+  // kick off this turn — killing it here guarantees a clean slate.
+  const existingController = get()._streamController;
+  if (existingController) {
+    try { existingController.abort(); } catch { /* already aborted */ }
+    set({ _streamController: null });
+  }
+
   let agentSid: string | null = null;
   let controller: AbortController | null = null;
   // Keep a separate ref the finally-block can read (TS narrows the let to
@@ -1461,11 +1547,24 @@ async function _runTurn(
       resolvedProvider: startAny.resolved_provider || null,
     });
 
-    // If this is a new agent session (not reused), reset the cursor so we
-    // get the full transcript from seq 0. If reused, keep the cursor.
-    // We detect reuse by checking if _lastEventSeq > 0 AND the session_id
-    // matches the previous one. Simplest: always start from the stored cursor.
-    // The backend's queue-based SSE will only send events with i >= since.
+    // Bug 1 + Bug 2 fix: if the backend created a NEW agent session (i.e.
+    // start.session_id differs from the previous _agentSessionId), reset the
+    // SSE cursor to 0 so we replay every event from the start. This catches
+    // both the first-message case (prevAgentSid was null) and the model-switch
+    // case (prevAgentSid was a different session). Without this, the backend's
+    // early-emitted events (which fire before our SSE stream connects) would
+    // be lost — manifesting as "first message doesn't respond".
+    if (agentSid !== prevAgentSid) {
+      since = 0;
+      set({ _lastEventSeq: 0 });
+    }
+
+    // Bug 1 fix: small delay to give the backend a beat to buffer the early
+    // events before we open the SSE stream. Without this, on a brand-new
+    // session the backend's "user echo + first assistant_delta" may already
+    // be in flight by the time our stream connects, and the queue-based SSE
+    // could miss them. 300ms is the same backoff the polling fallback uses.
+    await new Promise((r) => setTimeout(r, 300));
 
     // Open SSE stream for live events. If SSE fails, fall back to polling.
     await new Promise<void>((resolve) => {
@@ -1479,9 +1578,29 @@ async function _runTurn(
       };
 
       const handleEvent = (ev: AgentEvent) => {
+        // Bug 1 dedupe guard: if the SSE stream replays an event we've
+        // already seen (ev.i < since), drop it — appendEvent() also dedupes
+        // by seq but we skip the work entirely here for clarity.
+        if (typeof ev.i === "number" && ev.i < since - 1 && ev.type !== "assistant_delta" && ev.type !== "thinking_delta" && ev.type !== "thinking") {
+          return;
+        }
         bufferedEvents.push(ev);
         since = Math.max(since, (ev.i ?? 0) + 1);
         set((s) => ({ messages: appendEvent(s.messages, ev), _lastEventSeq: since }));
+
+        // Bug 3 fix: handle the "title" event — the backend emits this once
+        // it has auto-generated a chat title from the first user message.
+        // We patch the matching session in the sessions list so the sidebar
+        // updates without a full refresh.
+        if (ev.type === "title") {
+          const t = ev as { type: "title"; title: string; session_id: string };
+          const targetId = t.session_id || sessionId;
+          set((s) => ({
+            sessions: s.sessions.map((ses) =>
+              ses.id === targetId ? { ...ses, title: t.title } : ses,
+            ),
+          }));
+        }
 
         // Update status from status events.
         if (ev.type === "status") {

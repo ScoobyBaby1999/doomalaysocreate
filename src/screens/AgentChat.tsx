@@ -13,6 +13,7 @@ import { ContextCircle } from "../components/ContextCircle";
 import { PriceGauge } from "../components/PriceGauge";
 import { ToolIcons } from "../components/ToolIcons";
 import { QueueMonitor } from "../components/QueueMonitor";
+import { TemplateLibrary } from "../components/TemplateLibrary";
 
 export function AgentChat({ settings }: { settings: Settings }) {
   // Model store
@@ -86,6 +87,14 @@ export function AgentChat({ settings }: { settings: Settings }) {
   // Workspace
   const workspaceId = useChatStore((s) => s.workspaceId);
   const setWorkspaceId = useChatStore((s) => s.setWorkspaceId);
+
+  // Template Library overlay
+  const templateLibraryOpen = useChatStore((s) => s.templateLibraryOpen);
+  const templateLibraryKind = useChatStore((s) => s.templateLibraryKind);
+  const templateLibraryTab = useChatStore((s) => s.templateLibraryTab);
+  const openTemplateLibrary = useChatStore((s) => s.openTemplateLibrary);
+  const closeTemplateLibrary = useChatStore((s) => s.closeTemplateLibrary);
+  const applyTemplate = useChatStore((s) => s.applyTemplate);
 
   // ── Derived model info ───────────────────────────────────────────────
   // Find the selected model in the providers list so we can read its REAL
@@ -718,6 +727,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
             setDeepTemplate={setDeepTemplate}
             setJudge={setJudge}
             onRunJudge={handleRunJudge}
+            onOpenTemplateLibrary={openTemplateLibrary}
           />
 
           {/* Mode toggle (compact pill) — kept here because it's an execution
@@ -884,6 +894,15 @@ export function AgentChat({ settings }: { settings: Settings }) {
         suggestions={suggestions}
         onApplySuggestion={applySuggestion}
         onCancelJob={(jobId) => cancelJob(clientRef.current, jobId)}
+      />
+
+      <TemplateLibrary
+        open={templateLibraryOpen}
+        initialKind={templateLibraryKind}
+        initialTab={templateLibraryTab}
+        settings={settings}
+        onClose={closeTemplateLibrary}
+        onApply={applyTemplate}
       />
     </div>
   );
