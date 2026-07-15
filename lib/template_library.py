@@ -47,6 +47,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import db as _dbmod
+import favorites as _favs
+import public_dataset as _pub
 
 _write_lock = _dbmod._write_lock
 
@@ -63,8 +65,18 @@ def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _log(event: str, **fields: Any) -> None:
+    """Best-effort structured log via debug_log (never raises)."""
+    try:
+        import debug_log
+        debug_log.log_event(event, **fields)
+    except Exception:
+        pass
+
+
 VALID_KINDS = ("websearch", "deepresearch", "judge", "chat", "custom")
 VALID_SORTS = ("hearts", "recent", "relevant")
+VALID_FILTERS = ("favorites",)  # additive filter values for list endpoints
 
 
 # ---------------------------------------------------------------------------
@@ -126,8 +138,58 @@ def _ensure_schema_once() -> None:
     with _schema_lock:
         if not _schema_initialized:
             _ensure_schema()
+            # Shared favorites/downloads schema (templates + workspaces).
+            _favs._ensure_schema_once()
+            # One-time best-effort migration of legacy per-template
+            # hearts/downloads rows into the new generic tables.
+            _migrate_legacy_favorites()
             seed_defaults()
             _schema_initialized = True
+
+
+def _migrate_legacy_favorites() -> None:
+    """One-time best-effort migration: copy rows from the legacy
+    ``template_hearts`` / ``template_downloads`` tables into the new
+    generic ``favorites`` / ``downloads`` tables managed by
+    ``favorites.py``.
+
+    Idempotent (uses INSERT OR IGNORE). Silently skips if the legacy
+    tables don't exist or are empty. Never raises — a migration failure
+    must not block first-request template initialization.
+    """
+    db = _dbmod._db()
+    now = _iso_now()
+    try:
+        with _write_lock:
+            # Legacy hearts -> generic favorites (item_type='template')
+            try:
+                rows = db.execute(
+                    "SELECT template_id, user_id, created_at FROM template_hearts"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            for r in rows:
+                db.execute(
+                    "INSERT OR IGNORE INTO favorites "
+                    "(user_id, item_type, item_id, created_at) "
+                    "VALUES (?, 'template', ?, ?)",
+                    (r["user_id"], r["template_id"], r["created_at"] or now))
+            # Legacy downloads -> generic downloads (item_type='template')
+            try:
+                rows = db.execute(
+                    "SELECT template_id, user_id, created_at FROM template_downloads"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            for r in rows:
+                db.execute(
+                    "INSERT OR IGNORE INTO downloads "
+                    "(user_id, item_type, item_id, created_at) "
+                    "VALUES (?, 'template', ?, ?)",
+                    (r["user_id"], r["template_id"], r["created_at"] or now))
+            db.commit()
+    except Exception as exc:
+        _log("template_legacy_fav_migration_failed", error=repr(exc)[:200])
 
 
 # ---------------------------------------------------------------------------
@@ -211,16 +273,44 @@ def create_template(*, user_id: str | None, name: str,
     return _row_to_dict(row) or {}
 
 
-def list_my_templates(user_id: str | None, *, limit: int = 200) -> list[dict]:
+def list_my_templates(user_id: str | None, *, limit: int = 200,
+                      filter: str | None = None) -> list[dict]:
     """List the caller's own templates (private + published), newest first.
 
     Each returned template dict includes per-user ``hearted`` and
     ``downloaded`` boolean flags (always False for anonymous callers) so the
     frontend can render the correct heart/download button state after a
     page reload — without these flags the UI couldn't tell which templates
-    the current user has already hearted/downloaded (Bug 4)."""
+    the current user has already hearted/downloaded (Bug 4).
+
+    ``filter='favorites'`` returns the templates the caller has hearted
+    (across ALL templates — not just their own), newest heart first.
+    Anonymous callers get an empty list with this filter (no per-user
+    state to filter on)."""
     _ensure_schema_once()
     db = _dbmod._db()
+    filter = (filter or "").strip().lower() or None
+    # Filter-by-favorites: return every template the user has hearted,
+    # regardless of authorship (the user's "favorites" view).
+    if filter == "favorites":
+        if not user_id:
+            return []
+        fav_ids = _favs.list_favorites(user_id, "template", limit=limit)
+        if not fav_ids:
+            return []
+        placeholders = ",".join("?" * len(fav_ids))
+        rows = db.execute(
+            "SELECT * FROM templates WHERE id IN (" + placeholders + ") "
+            "ORDER BY created_at DESC LIMIT ?",
+            [*fav_ids, limit]).fetchall()
+        out = [_row_to_dict(r) for r in rows]
+        _annotate_user_flags(out, user_id)
+        # Enforce visibility: drop templates the caller can't see (private
+        # templates authored by someone else — defensive; should not happen
+        # because hearting requires visibility, but guard anyway).
+        out = [t for t in out
+               if t.get("is_public") or _is_owner(t, user_id)]
+        return out
     if user_id:
         rows = db.execute(
             "SELECT * FROM templates WHERE author_id = ? "
@@ -240,7 +330,8 @@ def list_my_templates(user_id: str | None, *, limit: int = 200) -> list[dict]:
 def list_public_templates(*, sort: str = "hearts", query: str | None = None,
                           kind: str | None = None,
                           limit: int = 50, offset: int = 0,
-                          user_id: str | None = None) -> tuple[list[dict], int]:
+                          user_id: str | None = None,
+                          filter: str | None = None) -> tuple[list[dict], int]:
     """List public templates. Returns (templates, total). Sort by hearts
     (most hearted), recent (newest), or relevant (text-search relevance via
     LIKE on name+description+markdown+tags).
@@ -248,10 +339,53 @@ def list_public_templates(*, sort: str = "hearts", query: str | None = None,
     Each returned template dict includes per-user ``hearted`` and
     ``downloaded`` boolean flags for ``user_id`` (always False when
     ``user_id`` is None) so the frontend can render the correct
-    heart/download button state after a page reload (Bug 4)."""
+    heart/download button state after a page reload (Bug 4).
+
+    Source-of-truth: the public HF dataset (``public_dataset.py``).
+    Falls back to local SQLite if the dataset is unreachable / empty
+    (so the system default templates remain browsable offline).
+
+    ``filter='favorites'`` returns only public templates the caller has
+    hearted (Anonymous callers get an empty result with this filter)."""
     _ensure_schema_once()
     if sort not in VALID_SORTS:
         sort = "hearts"
+    filter = (filter or "").strip().lower() or None
+    page_limit = max(1, min(int(limit), 200))
+    page_offset = max(0, int(offset))
+
+    # ----- Try the public HF dataset first (source of truth) -----
+    out: list[dict] = []
+    total = 0
+    try:
+        pub_items, pub_total = _pub.list_public_templates(
+            sort=sort, query=query, kind=kind,
+            limit=page_limit, offset=page_offset)
+    except Exception as exc:
+        _log("template_public_list_failed", error=repr(exc)[:200])
+        pub_items, pub_total = [], 0
+    if pub_items:
+        out = pub_items
+        total = pub_total
+        # Normalize: public-dataset records use list-typed tags + a bool
+        # is_public; the rest of the code expects the same shape as a local
+        # SQLite row (post _row_to_dict).
+        for it in out:
+            if it.get("tags") is None:
+                it["tags"] = []
+            if "is_public" not in it:
+                it["is_public"] = True
+        _annotate_user_flags(out, user_id)
+        # Apply favorites filter post-hoc (only items the user has hearted).
+        if filter == "favorites":
+            if not user_id:
+                return ([], 0)
+            fav_ids = set(_favs.list_favorites(user_id, "template", limit=2000))
+            out = [t for t in out if t.get("id") in fav_ids]
+            total = len(out)
+        return (out, total)
+
+    # ----- Fallback: local SQLite (dataset unreachable / empty) -----
     db = _dbmod._db()
     where = "is_public = 1"
     params: list[Any] = []
@@ -264,6 +398,16 @@ def list_public_templates(*, sort: str = "hearts", query: str | None = None,
         q = "%" + query.strip() + "%"
         where += " AND (name LIKE ? OR description LIKE ? OR markdown LIKE ? OR tags LIKE ?)"
         params.extend([q, q, q, q])
+    # Favorites filter (local fallback): restrict to the user's hearted ids.
+    if filter == "favorites":
+        if not user_id:
+            return ([], 0)
+        fav_ids = _favs.list_favorites(user_id, "template", limit=2000)
+        if not fav_ids:
+            return ([], 0)
+        placeholders = ",".join("?" * len(fav_ids))
+        where += " AND id IN (" + placeholders + ")"
+        params.extend(fav_ids)
 
     # Total count (for pagination).
     count_row = db.execute(
@@ -285,8 +429,6 @@ def list_public_templates(*, sort: str = "hearts", query: str | None = None,
             # No query -> "relevant" degenerates to "hearts".
             order = "hearts DESC, downloads DESC, created_at DESC"
 
-    page_limit = max(1, min(int(limit), 200))
-    page_offset = max(0, int(offset))
     rows = db.execute(
         f"SELECT * FROM templates WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
         params + [page_limit, page_offset]).fetchall()
@@ -306,48 +448,43 @@ def _annotate_user_flags(templates: list[dict], user_id: str | None) -> None:
     user had already hearted/downloaded — after a reload every heart
     button appeared unhearted even though the row was in
     ``template_hearts``. We do ONE bulk SELECT per table (keyed on the
-    template ids in the page) so this stays O(page_size) not O(N²)."""
-    if not templates:
-        return
-    ids = [t.get("id") for t in templates if t.get("id")]
-    if not ids:
-        return
-    # Initialise both flags to False (covers anonymous + no rows).
-    for t in templates:
-        t["hearted"] = False
-        t["downloaded"] = False
-    if not user_id:
-        return
-    db = _dbmod._db()
-    placeholders = ",".join("?" * len(ids))
-    try:
-        rows = db.execute(
-            f"SELECT template_id FROM template_hearts "
-            f"WHERE user_id = ? AND template_id IN ({placeholders})",
-            [user_id, *ids]).fetchall()
-        hearted_ids = {r["template_id"] for r in rows}
-        for t in templates:
-            if t.get("id") in hearted_ids:
-                t["hearted"] = True
-        rows = db.execute(
-            f"SELECT template_id FROM template_downloads "
-            f"WHERE user_id = ? AND template_id IN ({placeholders})",
-            [user_id, *ids]).fetchall()
-        downloaded_ids = {r["template_id"] for r in rows}
-        for t in templates:
-            if t.get("id") in downloaded_ids:
-                t["downloaded"] = True
-    except Exception:
-        # Best-effort: never break listing on a flag-lookup failure.
-        pass
+    template ids in the page) so this stays O(page_size) not O(N²).
+
+    Delegates to the shared ``favorites.annotate_user_flags`` so the same
+    per-user flag logic is reused by templates AND workspaces (the user
+    asked for these systems to share functionality)."""
+    # The shared helper initialises both flags to False, handles the
+    # anonymous case, and does the bulk SELECT. We keep this wrapper for
+    # backward compat with the rest of this module.
+    _favs.annotate_user_flags(user_id, "template", templates, id_key="id")
 
 
 def get_template(template_id: str) -> dict | None:
-    """Fetch one template by id (full markdown). Returns None if not found."""
+    """Fetch one template by id (full markdown). Returns None if not found.
+
+    Tries local SQLite first; if not found, falls back to the public HF
+    dataset (for templates the caller has not downloaded/created locally
+    but that have been published globally by another user)."""
     _ensure_schema_once()
     row = _dbmod._db().execute(
         "SELECT * FROM templates WHERE id = ?", (template_id,)).fetchone()
-    return _row_to_dict(row)
+    if row:
+        return _row_to_dict(row)
+    # Fallback: public HF dataset (best-effort, never raises).
+    try:
+        pub = _pub.get_template(template_id)
+        if pub:
+            # Normalize: ensure is_public is set (everything in the public
+            # dataset is public by definition) and tags is a list.
+            pub = dict(pub)
+            pub.setdefault("is_public", True)
+            if pub.get("tags") is None:
+                pub["tags"] = []
+            return pub
+    except Exception as exc:
+        _log("template_public_get_failed",
+             template_id=template_id, error=repr(exc)[:200])
+    return None
 
 
 def update_template(template_id: str, user_id: str | None, *,
@@ -397,7 +534,11 @@ def update_template(template_id: str, user_id: str | None, *,
 
 def delete_template(template_id: str, user_id: str | None) -> bool | None:
     """Delete a template (owner only). Returns True if deleted, False if not
-    found, None if not owned by caller."""
+    found, None if not owned by caller.
+
+    Also removes the template from the public HF dataset (best-effort) and
+    purges all per-user favorites/downloads rows via the shared
+    ``favorites.purge_item`` helper."""
     _ensure_schema_once()
     db = _dbmod._db()
     existing = get_template(template_id)
@@ -407,16 +548,43 @@ def delete_template(template_id: str, user_id: str | None) -> bool | None:
         return None
     with _write_lock:
         db.execute("DELETE FROM templates WHERE id = ?", (template_id,))
-        db.execute("DELETE FROM template_hearts WHERE template_id = ?", (template_id,))
-        db.execute("DELETE FROM template_downloads WHERE template_id = ?", (template_id,))
+        # Legacy tables (kept for backward compat with any older code paths).
+        try:
+            db.execute("DELETE FROM template_hearts WHERE template_id = ?", (template_id,))
+        except sqlite3.OperationalError:
+            pass
+        try:
+            db.execute("DELETE FROM template_downloads WHERE template_id = ?", (template_id,))
+        except sqlite3.OperationalError:
+            pass
         db.commit()
+    # Shared generic tables (templates + workspaces).
+    try:
+        _favs.purge_item("template", template_id)
+    except Exception as exc:
+        _log("template_purge_favorites_failed",
+             template_id=template_id, error=repr(exc)[:200])
+    # Public HF dataset (best-effort — silent no-op if unreachable).
+    try:
+        _pub.unpublish_template(template_id)
+    except Exception as exc:
+        _log("template_unpublish_on_delete_failed",
+             template_id=template_id, error=repr(exc)[:200])
     return True
 
 
 def heart_template(template_id: str, user_id: str | None) -> tuple[bool, int]:
-    """Toggle heart on a template. Returns (hearted, hearts_count). If the
-    caller is anonymous (no user_id), the heart is not recorded but the count
-    is still returned (no-op toggle)."""
+    """Toggle heart on a template. Returns (hearted, hearts_count).
+
+    Per-user state lives in the shared ``favorites`` table (so the same
+    code path serves templates AND workspaces). The local SQLite
+    ``templates.hearts`` column is bumped as a per-Space aggregate cache
+    (used when the public HF dataset is unreachable). The GLOBAL aggregate
+    count lives in the public HF dataset (``public_dataset.add_heart`` /
+    ``remove_heart``) so hearts persist ACROSS users AND across Spaces.
+
+    If the caller is anonymous (no user_id), the heart is not recorded
+    but the count is still returned (no-op toggle)."""
     _ensure_schema_once()
     db = _dbmod._db()
     existing = get_template(template_id)
@@ -425,34 +593,36 @@ def heart_template(template_id: str, user_id: str | None) -> tuple[bool, int]:
     if not user_id:
         # Anonymous can't heart — return current count, hearted=False.
         return (False, int(existing.get("hearts") or 0))
-    now = _iso_now()
-    with _write_lock:
-        row = db.execute(
-            "SELECT 1 FROM template_hearts WHERE template_id = ? AND user_id = ?",
-            (template_id, user_id)).fetchone()
-        if row:
-            # Already hearted -> unheart.
-            db.execute(
-                "DELETE FROM template_hearts WHERE template_id = ? AND user_id = ?",
-                (template_id, user_id))
-            db.execute(
-                "UPDATE templates SET hearts = MAX(hearts - 1, 0) WHERE id = ?",
-                (template_id,))
-            hearted = False
+    # Per-user toggle (shared favorites table — same logic for workspaces).
+    hearted, _ = _favs.heart(user_id, "template", template_id)
+    # Bump the local SQLite aggregate count (per-Space cache).
+    try:
+        with _write_lock:
+            if hearted:
+                db.execute(
+                    "UPDATE templates SET hearts = hearts + 1 WHERE id = ?",
+                    (template_id,))
+            else:
+                db.execute(
+                    "UPDATE templates SET hearts = MAX(hearts - 1, 0) WHERE id = ?",
+                    (template_id,))
+            db.commit()
+            row = db.execute(
+                "SELECT hearts FROM templates WHERE id = ?", (template_id,)).fetchone()
+        count = int(row["hearts"]) if row else 0
+    except Exception:
+        count = int(existing.get("hearts") or 0)
+    # Bump the GLOBAL aggregate count in the public HF dataset (best-effort).
+    # We attempt this regardless of is_public — if the template isn't in
+    # the public dataset, ``_bump_counter`` silently no-ops.
+    try:
+        if hearted:
+            _pub.add_heart(template_id)
         else:
-            # Heart it.
-            db.execute(
-                "INSERT OR REPLACE INTO template_hearts (template_id, user_id, created_at) "
-                "VALUES (?, ?, ?)",
-                (template_id, user_id, now))
-            db.execute(
-                "UPDATE templates SET hearts = hearts + 1 WHERE id = ?",
-                (template_id,))
-            hearted = True
-        db.commit()
-        row = db.execute(
-            "SELECT hearts FROM templates WHERE id = ?", (template_id,)).fetchone()
-    count = int(row["hearts"]) if row else 0
+            _pub.remove_heart(template_id)
+    except Exception as exc:
+        _log("template_public_heart_failed",
+             template_id=template_id, hearted=hearted, error=repr(exc)[:200])
     return (hearted, count)
 
 
@@ -460,6 +630,13 @@ def download_template(template_id: str, user_id: str | None) -> dict:
     """Download a template: increment its download count (idempotent per
     user) and create a LOCAL COPY for the caller so they have their own
     editable version. Returns the local copy.
+
+    Per-user download tracking lives in the shared ``downloads`` table
+    (``favorites.download``). The local SQLite ``templates.downloads``
+    column is bumped as a per-Space aggregate cache. The GLOBAL aggregate
+    count lives in the public HF dataset
+    (``public_dataset.increment_downloads``) so the count persists
+    across users AND across Spaces.
 
     Raises KeyError if the template doesn't exist.
     Raises PermissionError if the template is private and not owned by
@@ -472,22 +649,35 @@ def download_template(template_id: str, user_id: str | None) -> dict:
     # Private templates are only downloadable by their owner.
     if not existing.get("is_public") and not _is_owner(existing, user_id):
         raise PermissionError("template is private")
-    # Record the download (idempotent per user).
+    # Record the download (idempotent per user) in the shared downloads
+    # table. Returns True iff this is a NEW download (first time this user
+    # has downloaded this item) — only then do we bump the aggregate
+    # counts (local cache + global HF dataset).
+    is_new_download = False
     if user_id:
-        now = _iso_now()
-        with _write_lock:
-            row = db.execute(
-                "SELECT 1 FROM template_downloads WHERE template_id = ? AND user_id = ?",
-                (template_id, user_id)).fetchone()
-            if not row:
-                db.execute(
-                    "INSERT OR REPLACE INTO template_downloads "
-                    "(template_id, user_id, created_at) VALUES (?, ?, ?)",
-                    (template_id, user_id, now))
+        try:
+            is_new_download = _favs.download(user_id, "template", template_id)
+        except Exception as exc:
+            _log("template_fav_download_failed",
+                 template_id=template_id, error=repr(exc)[:200])
+            is_new_download = False
+    if is_new_download:
+        # Bump local SQLite aggregate count (per-Space cache).
+        try:
+            with _write_lock:
                 db.execute(
                     "UPDATE templates SET downloads = downloads + 1 WHERE id = ?",
                     (template_id,))
                 db.commit()
+        except Exception as exc:
+            _log("template_local_download_bump_failed",
+                 template_id=template_id, error=repr(exc)[:200])
+        # Bump the GLOBAL aggregate count in the public HF dataset.
+        try:
+            _pub.increment_downloads(template_id)
+        except Exception as exc:
+            _log("template_public_download_failed",
+                 template_id=template_id, error=repr(exc)[:200])
     # Create a LOCAL COPY for the caller (so they have their own editable
     # version). The copy is private, attributed to the caller, and credits
     # the original via a "(copy of <id>)" suffix on the name + a tag.
@@ -513,13 +703,40 @@ def download_template(template_id: str, user_id: str | None) -> dict:
 
 def publish_template(template_id: str, user_id: str | None) -> dict | None:
     """Publish a template to the global library (owner only). Returns the
-    updated template or None if not found / not owned."""
-    return update_template(template_id, user_id, is_public=True)
+    updated template or None if not found / not owned.
+
+    Pushes the template to the public HF dataset (best-effort — silent
+    no-op if the dataset is unreachable, in which case the local SQLite
+    row is still marked is_public=1 and will be served via the local
+    fallback in ``list_public_templates``)."""
+    tpl = update_template(template_id, user_id, is_public=True)
+    if tpl is None:
+        return None
+    # Best-effort push to the public HF dataset. Failures are logged but
+    # do not affect the local publish (the local SQLite row is already
+    # is_public=1; the public dataset will catch up on the next publish
+    # attempt or via a future sync job).
+    try:
+        _pub.publish_template(tpl)
+    except Exception as exc:
+        _log("template_publish_to_public_failed",
+             template_id=template_id, error=repr(exc)[:200])
+    return tpl
 
 
 def unpublish_template(template_id: str, user_id: str | None) -> dict | None:
-    """Unpublish a template from the global library (owner only)."""
-    return update_template(template_id, user_id, is_public=False)
+    """Unpublish a template from the global library (owner only).
+
+    Removes the template from the public HF dataset (best-effort)."""
+    tpl = update_template(template_id, user_id, is_public=False)
+    if tpl is None:
+        return None
+    try:
+        _pub.unpublish_template(template_id)
+    except Exception as exc:
+        _log("template_unpublish_from_public_failed",
+             template_id=template_id, error=repr(exc)[:200])
+    return tpl
 
 
 def _is_owner(template: dict, user_id: str | None) -> bool:
@@ -919,7 +1136,9 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
     # -----------------------------------------------------------------
     if method == "GET":
         if route == "/api/templates":
-            tpls = list_my_templates(user_id)
+            q = parse_qs(urlsplit(path).query)
+            filter = (q.get("filter", [None])[0] or "").strip().lower() or None
+            tpls = list_my_templates(user_id, filter=filter)
             _json(handler, 200, {"templates": tpls})
             return True
         if route == "/api/templates/explore":
@@ -927,6 +1146,7 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             sort = (q.get("sort", ["hearts"])[0] or "hearts").strip().lower()
             query = (q.get("query", [None])[0] or "").strip() or None
             kind = (q.get("kind", [None])[0] or "").strip() or None
+            filter = (q.get("filter", [None])[0] or "").strip().lower() or None
             try:
                 limit = int(q.get("limit", ["50"])[0])
             except ValueError:
@@ -937,7 +1157,7 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
                 offset = 0
             tpls, total = list_public_templates(
                 sort=sort, query=query, kind=kind, limit=limit, offset=offset,
-                user_id=user_id)
+                user_id=user_id, filter=filter)
             _json(handler, 200, {"templates": tpls, "total": total})
             return True
         if route == "/api/templates/<id>":
