@@ -371,7 +371,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const [toolsBarOpen, setToolsBarOpen] = useState(false);
 
   return (
-    <div className="flex flex-col h-full relative bg-bg min-h-0">
+    <div className="flex flex-col h-full relative bg-bg min-h-0 overflow-hidden">
       {/* ── Compact mobile-first header ──────────────────────────────
        *  Row 1 (always visible): menu · model badge · context circle ·
        *    price gauge · stop/new. Everything else lives in the
@@ -379,8 +379,14 @@ export function AgentChat({ settings }: { settings: Settings }) {
        *  Row 2 (collapsible on mobile, always open on desktop): files,
        *    panel, queue, export, workspace, verification, token usage,
        *    status indicator.
-       *  All icon buttons are ≥44×44 (touch-target friendly). */}
-      <header className="flex flex-col shrink-0 border-b border-border bg-surface/60 backdrop-blur safe-top">
+       *  All icon buttons are ≥44×44 (touch-target friendly).
+       *
+       *  `relative z-30` is CRITICAL — the header has backdrop-blur which
+       *  creates a stacking context. Without an explicit z-index, the
+       *  workspace dropdown inside it gets painted UNDER the messages area
+       *  below. z-30 puts the header (and all its descendants, including
+       *  the dropdown at internal z-50) above the messages area at z-0. */}
+      <header className="flex flex-col shrink-0 relative z-30 border-b border-white/5 bg-surface/60 backdrop-blur safe-top">
         {/* Row 1 — essentials */}
         <div className="flex items-center gap-1.5 px-2 sm:px-3 h-12 sm:h-11">
           {/* Session menu toggle */}
@@ -412,22 +418,23 @@ export function AgentChat({ settings }: { settings: Settings }) {
           {/* Spacer pushes the model badge toward the center/right. */}
           <div className="flex-1" />
 
-          {/* Model selector — compact pill, large touch target. */}
+          {/* Model selector — pill-shaped, subtle gradient, large touch target.
+              Uses border-white/5 (thin, subtle) instead of border-border (thick, bricky). */}
           <button
             onClick={() => !running && openOverlay()}
             disabled={running}
             aria-label="Select model"
             title={selectedProviderName || "Select model"}
-            className="touch-target shrink-0 flex items-center gap-1.5 px-2.5 h-9 rounded-xl border border-border hover:border-accent/60 transition-colors text-[12px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[44vw] sm:max-w-[200px] bg-surface2/60"
+            className="touch-target shrink-0 flex items-center gap-1.5 px-2.5 h-9 rounded-full border border-white/5 bg-gradient-to-br from-surface2/80 to-surface/80 hover:from-surface2 hover:to-surface3 hover:border-accent/40 transition-all text-[12px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[44vw] sm:max-w-[220px] shadow-sm"
           >
             <span
-              className="w-2.5 h-2.5 rounded-full shrink-0 ring-2 ring-background"
+              className="w-2 h-2 rounded-full shrink-0 ring-1 ring-white/10"
               style={{ background: modelDisplay?.color || "#a855f7" }}
             />
-            <span className="truncate text-accent font-medium">
+            <span className="truncate text-accentLight font-medium">
               {modelDisplay?.label || "Select model"}
             </span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground shrink-0">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground/70 shrink-0">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
@@ -444,14 +451,18 @@ export function AgentChat({ settings }: { settings: Settings }) {
             </div>
           )}
 
-          {/* PriceGauge — current message cost / session total. */}
-          <div className="shrink-0">
-            <PriceGauge
-              currentCost={lastMsgCost}
-              totalCost={sessionCost}
-              isFree={modelIsFree}
-            />
-          </div>
+          {/* PriceGauge — current message cost / session total.
+              Only shown when there's actually a cost OR the model isn't free,
+              so the header isn't cluttered on a fresh session. */}
+          {(typeof lastMsgCost === "number" || (sessionCost ?? 0) > 0 || !modelIsFree) && (
+            <div className="shrink-0">
+              <PriceGauge
+                currentCost={lastMsgCost}
+                totalCost={sessionCost}
+                isFree={modelIsFree}
+              />
+            </div>
+          )}
 
           {/* Stop / New — primary action, large tap target. */}
           {running ? (
@@ -459,7 +470,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
               onClick={handleStop}
               aria-label="Stop"
               title="Stop"
-              className="touch-target shrink-0 flex items-center gap-1.5 px-3 h-9 rounded-xl bg-red-500/15 text-red-300 hover:bg-red-500/25 transition-colors font-medium text-[12px]"
+              className="touch-target shrink-0 flex items-center gap-1.5 px-3 h-9 rounded-full bg-red-500/15 text-red-300 hover:bg-red-500/25 border border-red-500/20 transition-colors font-medium text-[12px]"
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                 <rect x="6" y="6" width="12" height="12" rx="1.5" />
@@ -471,7 +482,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
               onClick={handleNewSession}
               aria-label="New chat"
               title="New chat"
-              className="touch-target shrink-0 flex items-center gap-1.5 px-3 h-9 rounded-xl bg-accent/15 text-accent hover:bg-accent/25 transition-colors font-medium text-[12px]"
+              className="touch-target shrink-0 flex items-center gap-1.5 px-3 h-9 rounded-full bg-accent/15 text-accent hover:bg-accent/25 border border-accent/20 transition-colors font-medium text-[12px]"
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="12" y1="5" x2="12" y2="19" />
@@ -503,19 +514,22 @@ export function AgentChat({ settings }: { settings: Settings }) {
         </div>
 
         {/* Row 2 — secondary tools. Collapsed by default on mobile,
-            always visible on sm:+. Horizontally scrollable if needed. */}
+            always visible on sm:+. Horizontally scrollable if needed.
+            Thin top border on mobile (border-white/5) — removed on sm:+
+            so the two rows feel like one continuous bar. */}
         <div
           className={`${
             toolsBarOpen ? "flex" : "hidden"
-          } sm:flex items-center gap-1.5 px-2 sm:px-3 pb-2 sm:pb-1.5 pt-1 sm:pt-0 sm:h-10 overflow-x-auto no-scrollbar border-t border-border/50 sm:border-t-0`}
+          } sm:flex items-center gap-1.5 px-2 sm:px-3 pb-2 sm:pb-1.5 pt-1 sm:pt-0 sm:h-10 overflow-x-auto no-scrollbar border-t border-white/5 sm:border-t-0`}
         >
-          {/* Workspace selector */}
+          {/* Workspace selector — relative+shrink-0 keeps the dropdown
+              anchored to the button and out of the horizontal scroll. */}
           <div className="relative shrink-0">
             <button
               onClick={() => setWsOpen((v) => !v)}
               disabled={running}
               title={workspaceId || "No workspace (ephemeral)"}
-              className="touch-target shrink-0 flex items-center gap-1.5 px-2.5 h-8 rounded-xl border border-border hover:border-accent/60 transition-colors text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[160px]"
+              className="touch-target shrink-0 flex items-center gap-1.5 px-2.5 h-8 rounded-full border border-white/5 bg-surface2/40 hover:border-accent/40 hover:bg-surface2/70 transition-all text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[160px]"
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-muted-foreground">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -532,7 +546,20 @@ export function AgentChat({ settings }: { settings: Settings }) {
             {wsOpen && (
               <>
                 <div className="fixed inset-0 z-40" onClick={() => setWsOpen(false)} />
-                <div className="absolute right-0 top-full mt-1 z-50 min-w-[200px] max-w-[280px] rounded-xl border border-border bg-surface shadow-xl overflow-hidden">
+                <div className="absolute right-0 top-full mt-1.5 z-50 min-w-[220px] max-w-[280px] rounded-2xl border border-white/5 surface-card shadow-2xl shadow-black/40 overflow-hidden animate-popover-in">
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-white/5">
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium">Workspace</span>
+                    <button
+                      onClick={() => setWsOpen(false)}
+                      aria-label="Close"
+                      className="touch-target w-6 h-6 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-white/5 transition-colors flex items-center justify-center"
+                    >
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
+                  </div>
                   <button
                     onClick={() => { setWorkspaceId(null); setWsOpen(false); }}
                     className={`w-full text-left px-3 py-2.5 text-[12px] hover:bg-accent/10 transition-colors ${!workspaceId ? "text-accent font-medium" : ""}`}
@@ -682,11 +709,17 @@ export function AgentChat({ settings }: { settings: Settings }) {
 
       {/* Messages area — flex-1 scrollable region. We use `overscroll-contain`
          * so a fling-scroll inside the message list doesn't yank the body
-         * (which would reveal the bottom-nav behind the keyboard). */}
+         * (which would reveal the bottom-nav behind the keyboard).
+         *
+         * `relative z-0` establishes the bottom of the stacking order so the
+         * header (z-30) and input area (z-30) — and their popover descendants
+         * — always paint above the message bubbles. Without this, dropdowns
+         * extending up/down from the header/input would get covered by the
+         * chat bubbles. */}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto min-h-0 scroll-smooth overscroll-contain pointer-pass"
+        className="flex-1 overflow-y-auto min-h-0 relative z-0 scroll-smooth overscroll-contain pointer-pass"
       >
         {isLoadingMessages && messages.length === 0 ? (
           <div className="flex items-center justify-center h-full">
@@ -698,7 +731,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
         ) : messages.length === 0 && !isBusy ? (
           <EmptyState onSend={handleSend} />
         ) : (
-          <div className="py-3 sm:py-4 px-2 sm:px-4 max-w-3xl mx-auto">
+          <div className="py-3 sm:py-4 px-2 sm:px-4 max-w-3xl mx-auto flex flex-col gap-1.5">
             {messages.map((msg, i) => (
               <ChatMessageBubble
                 key={msg.id}
@@ -746,7 +779,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
 
       {/* Queue indicator (1-up: shows pending messages while LLM is busy) */}
       {queueCount > 0 && (
-        <div className="border-t border-border bg-accent/5 px-3 py-2 shrink-0">
+        <div className="relative z-20 border-t border-white/5 bg-accent/5 px-3 py-2 shrink-0">
           <div className="flex items-center gap-2 text-[11.5px] text-accent">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse shrink-0">
               <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
@@ -760,7 +793,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
             </div>
             <button
               onClick={() => queue.forEach((q) => dequeueMessage(q.id))}
-              className="touch-target shrink-0 text-muted-foreground hover:text-foreground px-2.5 h-7 rounded-xl hover:bg-surface2 transition-colors text-[11px]"
+              className="touch-target shrink-0 text-muted-foreground hover:text-foreground px-2.5 h-7 rounded-full hover:bg-surface2 transition-colors text-[11px]"
               title="Clear queue"
             >
               Clear
@@ -771,21 +804,21 @@ export function AgentChat({ settings }: { settings: Settings }) {
 
       {/* Error banner */}
       {error && (
-        <div className="border-t border-red-500/30 bg-red-500/10 px-3 sm:px-4 py-2.5 text-[13px] text-red-300 flex items-center gap-2 sm:gap-3 shrink-0">
+        <div className="relative z-20 border-t border-red-500/30 bg-red-500/10 px-3 sm:px-4 py-2.5 text-[13px] text-red-300 flex items-center gap-2 sm:gap-3 shrink-0">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
             <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
           <span className="flex-1 min-w-0">{error}</span>
           <button
             onClick={() => useChatStore.setState({ error: null })}
-            className="touch-target shrink-0 text-red-300/70 hover:text-red-200 px-2.5 h-7 rounded-xl text-[11px]"
+            className="touch-target shrink-0 text-red-300/70 hover:text-red-200 px-2.5 h-7 rounded-full text-[11px]"
           >
             dismiss
           </button>
           {lastUserMsgRef.current && (
             <button
               onClick={() => handleSend(lastUserMsgRef.current)}
-              className="touch-target shrink-0 px-3 h-7 rounded-xl border border-red-500/40 text-[11px] hover:bg-red-500/20 transition-colors"
+              className="touch-target shrink-0 px-3 h-7 rounded-full border border-red-500/40 text-[11px] hover:bg-red-500/20 transition-colors"
             >
               Retry
             </button>
@@ -803,9 +836,14 @@ export function AgentChat({ settings }: { settings: Settings }) {
          *      never wraps and pushes the input off-screen on phones.
          *    • safe-area-inset padding keeps the input above the iOS home
          *      indicator.
-         */}
-      <div className="border-t border-border bg-surface/40 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] px-2 sm:px-3 shrink-0">
-        {/* Tool bar — horizontally scrollable on mobile. */}
+         *
+         *  `relative z-30` is CRITICAL for the same reason as the header:
+         *  the ToolIcons popovers extend UP from this area into the
+         *  messages area, so without an explicit z-index the popovers
+         *  would be painted UNDER the chat bubbles. */}
+      <div className="relative z-30 border-t border-white/5 bg-surface/40 backdrop-blur-md pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] px-2 sm:px-3 shrink-0">
+        {/* Tool bar — horizontally scrollable on mobile. Subtle bg so it
+            reads as a distinct toolbar above the input. */}
         <div className="flex items-center gap-1 max-w-3xl mx-auto mb-1.5 px-1 min-h-[36px] overflow-x-auto no-scrollbar">
           <ToolIcons
             effort={effort}
@@ -834,7 +872,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
           {toolsDirty && (
             <button
               onClick={resetTools}
-              className="touch-target shrink-0 text-[11px] px-2.5 h-7 rounded-xl text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1"
+              className="touch-target shrink-0 text-[11px] px-2.5 h-7 rounded-full text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors flex items-center gap-1"
               title="Reset all tool selections"
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -852,7 +890,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
           <button
             onClick={() => setSaveAsTemplateOpen(true)}
             disabled={messages.length === 0}
-            className="touch-target shrink-0 text-[11px] px-2.5 h-7 rounded-xl text-muted-foreground hover:text-accent hover:bg-surface2 transition-colors flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="touch-target shrink-0 text-[11px] px-2.5 h-7 rounded-full text-muted-foreground hover:text-accent hover:bg-surface2 transition-colors flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
             title="Save this chat as a reusable template"
             aria-label="Save as Template"
           >
@@ -869,19 +907,19 @@ export function AgentChat({ settings }: { settings: Settings }) {
           <div className="hidden sm:flex flex-1" />
 
           {/* Queue / Stop mode toggle (default: Queue). */}
-          <div className="flex items-center bg-surface2 rounded-xl p-0.5 text-[11px] shrink-0" title="What happens when you press Enter while the agent is busy">
+          <div className="flex items-center bg-surface2/60 border border-white/5 rounded-full p-0.5 text-[11px] shrink-0" title="What happens when you press Enter while the agent is busy">
             <button
               onClick={() => setBusyMode("queue")}
-              className={`touch-target px-2.5 h-7 rounded-xl transition-colors ${
-                busyMode === "queue" ? "bg-accent text-white" : "text-muted-foreground hover:text-foreground"
+              className={`touch-target px-2.5 h-7 rounded-full transition-colors ${
+                busyMode === "queue" ? "bg-accent text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
               }`}
             >
               Queue
             </button>
             <button
               onClick={() => setBusyMode("stop")}
-              className={`touch-target px-2.5 h-7 rounded-xl transition-colors ${
-                busyMode === "stop" ? "bg-accent text-white" : "text-muted-foreground hover:text-foreground"
+              className={`touch-target px-2.5 h-7 rounded-full transition-colors ${
+                busyMode === "stop" ? "bg-accent text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
               }`}
             >
               Stop
@@ -911,7 +949,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
                   : "Type to replace the running turn… (Enter to stop + send)"
                 : "Ask the agent to build, edit, run, or pack something…"
             }
-            className="flex-1 resize-none bg-surface2 border border-border rounded-2xl px-4 py-3 text-[16px] sm:text-[14.5px] leading-relaxed outline-none focus:border-accent min-h-[48px] max-h-[160px] transition-colors placeholder:text-muted-foreground/60"
+            className="chat-input-glow flex-1 resize-none bg-surface2/70 border border-white/5 rounded-2xl px-4 py-3 text-[16px] sm:text-[14.5px] leading-relaxed outline-none min-h-[48px] max-h-[160px] transition-all placeholder:text-muted-foreground/60"
           />
 
           {/* Send / Stop / Queue — primary action button.
@@ -933,10 +971,10 @@ export function AgentChat({ settings }: { settings: Settings }) {
             }}
             disabled={!running && !inputText.trim()}
             aria-label={running ? "Stop" : isBusy ? "Queue message" : "Send message"}
-            className={`touch-target w-12 h-12 sm:w-12 sm:h-12 rounded-2xl font-medium text-[13px] disabled:opacity-40 disabled:cursor-not-allowed shrink-0 transition-all flex items-center justify-center gap-1.5 ${
+            className={`send-btn touch-target w-12 h-12 sm:w-12 sm:h-12 rounded-full font-medium text-[13px] disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none shrink-0 transition-all flex items-center justify-center gap-1.5 ${
               running
                 ? "bg-red-500/90 text-white hover:bg-red-500"
-                : "bg-accent text-white hover:bg-accent/90"
+                : "bg-gradient-to-br from-accent to-accentHover text-white hover:from-accentHover hover:to-accentDeep"
             }`}
             title={running ? "Stop" : "Send (or queue if busy)"}
           >
@@ -955,16 +993,13 @@ export function AgentChat({ settings }: { settings: Settings }) {
                 <polygon points="22 2 15 22 10 14 2 9 22 2" />
               </svg>
             )}
-            <span className="hidden sm:inline">
-              {running ? "Stop" : isBusy ? "Queue" : "Send"}
-            </span>
           </button>
         </div>
 
         {/* Keyboard shortcut hint — hidden on mobile (no keyboard). */}
         <div className="hidden sm:flex items-center justify-center gap-3 mt-1 text-[9px] text-muted-foreground/40">
-          <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Enter</kbd> to send</span>
-          <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Shift+Enter</kbd> for newline</span>
+          <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Enter</kbd> to send</span>
+          <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Shift+Enter</kbd> for newline</span>
           {isBusy && (
             <span className="text-amber-400/60">
               {busyMode === "queue" ? "Queue mode active" : "Stop mode active"}
@@ -1062,10 +1097,10 @@ function ModePill({
         onClick={() => !disabled && setOpen((o) => !o)}
         disabled={disabled}
         aria-label={`Execution mode: ${mode}`}
-        className={`touch-target flex items-center gap-1 px-2.5 h-7 rounded-xl text-[11px] transition-colors ${
+        className={`touch-target flex items-center gap-1 px-2.5 h-7 rounded-full text-[11px] transition-colors ${
           open
-            ? "text-accent bg-accent/15"
-            : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+            ? "text-accent bg-accent/15 border border-accent/30"
+            : "text-muted-foreground hover:text-foreground hover:bg-surface2 border border-white/5"
         } disabled:opacity-50 disabled:cursor-not-allowed capitalize`}
         title={`Execution mode: ${mode}`}
       >
@@ -1077,8 +1112,20 @@ function ModePill({
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-full left-0 mb-1 z-50 w-56 rounded-xl border border-border bg-surface shadow-xl p-1.5">
-            <div className="text-[10px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">Execution Mode</div>
+          <div className="absolute bottom-full left-0 mb-1.5 z-50 w-56 rounded-2xl border border-white/5 surface-card shadow-2xl shadow-black/40 p-1.5 animate-popover-in-up">
+            <div className="flex items-center justify-between px-2 py-1 mb-0.5 border-b border-white/5">
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium">Execution Mode</span>
+              <button
+                onClick={() => setOpen(false)}
+                aria-label="Close"
+                className="touch-target w-6 h-6 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-white/5 transition-colors flex items-center justify-center"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
             {(["auto", "build", "plan"] as const).map((m) => (
               <button
                 key={m}
@@ -1148,13 +1195,15 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
           and can invoke the judge panel for critiques.
         </p>
 
-        {/* Suggestions — tap targets ≥44px, rounded-2xl cards. */}
+        {/* Suggestions — tap targets ≥44px, rounded-2xl cards with thin
+            subtle borders (border-white/5 instead of border-border so they
+            don't read as "bricky"). */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-left">
           {suggestions.map((s, i) => (
             <button
               key={i}
               onClick={() => onSend(s.text)}
-              className="flex items-start gap-2.5 text-left text-[12.5px] px-3.5 py-3 min-h-[44px] rounded-2xl border border-border hover:border-accent/60 hover:bg-accent/5 transition-all text-muted-foreground hover:text-foreground leading-relaxed card-hover"
+              className="flex items-start gap-2.5 text-left text-[12.5px] px-3.5 py-3 min-h-[44px] rounded-2xl border border-white/5 bg-surface/30 hover:border-accent/40 hover:bg-accent/5 transition-all text-muted-foreground hover:text-foreground leading-relaxed card-hover"
             >
               <span className="text-base shrink-0">{s.icon}</span>
               <span>{s.text}</span>
@@ -1165,11 +1214,11 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
         {/* Tips — hidden on mobile (no keyboard) */}
         <div className="hidden sm:flex mt-6 items-center justify-center gap-4 text-[10px] text-muted-foreground/50">
           <span className="flex items-center gap-1">
-            <kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Enter</kbd>
+            <kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Enter</kbd>
             to send
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="px-1 py-0.5 rounded bg-surface2 border border-border/50 font-mono">Shift+Enter</kbd>
+            <kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Shift+Enter</kbd>
             newline
           </span>
           <span>·</span>

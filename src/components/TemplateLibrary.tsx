@@ -296,7 +296,7 @@ export function TemplateLibrary({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm"
+            className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-sm"
             onClick={onClose}
             aria-hidden="true"
           />
@@ -310,7 +310,7 @@ export function TemplateLibrary({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 8 }}
             transition={{ duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
-            className="fixed inset-0 z-50 flex items-stretch sm:items-center justify-stretch sm:justify-center p-0 sm:p-6 pointer-events-none"
+            className="fixed inset-0 z-[60] flex items-stretch sm:items-center justify-stretch sm:justify-center p-0 sm:p-6 pointer-events-none"
           >
             <div
               className="pointer-events-auto w-full flex flex-col rounded-none sm:rounded-xl border-0 sm:border border-border bg-surface shadow-2xl shadow-black/30 overflow-hidden sm:max-w-5xl"

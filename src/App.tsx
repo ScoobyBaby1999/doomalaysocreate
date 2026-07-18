@@ -4,9 +4,13 @@ import { AgentChat } from "./screens/AgentChat";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
+// ConsciousScreen + MemoryScreen are no longer in the bottom nav (WORKSPACES-OVERHAUL):
+//  - Minds opens as a per-workspace panel (WorkspaceMindsPanel) when a workspace card is clicked.
+//  - Memory opens as a per-workspace panel (WorkspaceMemoryPanel) from the brain icon on a card.
+// Both source files are still imported here so the bundler keeps them available for the panels.
 import { ConsciousScreen } from "./screens/ConsciousScreen";
-import { DebugScreen } from "./screens/DebugScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
+import { DebugScreen } from "./screens/DebugScreen";
 import { BenchmarksScreen } from "./screens/BenchmarksScreen";
 import { ModelSelectOverlay } from "./components/ModelSelectOverlay";
 import { ProvidersDialog } from "./components/ProvidersDialog";
@@ -17,9 +21,16 @@ import { deriveToken } from "./api/token";
 import type { Settings } from "./api/panel";
 
 // NOTE: "providers" tab removed — ProvidersScreen is now embedded in
-// SettingsScreen's "Providers" tab. Mind/Memory tabs remain for now
-// (the workspaces-overhaul agent is handling their removal).
+// SettingsScreen's "Providers" tab.
+//
+// WORKSPACES-OVERHAUL: "conscious" (Mind) and "memory" tabs removed from
+// the bottom nav. Minds + Memory now live as per-workspace panels opened
+// from workspace cards. The Tab union still includes them so they can be
+// reached programmatically (e.g. WorkspaceMindsPanel wraps ConsciousScreen).
 type Tab = "agentchat" | "conscious" | "workspaces" | "memory" | "benchmarks" | "settings" | "debug";
+
+// Bottom-nav tabs — minimal, icon-focused: Chat · Workspaces · Models · Settings.
+const NAV_TABS: Tab[] = ["agentchat", "workspaces", "benchmarks", "settings"];
 
 export default function App() {
   const [settings, setSettings] = useSettings();
@@ -233,86 +244,56 @@ export default function App() {
         {tab === "agentchat" ? (
           <AgentChat settings={settings} />
         ) : tab === "conscious" ? (
+          // Reachable programmatically (WorkspaceMindsPanel); not in the nav.
           <ConsciousScreen settings={settings} />
         ) : tab === "workspaces" ? (
           <WorkspaceScreen settings={settings} onChange={setSettings} />
         ) : tab === "memory" ? (
+          // Reachable programmatically; not in the nav.
           <MemoryScreen settings={settings} />
         ) : tab === "benchmarks" ? (
           <BenchmarksScreen settings={settings} />
         ) : tab === "debug" ? (
           <DebugScreen settings={settings} />
         ) : (
-          <SettingsScreen settings={settings} onChange={setSettings} />
+          <SettingsScreen settings={settings} onChange={setSettings} onOpenTab={(t) => setTab(t as Tab)} />
         )}
       </main>
 
-      <nav className="flex border-t border-border overflow-x-auto no-scrollbar">
-        {(["agentchat", "conscious", "workspaces", "memory", "benchmarks", "settings", "debug"] as Tab[]).map((t) => (
+      {/* Minimal icon-focused bottom nav: Chat · Workspaces · Models · Settings. */}
+      <nav className="flex border-t border-border">
+        {NAV_TABS.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             aria-label={t}
             aria-current={tab === t ? "page" : undefined}
-            className={`flex-1 min-h-[52px] py-2 text-sm capitalize flex flex-col items-center justify-center gap-0.5 min-w-[55px] transition-colors ${
+            className={`flex-1 min-h-[56px] py-2 flex items-center justify-center transition-colors ${
               tab === t ? "text-accent" : "text-muted hover:text-foreground"
             }`}
           >
             {t === "agentchat" ? (
-              // Chat — icon only (no text label) per spec.
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              /* Chat — icon ONLY (no text label) per WORKSPACES-OVERHAUL Task 5. */
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
               </svg>
-            ) : t === "conscious" ? (
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
-                  <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
-                </svg>
-                <span className="text-[10px]">Mind</span>
-              </>
-            ) : t === "memory" ? (
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 2v20M2 12h20M5 5l14 14M19 5L5 19" opacity="0.4"/>
-                  <circle cx="12" cy="12" r="3"/>
-                </svg>
-                <span className="text-[10px]">Memory</span>
-              </>
-            ) : t === "benchmarks" ? (
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 3v18h18"/>
-                  <path d="M7 14l4-4 4 4 5-5"/>
-                </svg>
-                <span className="text-[10px]">Models</span>
-              </>
             ) : t === "workspaces" ? (
-              // Workspaces — build/creative icon (hammer + blocks).
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-                </svg>
-                <span className="text-[10px]">Workspaces</span>
-              </>
-            ) : t === "debug" ? (
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/>
-                  <path d="M12 16v-4M12 8h.01"/>
-                </svg>
-                <span className="text-[10px]">Debug</span>
-              </>
-            ) : t === "settings" ? (
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="3"/>
-                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                </svg>
-                <span className="text-[10px]">Settings</span>
-              </>
+              /* Workspaces — build/creative hammer icon. */
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+              </svg>
+            ) : t === "benchmarks" ? (
+              /* Models — chart icon. */
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 3v18h18"/>
+                <path d="M7 14l4-4 4 4 5-5"/>
+              </svg>
             ) : (
-              t
+              /* Settings — gear icon. */
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
             )}
           </button>
         ))}

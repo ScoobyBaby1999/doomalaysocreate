@@ -166,10 +166,7 @@ export function ToolIcons({
           </svg>
         </button>
         {active === "effort" && (
-          <Popover onClose={() => setActive(null)} align="left" width="w-60">
-            <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">
-              Effort Level
-            </div>
+          <Popover onClose={() => setActive(null)} align="left" width="w-60" title="Effort Level">
             {(["low", "med", "high", "max"] as const).map((e) => (
               <button
                 key={e}
@@ -211,10 +208,7 @@ export function ToolIcons({
           </svg>
         </button>
         {active === "web" && (
-          <Popover onClose={() => setActive(null)} align="left" width="w-64">
-            <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">
-              Web Search
-            </div>
+          <Popover onClose={() => setActive(null)} align="left" width="w-64" title="Web Search">
             <button
               onClick={() => { toggleWebSearch(); setWebTemplate(""); setActive(null); }}
               className={`touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors ${
@@ -285,10 +279,7 @@ export function ToolIcons({
           </svg>
         </button>
         {active === "deep" && (
-          <Popover onClose={() => setActive(null)} align="left" width="w-64">
-            <div className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1">
-              Deep Research
-            </div>
+          <Popover onClose={() => setActive(null)} align="left" width="w-64" title="Deep Research">
             <button
               onClick={() => { toggleDeepResearch(); setDeepTemplate(""); setActive(null); }}
               className={`touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors ${
@@ -388,12 +379,8 @@ export function ToolIcons({
           </svg>
         </button>
         {active === "judge" && (
-          <Popover onClose={() => setActive(null)} align="left" width="w-72">
-            <div className="flex items-center justify-between px-2 py-1">
-              <span className="text-[9px] uppercase tracking-wide text-muted-foreground/60">Judge Panel</span>
-              <span className="text-[9px] text-muted-foreground/50">Fan-out + merge</span>
-            </div>
-            <div className="text-[9px] uppercase tracking-wide text-muted-foreground/50 px-2 pt-2 pb-1">Count</div>
+          <Popover onClose={() => setActive(null)} align="left" width="w-72" title="Judge Panel">
+            <div className="text-[9px] uppercase tracking-wide text-muted-foreground/50 px-2 pt-1 pb-1">Count</div>
             <div className="flex gap-1 px-2 pb-2">
               {[1, 2, 3, 4, 5, 6].map((n) => (
                 <button
@@ -487,24 +474,45 @@ export function ToolIcons({
 }
 
 /** Shared popover wrapper. Renders a fixed-position overlay for outside-click,
- *  then the panel positioned above the trigger. */
+ *  then the panel positioned above the trigger. Includes a title row + close
+ *  button so the popover feels like a proper little panel, not a floating
+ *  list. Animates in with a subtle scale + fade. */
 function Popover({
   children,
   onClose,
   align,
   width,
+  title,
 }: {
   children: React.ReactNode;
   onClose: () => void;
   align: "left" | "right";
   width: string;
+  title?: string;
 }) {
   return (
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className={`absolute bottom-full ${align === "right" ? "right-0" : "left-0"} mb-1 z-50 ${width} rounded-2xl border border-border bg-surface shadow-xl p-1.5 max-h-[60vh] sm:max-h-[460px] overflow-y-auto`}
+        className={`absolute bottom-full ${align === "right" ? "right-0" : "left-0"} mb-1.5 z-50 ${width} rounded-2xl border border-white/5 surface-card shadow-2xl shadow-black/40 p-1.5 max-h-[60vh] sm:max-h-[460px] overflow-y-auto animate-popover-in-up`}
       >
+        {title && (
+          <div className="flex items-center justify-between px-2 pt-1 pb-1.5 mb-0.5 border-b border-white/5">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium">
+              {title}
+            </span>
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="touch-target -mr-1 -mt-0.5 w-6 h-6 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-white/5 transition-colors flex items-center justify-center"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        )}
         {children}
       </div>
     </>

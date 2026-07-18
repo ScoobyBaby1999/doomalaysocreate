@@ -143,14 +143,14 @@ export function SessionSidebar({
       {/* Backdrop */}
       {open && (
         <div
-          className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm transition-opacity"
+          className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-sm transition-opacity"
           onClick={onClose}
         />
       )}
 
       {/* Sidebar */}
       <div
-        className={`fixed top-0 left-0 z-50 h-full w-[320px] bg-surface border-r border-border shadow-2xl transform transition-transform duration-200 ease-out flex flex-col ${
+        className={`fixed top-0 left-0 z-[70] h-full w-[320px] bg-surface border-r border-border shadow-2xl transform transition-transform duration-200 ease-out flex flex-col ${
           open ? "translate-x-0" : "-translate-x-full"
         }`}
       >

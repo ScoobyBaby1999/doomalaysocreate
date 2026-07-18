@@ -30,12 +30,12 @@ export function PanelDrawer({
     <>
       {open && (
         <div
-          className="fixed inset-0 z-30 bg-black/20"
+          className="fixed inset-0 z-[60] bg-black/30 backdrop-blur-sm"
           onClick={onClose}
         />
       )}
       <div
-        className={`fixed top-0 right-0 z-40 h-full w-[380px] max-w-[85vw] bg-bg border-l border-border shadow-2xl transition-transform duration-300 ${
+        className={`fixed top-0 right-0 z-[70] h-full w-[380px] max-w-[85vw] bg-bg border-l border-border shadow-2xl transition-transform duration-300 ${
           open ? "translate-x-0" : "translate-x-full"
         }`}
       >

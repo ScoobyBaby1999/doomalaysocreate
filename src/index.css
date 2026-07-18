@@ -400,3 +400,53 @@ html, body { overflow-x: hidden; max-width: 100vw; }
  * element marked `.pointer-pass` always receives pointer events (used
  * on the scroll container and message list wrappers). */
 .pointer-pass { pointer-events: auto; }
+
+/* ── Chat polish — popover + message animations ────────────────────
+ * Lightweight scale+fade for popovers (no tailwindcss-animate dep).
+ * Used by ToolIcons popovers + workspace select dropdown. */
+@keyframes popover-in {
+  from { opacity: 0; transform: scale(0.95) translateY(4px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0); }
+}
+@keyframes popover-in-up {
+  from { opacity: 0; transform: scale(0.95) translateY(-4px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0); }
+}
+.animate-popover-in      { animation: popover-in      0.15s ease-out; transform-origin: bottom left; }
+.animate-popover-in-up   { animation: popover-in-up   0.15s ease-out; transform-origin: top left;    }
+
+/* Message appearance — subtle fade + slide-up (replaces .fade-in for
+ * chat bubbles). Slightly softer than the original fade-in. */
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-msg-in { animation: msg-in 0.22s cubic-bezier(0.19, 1, 0.22, 1); }
+
+/* Streaming cursor — smoother, lower-amplitude pulse. */
+@keyframes cursor-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+.animate-cursor-pulse { animation: cursor-pulse 1s ease-in-out infinite; }
+
+/* Focus glow for the chat input — purple ring with low opacity. */
+.chat-input-glow:focus {
+  outline: none;
+  border-color: rgba(168, 85, 247, 0.55);
+  box-shadow:
+    0 0 0 2px rgba(168, 85, 247, 0.18),
+    0 0 24px 0 rgba(168, 85, 247, 0.12);
+}
+
+/* Send button — soft purple glow on hover. */
+.send-btn { box-shadow: 0 4px 14px -2px rgba(168, 85, 247, 0.35); }
+.send-btn:hover { box-shadow: 0 6px 20px -2px rgba(168, 85, 247, 0.5); }
+.send-btn:active { box-shadow: 0 2px 8px  -2px rgba(168, 85, 247, 0.4); }
+
+/* Subtle surface card — used by tool bar wrappers + popovers. */
+.surface-card {
+  background: rgba(26, 16, 36, 0.85);
+  backdrop-filter: blur(12px) saturate(1.2);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+}

@@ -318,6 +318,44 @@ export class GitHubClient {
     return this.req(`/api/workspace/files?workspace_id=${encodeURIComponent(id)}`);
   }
 
+  // -- Repo creation (proxied to GitHub via backend) ----------------------
+  // Backend route: POST /api/github/repos/create — uses the user's stored
+  // OAuth token to call GitHub's POST /user/repos. Body mirrors GitHub's API:
+  //   { name, description?, private?, auto_init?, gitignore_template?, license_template? }
+  createRepo(body: {
+    name: string;
+    description?: string;
+    private?: boolean;
+    auto_init?: boolean;
+    gitignore_template?: string;
+    license_template?: string;
+    /** Owner: user login or org login. Defaults to the authenticated user. */
+    owner?: string;
+  }): Promise<Repo> {
+    return this.req<Repo>("/api/github/repos/create", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Fetch the available .gitignore templates from GitHub (proxied via backend).
+   *  Backend route: GET /api/github/gitignore/templates — returns the raw
+   *  GitHub API response [{ name, source, ... }]. */
+  gitignoreTemplates(): Promise<{ templates: { name: string; source?: string }[] } | { name: string }[]> {
+    return this.req(`/api/github/gitignore/templates`);
+  }
+
+  /** Fetch the available license templates from GitHub (proxied via backend).
+   *  Backend route: GET /api/github/licenses — returns [{ key, name, spdx_id, ... }]. */
+  licenseTemplates(): Promise<{ licenses: { key: string; name: string; spdx_id?: string | null }[] } | { key: string; name: string; spdx_id?: string | null }[]> {
+    return this.req(`/api/github/licenses`);
+  }
+
+  /** List orgs the user can create repos in. Backend route: GET /api/github/orgs. */
+  orgs(): Promise<{ orgs: { login: string; avatar_url?: string }[] }> {
+    return this.req<{ orgs: { login: string; avatar_url?: string }[] }>(`/api/github/orgs`);
+  }
+
   // -- Registry ------------------------------------------------------------
 
   publish(id: string): Promise<RegistryEntry> {

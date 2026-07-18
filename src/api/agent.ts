@@ -347,13 +347,37 @@ export class AgentClient {
 
   // -- memory layer (.pied sanity log) ------------------------------------
 
-  /** Get the memory state for a workspace (goal, plan, tasks, log, blackboard). */
+  /** Get the memory state for a workspace (goal, plan, tasks, log, blackboard).
+   *
+   *  FIX (WORKSPACES-OVERHAUL): the previous version did NOT send the X-JWT
+   *  header, so the backend could not identify the user and replied
+   *  "workspace not found" for every workspace — even ones the user owned.
+   *  We now attach `X-JWT: <githubSessionId>` (same as every other
+   *  workspace-scoped route) so the backend can authorise the lookup. */
   getMemory(workspaceId: string) {
     return this.req<{
       state: { goal?: string; plan?: string; status?: string; pending_tasks?: any[]; completed_tasks?: any[] };
       recent_log: { ts: number; agent: string; kind: string; data: any }[];
       blackboard: { ts: number; agent: string; key: string; value: string }[];
-    }>(`/api/memory?workspace_id=${workspaceId}`);
+    }>(`/api/memory?workspace_id=${encodeURIComponent(workspaceId)}`, {
+      headers: this.jwtHeaders(),
+    });
+  }
+
+  /** Append a memory entry (write capability). Backend route: POST /api/memory.
+   *  Body: { workspace_id, kind, agent, data }. Non-fatal on failure. */
+  postMemory(workspaceId: string, body: {
+    kind: string;
+    agent?: string;
+    data?: Record<string, unknown>;
+    goal?: string;
+    plan?: string;
+  }) {
+    return this.req<{ ok: boolean }>(`/api/memory`, {
+      method: "POST",
+      body: JSON.stringify({ workspace_id: workspaceId, ...body }),
+      headers: this.jwtHeaders(),
+    });
   }
 
   /** Get live model benchmarks from OpenRouter (pricing, context, capabilities). */

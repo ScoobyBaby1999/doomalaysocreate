@@ -40,9 +40,12 @@ function saveTab(t: SettingsTab) {
 export function SettingsScreen({
   settings,
   onChange,
+  onOpenTab,
 }: {
   settings: Settings;
   onChange: (s: Settings) => void;
+  /** Switch the App-level tab (e.g. open the Debug screen). Optional. */
+  onOpenTab?: (tab: string) => void;
 }) {
   const [tab, setTab] = useState<SettingsTab>(loadInitialTab);
 
@@ -132,7 +135,7 @@ export function SettingsScreen({
       {/* Tab content — fills remaining height. */}
       <div className="flex-1 min-h-0 overflow-hidden">
         {tab === "general" ? (
-          <GeneralTab settings={settings} onChange={onChange} />
+          <GeneralTab settings={settings} onChange={onChange} onOpenTab={onOpenTab} />
         ) : tab === "providers" ? (
           <ProvidersScreen settings={settings} embedded />
         ) : (
@@ -176,9 +179,11 @@ function TabButton({
 function GeneralTab({
   settings,
   onChange,
+  onOpenTab,
 }: {
   settings: Settings;
   onChange: (s: Settings) => void;
+  onOpenTab?: (tab: string) => void;
 }) {
   const [draft, setDraft] = useState<Settings>(settings);
   const [status, setStatus] = useState<string>("");
@@ -358,6 +363,23 @@ function GeneralTab({
           </button>
         )}
       </div>
+
+      {/* Developer tools — lets users reach the (now nav-hidden) Debug screen. */}
+      {onOpenTab && (
+        <div className="border-t border-border pt-5 mt-5">
+          <h3 className="text-sm font-medium text-muted-foreground mb-2">Developer</h3>
+          <button
+            onClick={() => onOpenTab("debug")}
+            className="w-full py-1.5 rounded-lg border border-border text-sm hover:border-accent/60 hover:text-accent transition-colors flex items-center justify-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/>
+              <path d="M12 16v-4M12 8h.01"/>
+            </svg>
+            Open Debug Console
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -59,13 +59,13 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   //  Purple bubble + white text — high contrast on the dark surface.
   if (message.role === "user") {
     return (
-      <div className="flex justify-end px-2 sm:px-4 py-1.5 group fade-in">
-        <div className="flex flex-col items-end gap-0.5 max-w-[85%]">
+      <div className="flex justify-end px-2 sm:px-4 py-1.5 group animate-msg-in">
+        <div className="flex flex-col items-end gap-0.5 max-w-[85%] sm:max-w-[70%]">
           <div
-            className={`rounded-3xl rounded-br-lg px-4 py-2.5 text-[15px] sm:text-[14.5px] leading-relaxed whitespace-pre-wrap break-words shadow-sm ${
+            className={`rounded-2xl rounded-br-md px-4 py-2.5 text-[15px] sm:text-[14.5px] leading-relaxed whitespace-pre-wrap break-words shadow-sm sm:shadow-md shadow-purple-900/20 ${
               message.pending
-                ? "bg-accent/20 text-foreground/70 italic"
-                : "bg-purple-600 text-white"
+                ? "bg-accent/15 text-foreground/60 italic border border-accent/30"
+                : "bg-gradient-to-br from-purple-600 to-purple-700 text-white"
             }`}
           >
             {message.content}
@@ -88,13 +88,13 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       message.tokensReasoning != null ||
       typeof message.costUsd === "number";
     return (
-      <div className="flex justify-start px-2 sm:px-4 py-1.5 group">
-        <div className="flex gap-2.5 max-w-[92%] fade-in">
+      <div className="flex justify-start px-2 sm:px-4 py-1.5 group animate-msg-in">
+        <div className="flex gap-2.5 max-w-[90%] sm:max-w-[80%]">
           <Avatar kind="assistant" />
           <div className="flex-1 min-w-0 pt-0.5">
             {/* Status indicator — mid-turn stage hint */}
             {message.isStreaming && message.stage && (
-              <div className="flex items-center gap-1.5 text-[10.5px] text-accent/80 mb-1 fade-in">
+              <div className="flex items-center gap-1.5 text-[10.5px] text-accent/80 mb-1 animate-msg-in">
                 <span className="flex gap-0.5">
                   <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "0ms" }} />
                   <span className="w-1 h-1 rounded-full bg-accent animate-bounce" style={{ animationDelay: "120ms" }} />
@@ -103,11 +103,12 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
                 <span>{stageLabel(message.stage)}</span>
               </div>
             )}
-            {/* Assistant bubble — dark surface, lighter text, rounded-2xl. */}
-            <div className="rounded-3xl rounded-tl-lg px-4 py-2.5 bg-zinc-800/80 text-[15px] sm:text-[14.5px] leading-relaxed text-zinc-100">
+            {/* Assistant bubble — dark surface, lighter text, rounded-2xl with
+                tail on bottom-left (rounded-bl-md) pointing at the avatar. */}
+            <div className="rounded-2xl rounded-bl-md px-4 py-2.5 bg-zinc-800/80 backdrop-blur-sm text-[15px] sm:text-[14.5px] leading-relaxed text-zinc-100 shadow-sm sm:shadow-md shadow-black/20">
               <Markdown text={message.content} />
               {message.isStreaming && (
-                <span className="inline-block w-[6px] h-[15px] ml-0.5 bg-accent animate-pulse align-middle rounded-sm" />
+                <span className="inline-block w-[6px] h-[15px] ml-0.5 bg-accent animate-cursor-pulse align-middle rounded-sm" />
               )}
             </div>
             {/* Sources panel — collapsible list of cited URLs */}
@@ -139,7 +140,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   if (message.role === "thinking") {
     const preview = message.content.slice(0, 80).replace(/\n/g, " ");
     return (
-      <div className="px-2 sm:px-4 py-1 fade-in">
+      <div className="px-2 sm:px-4 py-1 animate-msg-in">
         <Collapsible
           label={
             message.isStreaming
@@ -166,9 +167,9 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       const isDiffContent = !message.isError && isDiff(message.content);
       if (isDiffContent) {
         return (
-          <div className="px-2 sm:px-4 py-1 fade-in">
-            <div className="rounded-2xl border border-border overflow-hidden max-w-2xl">
-              <div className="px-3 py-1.5 text-[11px] text-muted-foreground border-b border-border bg-surface/50 font-medium">
+          <div className="px-2 sm:px-4 py-1 animate-msg-in">
+            <div className="rounded-2xl border border-white/5 overflow-hidden max-w-2xl">
+              <div className="px-3 py-1.5 text-[11px] text-muted-foreground border-b border-white/5 bg-surface/50 font-medium">
                 Diff
               </div>
               <DiffView diff={message.content} />
@@ -177,7 +178,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         );
       }
       return (
-        <div className="px-2 sm:px-4 py-1 fade-in">
+        <div className="px-2 sm:px-4 py-1 animate-msg-in">
           <Collapsible
             label={message.isError ? "Result (error)" : "Result"}
             kind={message.isError ? "error" : "result"}

@@ -44,13 +44,13 @@ export function QueueMonitor({
       {/* Backdrop */}
       {open && (
         <div
-          className="fixed inset-0 z-30 bg-black/30"
+          className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm"
           onClick={onClose}
         />
       )}
       {/* Panel — slides in from the right. */}
       <div
-        className={`fixed top-0 right-0 z-40 h-full w-[360px] max-w-[88vw] bg-bg border-l border-border shadow-2xl transition-transform duration-300 flex flex-col ${
+        className={`fixed top-0 right-0 z-[70] h-full w-[360px] max-w-[88vw] bg-bg border-l border-border shadow-2xl transition-transform duration-300 flex flex-col ${
           open ? "translate-x-0" : "translate-x-full"
         }`}
       >
