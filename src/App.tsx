@@ -8,7 +8,6 @@ import { ConsciousScreen } from "./screens/ConsciousScreen";
 import { DebugScreen } from "./screens/DebugScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
 import { BenchmarksScreen } from "./screens/BenchmarksScreen";
-import { ProvidersScreen } from "./screens/ProvidersScreen";
 import { ModelSelectOverlay } from "./components/ModelSelectOverlay";
 import { ProvidersDialog } from "./components/ProvidersDialog";
 import { useModelStore } from "./lib/model-store";
@@ -17,7 +16,10 @@ import { getJWTSub } from "./lib/jwt";
 import { deriveToken } from "./api/token";
 import type { Settings } from "./api/panel";
 
-type Tab = "agentchat" | "conscious" | "workspaces" | "memory" | "benchmarks" | "providers" | "settings" | "debug";
+// NOTE: "providers" tab removed — ProvidersScreen is now embedded in
+// SettingsScreen's "Providers" tab. Mind/Memory tabs remain for now
+// (the workspaces-overhaul agent is handling their removal).
+type Tab = "agentchat" | "conscious" | "workspaces" | "memory" | "benchmarks" | "settings" | "debug";
 
 export default function App() {
   const [settings, setSettings] = useSettings();
@@ -238,8 +240,6 @@ export default function App() {
           <MemoryScreen settings={settings} />
         ) : tab === "benchmarks" ? (
           <BenchmarksScreen settings={settings} />
-        ) : tab === "providers" ? (
-          <ProvidersScreen settings={settings} />
         ) : tab === "debug" ? (
           <DebugScreen settings={settings} />
         ) : (
@@ -248,7 +248,7 @@ export default function App() {
       </main>
 
       <nav className="flex border-t border-border overflow-x-auto no-scrollbar">
-        {(["agentchat", "conscious", "workspaces", "memory", "benchmarks", "providers", "settings", "debug"] as Tab[]).map((t) => (
+        {(["agentchat", "conscious", "workspaces", "memory", "benchmarks", "settings", "debug"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -259,12 +259,10 @@ export default function App() {
             }`}
           >
             {t === "agentchat" ? (
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                </svg>
-                <span className="text-[10px]">Chat</span>
-              </>
+              // Chat — icon only (no text label) per spec.
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+              </svg>
             ) : t === "conscious" ? (
               <>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -289,13 +287,13 @@ export default function App() {
                 </svg>
                 <span className="text-[10px]">Models</span>
               </>
-            ) : t === "providers" ? (
+            ) : t === "workspaces" ? (
+              // Workspaces — build/creative icon (hammer + blocks).
               <>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="2" y="6" width="20" height="12" rx="2"/>
-                  <path d="M6 12h.01M10 12h.01M14 12h.01M18 12h.01"/>
+                  <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
                 </svg>
-                <span className="text-[10px]">Keys</span>
+                <span className="text-[10px]">Workspaces</span>
               </>
             ) : t === "debug" ? (
               <>

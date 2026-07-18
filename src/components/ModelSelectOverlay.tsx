@@ -2,6 +2,7 @@ import { useEffect, useMemo, useCallback, useRef, useState, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useModelStore, type ProviderGroup, type ProviderModel, type ModelAttributes, type CondensedHost, type CondensedModel } from "../lib/model-store";
 
+// ── Icons ────────────────────────────────────────────────────────────────
 function IcoX() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -37,7 +38,15 @@ function IcoRefresh({ spinning }: { spinning?: boolean }) {
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={spinning ? "animate-spin" : ""}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
   );
 }
+// Drag handle — 6 dots in 2 cols × 3 rows (used for both provider boxes
+// and condensed-row provider-rank rows).
+function IcoDrag() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg>
+  );
+}
 
+// ── Format helpers ──────────────────────────────────────────────────────
 function fmtCtx(k: number): string {
   if (!k) return "\u2014";
   if (k >= 1_000_000) return `${(k / 1_000_000).toFixed(k % 1_000_000 === 0 ? 0 : 1)}M`;
@@ -84,6 +93,7 @@ function capColor(cap: string): string | undefined {
   return CAP_COLORS[key] ?? undefined;
 }
 
+// ── Filter / sort helpers ───────────────────────────────────────────────
 function modelMatchesFilters(model: ProviderModel, activeFilters: string[], contextMin: number): boolean {
   const caps = model.attributes?.capabilities ?? [];
   const bm = model.attributes?.benchmarks;
@@ -164,8 +174,8 @@ function defaultSort(models: ProviderModel[]): ProviderModel[] {
 }
 
 const FILTER_PILLS = [
-  { id: "reasoning", label: "Reasoning", color: "#f97316" },
-  { id: "intelligence", label: "Intelligence", color: "#a855f7" },
+  { id: "reasoning", label: "Reason", color: "#f97316" },
+  { id: "intelligence", label: "Smart", color: "#a855f7" },
   { id: "code", label: "Code", color: "#3b82f6" },
   { id: "agent", label: "Agent", color: "#14b8a6" },
   { id: "tools", label: "Tools", color: "#8b5cf6" },
@@ -231,6 +241,35 @@ function attributeSegments(a: ModelAttributes | undefined): AttrSegment[] | null
   return segs;
 }
 
+// ── Persistence for provider box order + expanded state ─────────────────
+const PREFIX = "doomalaysocreate.model-select";
+const PROVIDER_BOX_ORDER_KEY = `${PREFIX}.providerBoxOrder`;
+const PROVIDER_BOX_EXPANDED_KEY = `${PREFIX}.providerBoxExpanded`;
+
+function loadProviderBoxOrder(): string[] | null {
+  try {
+    const raw = localStorage.getItem(PROVIDER_BOX_ORDER_KEY);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) return arr as string[];
+  } catch { /* ignore */ }
+  return null;
+}
+function saveProviderBoxOrder(order: string[]) {
+  try { localStorage.setItem(PROVIDER_BOX_ORDER_KEY, JSON.stringify(order)); } catch { /* ignore */ }
+}
+function loadProviderBoxExpanded(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(PROVIDER_BOX_EXPANDED_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw) as Record<string, boolean>;
+  } catch { return {}; }
+}
+function saveProviderBoxExpanded(map: Record<string, boolean>) {
+  try { localStorage.setItem(PROVIDER_BOX_EXPANDED_KEY, JSON.stringify(map)); } catch { /* ignore */ }
+}
+
+// ── ModelRow (used inside ProviderBox) — condensed single-line format ────
 const ModelRow = memo(function ModelRow({
   model,
   isSelected,
@@ -252,39 +291,36 @@ const ModelRow = memo(function ModelRow({
       data-selected={isSelected ? "true" : undefined}
       aria-pressed={isSelected}
       className={`
-        cv-auto flex flex-col w-full text-left rounded-xl px-2.5 py-2 min-h-[44px] transition-colors duration-100 cursor-pointer touch-target
+        cv-auto flex flex-col w-full text-left rounded-lg px-2 py-1.5 min-h-[32px] max-h-[64px] overflow-hidden transition-colors duration-100 cursor-pointer touch-target
         ${isSelected ? "bg-accent/20 ring-1 ring-accent/40" : dimmed ? "" : "hover:bg-muted/40"}
         ${dimmed && !isSelected ? "opacity-35" : ""}
       `}
     >
-      <span className="flex items-center w-full">
+      {/* Single-line row: [check] [model name] [context] */}
+      <span className="flex items-center w-full gap-1.5">
         <span
-          className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground bg-accent" : "text-transparent"}`}
+          className="flex-shrink-0 flex items-center justify-center rounded-full"
           style={{
-            width: 16,
-            height: 16,
-            fontSize: 0,
+            width: 14, height: 14, fontSize: 0,
             border: isSelected ? "none" : "1.5px solid var(--border)",
             backgroundColor: isSelected ? "#a855f7" : "transparent",
           }}
         >
           {isSelected && <IcoCheck />}
         </span>
-
         <span
-          className={`text-[12px] leading-tight truncate flex-1 ${isSelected ? "text-white font-semibold" : "text-foreground"}`}
+          className={`text-[12px] leading-tight truncate flex-1 font-medium ${isSelected ? "text-white" : "text-foreground"}`}
           title={model.id}
         >
           {model.displayName}
         </span>
-
-        <span className="flex-shrink-0 ml-1.5 text-[10px] text-muted-foreground tabular-nums">
+        <span className="flex-shrink-0 text-[10px] text-muted-foreground tabular-nums">
           {fmtCtx(model.contextLength)}
         </span>
       </span>
 
       {hasSub && (
-        <div className="flex flex-wrap gap-x-1 gap-y-px mt-1 pl-6 pr-1">
+        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-5 pr-1">
           {segs && segs.map((s, i) =>
             s.text === " \u00b7 " ? null : (
               <span
@@ -309,6 +345,7 @@ const ModelRow = memo(function ModelRow({
   );
 });
 
+// ── ProviderBox — single card per provider with collapse + DnD reorder ───
 function ProviderBox({
   provider,
   selectedModelId,
@@ -318,6 +355,18 @@ function ProviderBox({
   searchQuery,
   activeFilters,
   contextMin,
+  expanded,
+  onToggleExpand,
+  // Drag-and-drop reorder props (HTML5 DnD for desktop; arrow buttons
+  // provide a touch-friendly fallback).
+  dragHandleProps,
+  onMoveUp,
+  onMoveDown,
+  isFirst,
+  isLast,
+  isDragTarget,
+  onDragOverBox,
+  onDropOnBox,
 }: {
   provider: ProviderGroup;
   selectedModelId: string | null;
@@ -327,9 +376,22 @@ function ProviderBox({
   searchQuery: string;
   activeFilters: string[];
   contextMin: number;
+  expanded: boolean;
+  onToggleExpand: () => void;
+  dragHandleProps?: {
+    draggable: boolean;
+    onDragStart: (e: React.DragEvent) => void;
+    onDragEnd: (e: React.DragEvent) => void;
+  };
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  isFirst: boolean;
+  isLast: boolean;
+  isDragTarget: boolean;
+  onDragOverBox: (e: React.DragEvent) => void;
+  onDropOnBox: (e: React.DragEvent) => void;
 }) {
   const [showDimmed, setShowDimmed] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
 
   const { matched, dimmed } = useMemo(() => {
     const allModels = provider.models;
@@ -368,25 +430,42 @@ function ProviderBox({
 
   return (
     <div
-      className="flex flex-col rounded-2xl border overflow-hidden"
-      style={{ borderColor: `${provider.color}30` }}
+      // Drop target — the entire box accepts drops from sibling boxes.
+      onDragOver={onDragOverBox}
+      onDrop={onDropOnBox}
+      className={`flex flex-col rounded-xl border overflow-hidden transition-colors ${
+        isDragTarget ? "border-accent ring-2 ring-accent/40" : ""
+      }`}
+      style={{ borderColor: isDragTarget ? undefined : `${provider.color}30` }}
     >
-      {/* Provider header — tap to collapse/expand the model list.
-          The settings icon is a SIBLING button (not nested) so we don't
-          violate the "no interactive content inside a <button>" rule. */}
+      {/* Header — drag handle (left) + tap-to-expand (middle) + gear + chevron. */}
       <div
-        className="flex items-center gap-2 px-3 shrink-0 min-h-[44px]"
-        style={{ backgroundColor: `${provider.color}0d`, borderBottom: collapsed ? "none" : `1px solid ${provider.color}1f` }}
+        className="flex items-center gap-1 px-2 shrink-0 min-h-[44px]"
+        style={{ backgroundColor: `${provider.color}0d`, borderBottom: expanded ? `1px solid ${provider.color}1f` : "none" }}
       >
+        {/* Drag handle — only visible on hover; HTML5 DnD works on desktop.
+            Touch users use the arrow buttons (rendered further right) as a
+            fallback per the spec. */}
         <button
-          onClick={() => setCollapsed((c) => !c)}
-          className="touch-target flex items-center gap-2 flex-1 min-w-0 text-left rounded-xl"
-          aria-expanded={!collapsed}
-          aria-label={`${collapsed ? "Expand" : "Collapse"} ${provider.displayName}`}
+          {...(dragHandleProps || {})}
+          onClick={(e) => e.stopPropagation()}
+          className="touch-target inline-flex items-center justify-center size-7 rounded-lg text-muted-foreground/40 hover:text-muted-foreground hover:bg-surface2/40 transition-colors shrink-0 cursor-grab active:cursor-grabbing"
+          aria-label={`Drag to reorder ${provider.displayName}`}
+          title="Drag to reorder"
+        >
+          <IcoDrag />
+        </button>
+
+        {/* Tap-to-expand main area */}
+        <button
+          onClick={onToggleExpand}
+          className="touch-target flex items-center gap-2 flex-1 min-w-0 text-left rounded-lg"
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${provider.displayName}`}
         >
           <svg
             width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
-            className={`text-muted-foreground transition-transform duration-150 shrink-0 ${collapsed ? "" : "rotate-90"}`}
+            className={`text-muted-foreground transition-transform duration-150 shrink-0 ${expanded ? "rotate-90" : ""}`}
           >
             <polyline points="9 18 15 12 9 6" />
           </svg>
@@ -399,9 +478,32 @@ function ProviderBox({
           />
           <span className="text-[11px] text-muted-foreground leading-none tabular-nums shrink-0">{provider.models.length}</span>
         </button>
+
+        {/* Touch-friendly move buttons (fallback for DnD on touch). */}
+        <div className="flex gap-px shrink-0">
+          <button
+            onClick={(e) => { e.stopPropagation(); onMoveUp(); }}
+            disabled={isFirst}
+            className="touch-target size-7 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
+            title="Move provider up"
+            aria-label="Move provider up"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onMoveDown(); }}
+            disabled={isLast}
+            className="touch-target size-7 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
+            title="Move provider down"
+            aria-label="Move provider down"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+        </div>
+
         <button
           onClick={openSettings}
-          className="touch-target inline-flex items-center justify-center size-8 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+          className="touch-target inline-flex items-center justify-center size-7 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
           aria-label={`Manage ${provider.displayName} privacy & keys`}
           title={`${provider.manageLabel} \u2197`}
         >
@@ -410,10 +512,10 @@ function ProviderBox({
       </div>
 
       {/* Privacy notice — still tappable to open settings. */}
-      {!collapsed && (
+      {expanded && (
         <button
           onClick={openSettings}
-          className="flex items-center gap-1.5 px-3 shrink-0 text-left hover:brightness-95 dark:hover:brightness-110 transition-all min-h-[32px]"
+          className="flex items-center gap-1.5 px-3 shrink-0 text-left hover:brightness-95 dark:hover:brightness-110 transition-all min-h-[28px]"
           style={{
             borderBottom: `1px solid ${confidenceDotColor(provider.privacy.confidence)}25`,
             backgroundColor: `${confidenceDotColor(provider.privacy.confidence)}0d`,
@@ -423,52 +525,74 @@ function ProviderBox({
           <span className="shrink-0" style={{ color: confidenceDotColor(provider.privacy.confidence) }}>
             <IcoShield />
           </span>
-          <span className="text-[10px] leading-none text-muted-foreground truncate flex-1 py-2">
+          <span className="text-[10px] leading-none text-muted-foreground truncate flex-1 py-1.5">
             {provider.privacy.notice}
           </span>
         </button>
       )}
 
-      {!collapsed && (
-        <div className="flex flex-col gap-px p-1.5 max-h-[50vh] overflow-y-auto">
+      {/* Model list — only rendered when expanded. Properly spaced rows. */}
+      {expanded && (
+        <div className="flex flex-col gap-1 p-1.5 max-h-[50vh] overflow-y-auto">
           {empty ? (
-            <div className="flex items-center justify-center h-12 text-[11px] text-muted-foreground/50">
+            <div className="flex items-center justify-center h-10 text-[11px] text-muted-foreground/50">
               no models synced
             </div>
           ) : (
             <>
-{matched.map((m) => (
-                <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id && (!condensedView ? selectedProviderName === provider.name : true)} onSelect={() => onSelect(m, provider.name)} />
+              {matched.map((m) => (
+                <ModelRow
+                  key={m.id}
+                  model={m}
+                  isSelected={selectedModelId === m.id && (!condensedView ? selectedProviderName === provider.name : true)}
+                  onSelect={() => onSelect(m, provider.name)}
+                />
               ))}
               {hasDimmed && (
                 <>
                   <button
                     onClick={() => setShowDimmed((v) => !v)}
-                    className="touch-target flex items-center gap-1.5 px-2 py-1.5 mt-0.5 border-t border-border/30 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors cursor-pointer select-none min-h-[36px] w-full text-left"
+                    className="touch-target flex items-center gap-1.5 px-2 py-1 mt-0.5 border-t border-border/30 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors cursor-pointer select-none min-h-[28px] w-full text-left"
                   >
                     <span
                       className="text-[10px] leading-none transition-transform duration-150"
                       style={{ transform: showDimmed ? "rotate(90deg)" : "rotate(0deg)" }}
                     >
-                    {"\u25b8"}
-                  </span>
-                  <span className="text-[9px] leading-none">
-                    {showDimmed ? `Hide ${dimmed.length} dimmed` : `Show ${dimmed.length} dimmed`}
-                  </span>
-                </button>
-                {showDimmed && dimmed.map((m) => (
-                  <ModelRow key={m.id} model={m} isSelected={selectedModelId === m.id && (!condensedView ? selectedProviderName === provider.name : true)} onSelect={() => onSelect(m, provider.name)} dimmed />
-                ))}
-              </>
-            )}
-          </>
-        )}
-      </div>
+                      {"\u25b8"}
+                    </span>
+                    <span className="text-[9px] leading-none">
+                      {showDimmed ? `Hide ${dimmed.length} dimmed` : `Show ${dimmed.length} dimmed`}
+                    </span>
+                  </button>
+                  {showDimmed && dimmed.map((m) => (
+                    <ModelRow
+                      key={m.id}
+                      model={m}
+                      isSelected={selectedModelId === m.id && (!condensedView ? selectedProviderName === provider.name : true)}
+                      onSelect={() => onSelect(m, provider.name)}
+                      dimmed
+                    />
+                  ))}
+                </>
+              )}
+            </>
+          )}
+        </div>
       )}
     </div>
   );
 }
 
+// ── CondensedModelRow — single-line: name | dots | context, expandable ──
+//
+// Collapsed: shows the model name (left, bold), then a horizontal row of
+// tiny provider color dots (one per host, ordered by priority), then the
+// model context (right). Tapping the dots area expands the row.
+//
+// Expanded: each provider host is its own row with rank # + provider NAME +
+// model id + context, plus a drag handle (HTML5 DnD) and arrow buttons
+// (touch fallback). The drag handle reorders the host priority permanently
+// (persisted via model-store.setProviderPriority).
 const CondensedModelRow = memo(function CondensedModelRow({
   model,
   isSelected,
@@ -487,6 +611,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
   const segs = model.attributes ? attributeSegments(model.attributes) : null;
   const note = model.attributes?.note;
   const hasSub = !!(segs || note);
+
   const [localOrder, setLocalOrder] = useState<CondensedHost[]>(() =>
     useModelStore.getState().getOrderedHosts(model.logical, model.hosts)
   );
@@ -496,82 +621,183 @@ const CondensedModelRow = memo(function CondensedModelRow({
     setLocalOrder(current);
   }, [model.logical, model.hosts]);
 
+  // Persist the new order to the model store so it survives reloads.
+  function commitOrder(next: CondensedHost[]) {
+    setLocalOrder(next);
+    useModelStore.getState().setProviderPriority(
+      model.logical,
+      next.map((h) => h.provider),
+    );
+  }
+
   function moveUp(idx: number) {
     if (idx <= 0) return;
     const next = [...localOrder];
     [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
-    setLocalOrder(next);
-    useModelStore.getState().setProviderPriority(model.logical, next.map((h) => h.provider));
+    commitOrder(next);
   }
-
   function moveDown(idx: number) {
     if (idx >= localOrder.length - 1) return;
     const next = [...localOrder];
     [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
-    setLocalOrder(next);
-    useModelStore.getState().setProviderPriority(model.logical, next.map((h) => h.provider));
+    commitOrder(next);
   }
 
-  const topHost = localOrder[0];
+  // HTML5 drag-and-drop for host reordering (desktop). Touch uses arrows.
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [dropIdx, setDropIdx] = useState<number | null>(null);
+
+  function onHostDragStart(idx: number, e: React.DragEvent) {
+    setDragIdx(idx);
+    e.dataTransfer.effectAllowed = "move";
+    // Some browsers require data to be set for drag to fire.
+    e.dataTransfer.setData("text/plain", String(idx));
+  }
+  function onHostDragOver(idx: number, e: React.DragEvent) {
+    if (dragIdx === null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dropIdx !== idx) setDropIdx(idx);
+  }
+  function onHostDrop(idx: number, e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (dragIdx === null || dragIdx === idx) {
+      setDragIdx(null); setDropIdx(null);
+      return;
+    }
+    const next = [...localOrder];
+    const [moved] = next.splice(dragIdx, 1);
+    next.splice(idx, 0, moved);
+    commitOrder(next);
+    setDragIdx(null); setDropIdx(null);
+  }
+  function onHostDragEnd() { setDragIdx(null); setDropIdx(null); }
 
   return (
     <div
-      className="cv-auto flex flex-col w-full text-left rounded-xl px-2.5 py-2 min-h-[44px] transition-colors duration-100"
+      className="cv-auto flex flex-col w-full text-left rounded-lg px-2 py-1.5 min-h-[36px] max-h-[120px] overflow-hidden transition-colors duration-100"
       data-selected={isSelected ? "true" : undefined}
     >
-      <span className="flex items-center w-full">
-        <button onClick={onSelect} data-selected={isSelected ? "true" : undefined} aria-pressed={isSelected} className="touch-target flex items-center flex-1 min-w-0 cursor-pointer text-left rounded-xl">
+      {/* ── Single-line row: [check] [name] [dots] [context] ──────────── */}
+      <span className="flex items-center w-full gap-1.5">
+        <button
+          onClick={onSelect}
+          data-selected={isSelected ? "true" : undefined}
+          aria-pressed={isSelected}
+          className="touch-target flex items-center flex-1 min-w-0 cursor-pointer text-left rounded-lg"
+        >
           <span
-            className={`flex-shrink-0 flex items-center justify-center rounded-full mr-2 ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
-            style={{ width: 16, height: 16, fontSize: 0, border: isSelected ? "none" : "1.5px solid var(--border)", backgroundColor: isSelected ? "#a855f7" : "transparent" }}
+            className={`flex-shrink-0 flex items-center justify-center rounded-full ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
+            style={{ width: 14, height: 14, fontSize: 0, border: isSelected ? "none" : "1.5px solid var(--border)", backgroundColor: isSelected ? "#a855f7" : "transparent" }}
           >
             {isSelected && <IcoCheck />}
           </span>
           <span
-            className={`text-[12px] leading-tight truncate flex-1 ${isSelected ? "text-white font-semibold" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
+            className={`text-[12px] leading-tight truncate flex-1 font-medium ${isSelected ? "text-white" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
             title={model.logical}
           >
             {model.displayName}
           </span>
-          <span className="flex-shrink-0 mr-2 text-[10px] text-muted-foreground tabular-nums">
-            {fmtCtx(model.contextLength)}
-          </span>
         </button>
+
+        {/* Provider rank dropdown — collapsed shows tiny color dots. */}
+        {localOrder.length > 1 && !expanded && (
+          <button
+            onClick={onToggleExpand}
+            className="touch-target inline-flex items-center gap-0.5 px-1.5 h-6 rounded-full border border-border/60 hover:bg-surface2/60 transition-colors shrink-0"
+            title="Tap to expand provider rank dropdown"
+            aria-label="Expand provider rank dropdown"
+            aria-expanded={expanded}
+          >
+            {localOrder.slice(0, 5).map((h, i) => (
+              <span
+                key={`${h.provider}-${i}`}
+                className="inline-block rounded-full"
+                style={{
+                  width: 6, height: 6,
+                  backgroundColor: h.color,
+                  opacity: h.hasApiKey ? 1 : 0.35,
+                }}
+              />
+            ))}
+            {localOrder.length > 5 && (
+              <span className="text-[8px] text-muted-foreground ml-0.5">+{localOrder.length - 5}</span>
+            )}
+            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" className="text-muted-foreground/60 ml-0.5">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+        )}
+        {localOrder.length === 1 && !expanded && (
+          <span className="inline-flex items-center gap-1 px-1.5 h-6 shrink-0">
+            <span
+              className="inline-block rounded-full"
+              style={{
+                width: 6, height: 6,
+                backgroundColor: localOrder[0].color,
+                opacity: localOrder[0].hasApiKey ? 1 : 0.35,
+              }}
+            />
+          </span>
+        )}
+
+        {/* Model context — right-aligned. */}
+        <span className="flex-shrink-0 text-[10px] text-muted-foreground tabular-nums ml-1">
+          {fmtCtx(model.contextLength)}
+        </span>
       </span>
 
-      {topHost && !expanded && (
-        <button onClick={onToggleExpand}
-          className="touch-target flex items-center gap-1.5 w-full pl-7 pr-1 py-1 min-h-[36px] rounded-xl text-[11px] transition-colors hover:bg-muted/30 cursor-pointer text-left"
-          title={localOrder.length > 1 ? "Tap to show all provider options" : "Only one provider available"}
-        >
-          <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: topHost.color }} />
-          <span className="truncate text-foreground/80 min-w-0">{topHost.modelId}</span>
-          <span className="tabular-nums text-muted-foreground/60 shrink-0">{fmtCtx(topHost.contextLength)}</span>
-          <span className="text-muted-foreground/50 shrink-0 hidden sm:inline">{topHost.providerDisplayName}</span>
-          {localOrder.length > 1 && <span className="ml-auto text-muted-foreground/40 text-[9px] shrink-0">{"\u25be"}</span>}
-        </button>
-      )}
-
+      {/* ── Expanded: provider rank rows (drag-to-reorder + arrows) ───── */}
       {expanded && (
-        <div className="flex flex-col gap-0.5 pl-7 pr-1 mt-0.5">
+        <div className="flex flex-col gap-0.5 pl-5 pr-1 mt-1">
           {localOrder.map((host, i) => (
-            <div key={`${host.provider}-${host.modelId}`}
-              className="flex items-center gap-1.5 py-1 min-h-[36px] rounded-xl text-[11px]"
-              style={{ opacity: host.hasApiKey ? 1 : 0.4 }}
+            <div
+              key={`${host.provider}-${host.modelId}`}
+              draggable
+              onDragStart={(e) => onHostDragStart(i, e)}
+              onDragEnd={onHostDragEnd}
+              onDragOver={(e) => onHostDragOver(i, e)}
+              onDrop={(e) => onHostDrop(i, e)}
+              className={`flex items-center gap-1.5 py-1 px-1 min-h-[32px] max-h-[40px] rounded-md text-[11px] transition-colors cursor-grab active:cursor-grabbing ${
+                dropIdx === i && dragIdx !== null && dragIdx !== i
+                  ? "bg-accent/15 ring-1 ring-accent/40"
+                  : dragIdx === i
+                  ? "opacity-40"
+                  : "hover:bg-surface2/40"
+              }`}
+              style={{ opacity: dragIdx === i ? 0.4 : (host.hasApiKey ? 1 : 0.5) }}
             >
-              <span className="inline-flex items-center justify-center size-4 rounded-full text-[8px] font-bold shrink-0"
-                style={{ backgroundColor: `${host.color}30`, color: host.color }}>
+              {/* Drag handle (desktop). Touch uses arrow buttons. */}
+              <span className="text-muted-foreground/40 shrink-0">
+                <IcoDrag />
+              </span>
+              {/* Rank number + provider NAME (per spec) */}
+              <span
+                className="inline-flex items-center justify-center size-4 rounded-full text-[8px] font-bold shrink-0"
+                style={{ backgroundColor: `${host.color}30`, color: host.color }}
+              >
                 {i + 1}
               </span>
-              <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: host.color }} />
-              <span className="truncate text-foreground/80 flex-1 min-w-0">{host.modelId}</span>
-              <span className="tabular-nums text-muted-foreground/60 shrink-0 mr-1">{fmtCtx(host.contextLength)}</span>
-              <span className="text-muted-foreground/50 shrink-0 hidden sm:inline">{host.providerDisplayName}</span>
-              <div className="flex gap-px ml-1 shrink-0">
+              <span
+                className="inline-block w-2 h-2 rounded-full shrink-0"
+                style={{ backgroundColor: host.color }}
+              />
+              <span className="truncate text-foreground/90 flex-1 min-w-0 font-medium">
+                {host.providerDisplayName}
+              </span>
+              <span className="truncate text-muted-foreground/70 text-[10px] min-w-0 max-w-[35%]">
+                {host.modelId}
+              </span>
+              <span className="tabular-nums text-muted-foreground/60 shrink-0 text-[10px]">
+                {fmtCtx(host.contextLength)}
+              </span>
+              {/* Arrow buttons (touch fallback). */}
+              <div className="flex gap-px shrink-0">
                 <button
                   onClick={(e) => { e.stopPropagation(); moveUp(i); }}
                   disabled={i === 0}
-                  className="touch-target size-6 flex items-center justify-center rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+                  className="touch-target size-6 flex items-center justify-center rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20 disabled:cursor-default"
                   title="Higher priority"
                   aria-label="Move provider up"
                 >
@@ -580,7 +806,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
                 <button
                   onClick={(e) => { e.stopPropagation(); moveDown(i); }}
                   disabled={i === localOrder.length - 1}
-                  className="touch-target size-6 flex items-center justify-center rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-20 disabled:cursor-default"
+                  className="touch-target size-6 flex items-center justify-center rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20 disabled:cursor-default"
                   title="Lower priority"
                   aria-label="Move provider down"
                 >
@@ -589,11 +815,17 @@ const CondensedModelRow = memo(function CondensedModelRow({
               </div>
             </div>
           ))}
+          <button
+            onClick={onToggleExpand}
+            className="touch-target text-[9px] text-muted-foreground/60 hover:text-muted-foreground py-1 text-left"
+          >
+            Collapse
+          </button>
         </div>
       )}
 
-      {hasSub && (
-        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-7 pr-1">
+      {hasSub && !expanded && (
+        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-5 pr-1">
           {segs && segs.map((s, i) =>
             s.text === " \u00b7 " ? null : (
               <span key={i} className="text-[9px] leading-none px-1 py-px rounded-sm"
@@ -613,6 +845,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
   );
 });
 
+// ── CondensedList ────────────────────────────────────────────────────────
 function condensedModelMatchesFilters(model: CondensedModel, activeFilters: string[], contextMin: number): boolean {
   if (contextMin > 0 && model.contextLength < contextMin) return false;
   if (activeFilters.length === 0) return true;
@@ -704,7 +937,7 @@ function CondensedList({
   const unavailable = useMemo(() => visible.filter((m) => !m.hosts.some((h) => h.hasApiKey)), [visible]);
 
   return (
-    <div className="flex flex-col gap-px p-1">
+    <div className="flex flex-col gap-0.5 p-1">
       {visible.length === 0 && hiddenByFilter.length === 0 && (
         <div className="flex items-center justify-center h-16 text-[10px] text-muted-foreground/50">
           no models match
@@ -786,6 +1019,7 @@ function CondensedList({
   );
 }
 
+// ── Main overlay ─────────────────────────────────────────────────────────
 export function ModelSelectOverlay() {
   const {
     providers,
@@ -827,10 +1061,89 @@ export function ModelSelectOverlay() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [expandedLogical, setExpandedLogical] = useState<string | null>(null);
 
-  // Debounce the search input (200ms) so typing fast doesn't re-filter the
-  // whole model list on every keystroke. `searchQuery` (the store value) is
-  // what the <input> binds to; `debouncedQuery` is what actually drives the
-  // filtering memos + ProviderBox/CondensedList props.
+  // ── Search bar collapse/expand (per spec — tap icon to toggle). ──────
+  const [searchExpanded, setSearchExpanded] = useState<boolean>(false);
+  useEffect(() => {
+    if (overlayOpen && searchExpanded) {
+      // Focus the input when expanded.
+      const t = setTimeout(() => inputRef.current?.focus(), 50);
+      return () => clearTimeout(t);
+    }
+  }, [overlayOpen, searchExpanded]);
+
+  // ── Persisted per-provider expanded state (providers tab). ──────────
+  const [providerBoxExpanded, setProviderBoxExpanded] = useState<Record<string, boolean>>(() =>
+    loadProviderBoxExpanded(),
+  );
+  function toggleProviderBox(name: string) {
+    setProviderBoxExpanded((m) => {
+      const next = { ...m, [name]: !m[name] };
+      saveProviderBoxExpanded(next);
+      return next;
+    });
+  }
+
+  // ── Persisted provider box order (drag-and-drop reorder). ───────────
+  const [providerBoxOrder, setProviderBoxOrder] = useState<string[] | null>(() =>
+    loadProviderBoxOrder(),
+  );
+  const [draggingProvider, setDraggingProvider] = useState<string | null>(null);
+  const [dropTargetProvider, setDropTargetProvider] = useState<string | null>(null);
+
+  function commitProviderBoxOrder(next: string[]) {
+    setProviderBoxOrder(next);
+    saveProviderBoxOrder(next);
+  }
+  function moveProviderUp(name: string) {
+    const order = effectiveProviderOrder;
+    const idx = order.indexOf(name);
+    if (idx <= 0) return;
+    const next = [...order];
+    [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+    commitProviderBoxOrder(next);
+  }
+  function moveProviderDown(name: string) {
+    const order = effectiveProviderOrder;
+    const idx = order.indexOf(name);
+    if (idx < 0 || idx >= order.length - 1) return;
+    const next = [...order];
+    [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+    commitProviderBoxOrder(next);
+  }
+  function onProviderDragStart(name: string, e: React.DragEvent) {
+    setDraggingProvider(name);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", name);
+  }
+  function onProviderDragEnd() {
+    setDraggingProvider(null);
+    setDropTargetProvider(null);
+  }
+  function onProviderDragOver(name: string, e: React.DragEvent) {
+    if (!draggingProvider) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dropTargetProvider !== name) setDropTargetProvider(name);
+  }
+  function onProviderDrop(name: string, e: React.DragEvent) {
+    e.preventDefault();
+    if (!draggingProvider || draggingProvider === name) {
+      setDraggingProvider(null);
+      setDropTargetProvider(null);
+      return;
+    }
+    const order = [...effectiveProviderOrder];
+    const fromIdx = order.indexOf(draggingProvider);
+    const toIdx = order.indexOf(name);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const [moved] = order.splice(fromIdx, 1);
+    order.splice(toIdx, 0, moved);
+    commitProviderBoxOrder(order);
+    setDraggingProvider(null);
+    setDropTargetProvider(null);
+  }
+
+  // Debounce the search input.
   const [debouncedQuery, setDebouncedQuery] = useState(searchQuery);
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery), 200);
@@ -846,39 +1159,64 @@ export function ModelSelectOverlay() {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (expandedLogical) { setExpandedLogical(null); return; }
+        if (searchExpanded) { setSearchExpanded(false); return; }
         closeOverlay();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [overlayOpen, closeOverlay, expandedLogical]);
+  }, [overlayOpen, closeOverlay, expandedLogical, searchExpanded]);
 
   useEffect(() => {
-    if (!overlayOpen) setExpandedLogical(null);
+    if (!overlayOpen) {
+      setExpandedLogical(null);
+      // Auto-collapse search when overlay closes so re-opening starts clean.
+      setSearchExpanded(false);
+    }
   }, [overlayOpen]);
 
   const handleSelect = useCallback(
     (model: ProviderModel, providerName: string) => {
       selectModel(model.id, providerName, model.slotId);
     },
-    [selectModel]
+    [selectModel],
   );
 
   const handleCondensedSelect = useCallback(
     (model: CondensedModel) => {
       condensedSelect(model.logical);
     },
-    [condensedSelect]
+    [condensedSelect],
   );
 
-  const visibleProviders = useMemo(() => {
+  // Filter providers by pricing tier, then honor drag-and-drop reorder.
+  const filteredProviders = useMemo(() => {
     if (pricingFilter === "free")
       return providers.filter((p) => p.name !== "opencode-go");
     return providers;
   }, [providers, pricingFilter]);
 
+  const effectiveProviderOrder = useMemo(() => {
+    if (!providerBoxOrder || providerBoxOrder.length === 0) {
+      return filteredProviders.map((p) => p.name);
+    }
+    // Reorder by persisted order; append any new providers not in the saved order.
+    const known = new Set(filteredProviders.map((p) => p.name));
+    const ordered = providerBoxOrder.filter((n) => known.has(n));
+    for (const p of filteredProviders) {
+      if (!ordered.includes(p.name)) ordered.push(p.name);
+    }
+    return ordered;
+  }, [filteredProviders, providerBoxOrder]);
+
+  const orderedProviders = useMemo(() => {
+    return effectiveProviderOrder
+      .map((name) => filteredProviders.find((p) => p.name === name))
+      .filter(Boolean) as ProviderGroup[];
+  }, [effectiveProviderOrder, filteredProviders]);
+
   const filteredCount = useMemo(() => {
-    const target = pricingFilter === "free" ? visibleProviders : providers;
+    const target = pricingFilter === "free" ? filteredProviders : providers;
     if (!debouncedQuery.trim() && activeFilters.length === 0 && contextMin === 0)
       return target.reduce((s, p) => s + p.models.length, 0);
     let count = 0;
@@ -895,7 +1233,7 @@ export function ModelSelectOverlay() {
       }
     }
     return count;
-  }, [providers, visibleProviders, debouncedQuery, totalModels, activeFilters, contextMin, pricingFilter]);
+  }, [providers, filteredProviders, debouncedQuery, totalModels, activeFilters, contextMin, pricingFilter]);
 
   const selectedDisplayName = useMemo(() => {
     if (!selectedModelId) return null;
@@ -912,27 +1250,48 @@ export function ModelSelectOverlay() {
 
   const anyFilterActive = activeFilters.length > 0 || contextMin > 0;
 
+  // ── Slide-down-to-close gesture on the header. ──────────────────────
+  // Pointer-down near the top of the panel + drag-down past threshold →
+  // close. This replaces the previous "page refresh" behaviour.
+  const dragDownRef = useRef<{ startY: number; active: boolean } | null>(null);
+  function onHeaderPointerDown(e: React.PointerEvent) {
+    // Only react to primary pointer (left mouse / touch).
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    dragDownRef.current = { startY: e.clientY, active: true };
+  }
+  function onHeaderPointerMove(e: React.PointerEvent) {
+    if (!dragDownRef.current?.active) return;
+    const dy = e.clientY - dragDownRef.current.startY;
+    if (dy > 60) {
+      // Past threshold — close + reset.
+      dragDownRef.current.active = false;
+      closeOverlay();
+    }
+  }
+  function onHeaderPointerUp() {
+    if (dragDownRef.current) dragDownRef.current.active = false;
+  }
+
   return (
     <AnimatePresence>
       {overlayOpen && (
         <>
-          {/* Backdrop — tap to close (or collapse the expanded condensed row). */}
+          {/* Backdrop */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
             className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm"
-            onClick={() => { if (expandedLogical) setExpandedLogical(null); else closeOverlay(); }}
+            onClick={() => {
+              if (expandedLogical) setExpandedLogical(null);
+              else if (searchExpanded) setSearchExpanded(false);
+              else closeOverlay();
+            }}
             aria-hidden="true"
           />
 
-          {/* Sheet container — slides up from the bottom on mobile (full-width
-              bottom sheet with rounded-t-3xl), centers as a modal on desktop.
-              `items-end sm:items-center` anchors the sheet to the bottom on
-              mobile and centers it on sm:+. The inner sheet slides from
-              y:100% (fully below viewport) up to y:0 — works for both
-              layouts because the sheet is anchored to its container edge. */}
+          {/* Sheet */}
           <motion.div
             initial={{ opacity: 0, y: "100%" }}
             animate={{ opacity: 1, y: 0 }}
@@ -947,34 +1306,40 @@ export function ModelSelectOverlay() {
               aria-modal="true"
               aria-label="Select a model"
             >
-              {/* Mobile drag-handle (visual only — no drag gesture wired up,
-                  but the affordance signals "bottom sheet" to the user). */}
+              {/* Mobile drag-handle — also serves as the slide-down-to-close
+                  affordance. Pointer handlers are on the header below. */}
               <div className="sm:hidden flex justify-center pt-2 pb-1 shrink-0">
                 <span className="w-10 h-1 rounded-full bg-muted-foreground/30" />
               </div>
 
-              {/* ── Sticky header: title + view toggle + close ─────────── */}
-              <div className="flex items-center gap-2 px-3 sm:px-4 py-2 shrink-0 border-b border-border/60">
-                <span className="text-[14px] font-semibold text-foreground shrink-0">Select a model</span>
+              {/* ── Header — title + view toggle + close.
+                  Also the slide-down-to-close gesture target. ───────── */}
+              <div
+                onPointerDown={onHeaderPointerDown}
+                onPointerMove={onHeaderPointerMove}
+                onPointerUp={onHeaderPointerUp}
+                onPointerCancel={onHeaderPointerUp}
+                className="flex items-center gap-2 px-3 sm:px-4 py-2 shrink-0 border-b border-border/60 touch-none"
+              >
+                <span className="text-[14px] font-semibold text-foreground shrink-0 select-none">Select a model</span>
                 <div className="flex items-center gap-1 ml-1">
                   <button
                     onClick={() => setCondensedView(false)}
-                    className={`touch-target text-[11px] leading-none px-3 h-7 rounded-full border transition-colors shrink-0 ${!condensedView ? "bg-accent/15 border-accent/40 text-accent font-medium" : "border-border text-muted-foreground hover:text-foreground"}`}
+                    className={`touch-target text-[11px] leading-none px-2.5 h-6 rounded-full border transition-colors shrink-0 ${!condensedView ? "bg-accent/15 border-accent/40 text-accent font-medium" : "border-border text-muted-foreground hover:text-foreground"}`}
                     aria-pressed={!condensedView}
                   >
                     Providers
                   </button>
                   <button
                     onClick={() => setCondensedView(true)}
-                    className={`touch-target text-[11px] leading-none px-3 h-7 rounded-full border transition-colors shrink-0 ${condensedView ? "bg-accent/15 border-accent/40 text-accent font-medium" : "border-border text-muted-foreground hover:text-foreground"}`}
+                    className={`touch-target text-[11px] leading-none px-2.5 h-6 rounded-full border transition-colors shrink-0 ${condensedView ? "bg-accent/15 border-accent/40 text-accent font-medium" : "border-border text-muted-foreground hover:text-foreground"}`}
                     aria-pressed={condensedView}
                   >
                     Models
                   </button>
                 </div>
                 <div className="flex-1" />
-                {/* Sync + privacy quick-actions (desktop only — mobile gets
-                    them inside the list via provider headers). */}
+                {/* Sync + privacy quick-actions (desktop only). */}
                 {!loading && providers.length > 0 && (
                   <div className="hidden sm:flex items-center gap-1">
                     <button
@@ -996,14 +1361,13 @@ export function ModelSelectOverlay() {
                     </button>
                   </div>
                 )}
-                {/* Pricing pills — desktop only (mobile gets them in the
-                    filter chip row below). */}
+                {/* Pricing pills — desktop only. */}
                 {!loading && providers.length > 0 && (
                   <div className="hidden sm:flex items-center gap-1 ml-1">
                     <span className="w-px h-4 bg-border/40 mx-0.5 shrink-0" />
                     <button
                       onClick={() => setPricingFilter("free")}
-                      className="touch-target text-[11px] leading-none px-2.5 h-7 rounded-full border transition-colors"
+                      className="touch-target text-[11px] leading-none px-2 h-6 rounded-full border transition-colors"
                       style={{
                         borderColor: pricingFilter === "free" ? "#22c55e50" : "var(--border)",
                         backgroundColor: pricingFilter === "free" ? "#22c55e15" : "transparent",
@@ -1015,7 +1379,7 @@ export function ModelSelectOverlay() {
                     </button>
                     <button
                       onClick={() => setPricingFilter("paid")}
-                      className="touch-target text-[11px] leading-none px-2.5 h-7 rounded-full border transition-colors"
+                      className="touch-target text-[11px] leading-none px-2 h-6 rounded-full border transition-colors"
                       style={{
                         borderColor: pricingFilter === "paid" ? "#f59e0b50" : "var(--border)",
                         backgroundColor: pricingFilter === "paid" ? "#f59e0b15" : "transparent",
@@ -1027,7 +1391,7 @@ export function ModelSelectOverlay() {
                     </button>
                   </div>
                 )}
-                {/* Close — large touch target, always visible. */}
+                {/* Close */}
                 <button
                   onClick={closeOverlay}
                   className="touch-target flex items-center justify-center size-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
@@ -1037,34 +1401,60 @@ export function ModelSelectOverlay() {
                 </button>
               </div>
 
-              {/* ── Sticky search bar ───────────────────────────────────
-                  Large (h-11) input with 16px font on mobile so iOS Safari
-                  doesn't auto-zoom on focus. The actual filtering uses the
-                  debounced value (200ms after the last keystroke). */}
-              <div className="px-3 sm:px-4 pt-2 pb-2 shrink-0 border-b border-border/60 bg-surface/40">
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/70">
+              {/* ── Search bar — smaller height + collapse/expand icon. ─ */}
+              <div className="px-3 sm:px-4 py-1.5 shrink-0 border-b border-border/60 bg-surface/40">
+                <div className="flex items-center gap-1.5">
+                  {/* Toggle button — expands/collapses the input. */}
+                  <button
+                    onClick={() => setSearchExpanded((v) => !v)}
+                    className={`touch-target inline-flex items-center justify-center size-9 rounded-xl border transition-colors shrink-0 ${
+                      searchExpanded
+                        ? "bg-accent/15 border-accent/40 text-accent"
+                        : "border-border text-muted-foreground hover:text-foreground hover:bg-surface2/60"
+                    }`}
+                    aria-label={searchExpanded ? "Collapse search" : "Expand search"}
+                    aria-expanded={searchExpanded}
+                    title={searchExpanded ? "Collapse search" : "Expand search"}
+                  >
                     <IcoSearch />
-                  </span>
-                  <input
-                    ref={inputRef}
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search models, providers, capabilities…"
-                    className="w-full pl-9 pr-3 h-11 text-[16px] sm:text-[14px] bg-surface2 border border-border rounded-2xl outline-none focus:border-accent focus:bg-surface3 transition-colors placeholder:text-muted-foreground/60"
-                    aria-label="Search models"
-                  />
+                  </button>
+                  {searchExpanded && (
+                    <div className="relative flex-1">
+                      <input
+                        ref={inputRef}
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Search models, providers, capabilities…"
+                        className="w-full pl-3 pr-7 h-9 text-[14px] sm:text-[13px] bg-surface2 border border-border rounded-xl outline-none focus:border-accent focus:bg-surface3 transition-colors placeholder:text-muted-foreground/60"
+                        aria-label="Search models"
+                      />
+                      {searchQuery && (
+                        <button
+                          onClick={() => setSearchQuery("")}
+                          className="touch-target absolute right-1 top-1/2 -translate-y-1/2 inline-flex items-center justify-center size-6 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface3 transition-colors"
+                          aria-label="Clear search"
+                        >
+                          <IcoX />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {!searchExpanded && (
+                    <span className="text-[11px] text-muted-foreground/60 truncate flex-1">
+                      Tap search icon to filter
+                    </span>
+                  )}
                 </div>
               </div>
 
-              {/* ── Filter chip row — horizontally scrollable ────────── */}
+              {/* ── Filter chip row — 2× smaller, horizontally scrollable. */}
               {providers.length > 0 && (
-                <div className="flex items-center gap-1.5 px-3 sm:px-4 py-2 shrink-0 overflow-x-auto no-scrollbar border-b border-border/60">
+                <div className="flex items-center gap-1 px-3 sm:px-4 py-1.5 shrink-0 overflow-x-auto no-scrollbar border-b border-border/60">
                   {FILTER_PILLS.map((f) => (
                     <button
                       key={f.id}
                       onClick={() => toggleFilter(f.id)}
-                      className="touch-target shrink-0 text-[11px] leading-none px-3 h-7 rounded-full border transition-colors inline-flex items-center"
+                      className="touch-target shrink-0 text-[10px] leading-none px-2 h-5 rounded-full border transition-colors inline-flex items-center"
                       style={{
                         borderColor: activeFilters.includes(f.id) ? `${f.color}50` : "var(--border)",
                         backgroundColor: activeFilters.includes(f.id) ? `${f.color}15` : "transparent",
@@ -1075,12 +1465,12 @@ export function ModelSelectOverlay() {
                       {f.label}
                     </button>
                   ))}
-                  <span className="w-px h-4 bg-border/40 mx-0.5 shrink-0" />
+                  <span className="w-px h-3 bg-border/40 mx-0.5 shrink-0" />
                   {CONTEXT_OPTIONS.map((c) => (
                     <button
                       key={c.value}
                       onClick={() => setContextMin(c.value)}
-                      className="touch-target shrink-0 text-[11px] leading-none px-3 h-7 rounded-full border transition-colors inline-flex items-center"
+                      className="touch-target shrink-0 text-[10px] leading-none px-2 h-5 rounded-full border transition-colors inline-flex items-center"
                       style={{
                         borderColor: contextMin === c.value ? "#14b8a680" : "var(--border)",
                         backgroundColor: contextMin === c.value ? "#14b8a615" : "transparent",
@@ -1092,10 +1482,10 @@ export function ModelSelectOverlay() {
                     </button>
                   ))}
                   {/* Pricing pills — mobile-only here (desktop has them in header). */}
-                  <span className="sm:hidden w-px h-4 bg-border/40 mx-0.5 shrink-0" />
+                  <span className="sm:hidden w-px h-3 bg-border/40 mx-0.5 shrink-0" />
                   <button
                     onClick={() => setPricingFilter("free")}
-                    className="sm:hidden touch-target shrink-0 text-[11px] leading-none px-3 h-7 rounded-full border transition-colors inline-flex items-center"
+                    className="sm:hidden touch-target shrink-0 text-[10px] leading-none px-2 h-5 rounded-full border transition-colors inline-flex items-center"
                     style={{
                       borderColor: pricingFilter === "free" ? "#22c55e50" : "var(--border)",
                       backgroundColor: pricingFilter === "free" ? "#22c55e15" : "transparent",
@@ -1107,7 +1497,7 @@ export function ModelSelectOverlay() {
                   </button>
                   <button
                     onClick={() => setPricingFilter("paid")}
-                    className="sm:hidden touch-target shrink-0 text-[11px] leading-none px-3 h-7 rounded-full border transition-colors inline-flex items-center"
+                    className="sm:hidden touch-target shrink-0 text-[10px] leading-none px-2 h-5 rounded-full border transition-colors inline-flex items-center"
                     style={{
                       borderColor: pricingFilter === "paid" ? "#f59e0b50" : "var(--border)",
                       backgroundColor: pricingFilter === "paid" ? "#f59e0b15" : "transparent",
@@ -1120,7 +1510,7 @@ export function ModelSelectOverlay() {
                   {anyFilterActive && (
                     <button
                       onClick={() => { activeFilters.forEach((f) => toggleFilter(f)); setContextMin(0); }}
-                      className="touch-target shrink-0 text-[11px] leading-none px-2.5 h-7 rounded-xl text-muted-foreground/70 hover:text-foreground hover:bg-muted/40 transition-colors ml-auto"
+                      className="touch-target shrink-0 text-[10px] leading-none px-2 h-5 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-muted/40 transition-colors ml-auto"
                     >
                       clear
                     </button>
@@ -1129,7 +1519,7 @@ export function ModelSelectOverlay() {
                     <>
                       <button
                         onClick={() => setHideUnavailable(!hideUnavailable)}
-                        className={`touch-target shrink-0 text-[11px] leading-none px-3 h-7 rounded-full border transition-colors inline-flex items-center ${anyFilterActive ? "" : "ml-auto"}`}
+                        className={`touch-target shrink-0 text-[10px] leading-none px-2 h-5 rounded-full border transition-colors inline-flex items-center ${anyFilterActive ? "" : "ml-auto"}`}
                         style={{
                           borderColor: hideUnavailable ? "#22c55e50" : "var(--border)",
                           backgroundColor: hideUnavailable ? "#22c55e15" : "transparent",
@@ -1137,22 +1527,22 @@ export function ModelSelectOverlay() {
                         }}
                         aria-pressed={hideUnavailable}
                       >
-                        {hideUnavailable ? "Available" : "All models"}
+                        {hideUnavailable ? "Available" : "All"}
                       </button>
-                      <span className="text-[10px] text-muted-foreground/60 shrink-0 tabular-nums">
+                      <span className="text-[9px] text-muted-foreground/60 shrink-0 tabular-nums">
                         {condensedModels.length} models
                       </span>
                     </>
                   )}
                   {!condensedView && !loading && (
-                    <span className={`text-[10px] text-muted-foreground/60 shrink-0 tabular-nums ${anyFilterActive ? "" : "ml-auto"}`}>
+                    <span className={`text-[9px] text-muted-foreground/60 shrink-0 tabular-nums ${anyFilterActive ? "" : "ml-auto"}`}>
                       {filteredCount} models
                     </span>
                   )}
                 </div>
               )}
 
-              {/* ── List area — flex-1 scroll ────────────────────────── */}
+              {/* ── List area — flex-1 scroll. ─────────────────────────── */}
               <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
                 {!condensedView && loading && (
                   <div className="flex items-center justify-center h-full py-12">
@@ -1182,12 +1572,14 @@ export function ModelSelectOverlay() {
 
                 {!condensedView && !loading && !error && (
                   <div className="p-3 sm:p-4">
-                    {/* Mobile: single column (vertical list of cards).
-                        Desktop: 2-column masonry. */}
-                    <div className="sm:columns-2 columns-1" style={{ columnGap: '0.75rem' }}>
-                      {visibleProviders.map((p) => (
-                        <div key={p.name} className="break-inside-avoid mb-3 min-w-0">
+                    {/* Single-column list — fixed overlap issues from the
+                        old `sm:columns-2` masonry layout. */}
+                    <div className="flex flex-col gap-2">
+                      {orderedProviders.map((p, idx) => {
+                        const isExpanded = !!providerBoxExpanded[p.name];
+                        return (
                           <ProviderBox
+                            key={p.name}
                             provider={p}
                             selectedModelId={selectedModelId}
                             selectedProviderName={selectedProviderName}
@@ -1196,9 +1588,23 @@ export function ModelSelectOverlay() {
                             searchQuery={debouncedQuery}
                             activeFilters={activeFilters}
                             contextMin={contextMin}
+                            expanded={isExpanded}
+                            onToggleExpand={() => toggleProviderBox(p.name)}
+                            dragHandleProps={{
+                              draggable: true,
+                              onDragStart: (e) => onProviderDragStart(p.name, e),
+                              onDragEnd: onProviderDragEnd,
+                            }}
+                            onMoveUp={() => moveProviderUp(p.name)}
+                            onMoveDown={() => moveProviderDown(p.name)}
+                            isFirst={idx === 0}
+                            isLast={idx === orderedProviders.length - 1}
+                            isDragTarget={dropTargetProvider === p.name && draggingProvider !== null && draggingProvider !== p.name}
+                            onDragOverBox={(e) => onProviderDragOver(p.name, e)}
+                            onDropOnBox={(e) => onProviderDrop(p.name, e)}
                           />
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -1220,7 +1626,7 @@ export function ModelSelectOverlay() {
                 )}
               </div>
 
-              {/* ── Footer — selected model + esc hint ───────────────── */}
+              {/* ── Footer — selected model + esc hint ─────────────────── */}
               <div className="flex items-center justify-between gap-2 px-3 sm:px-4 py-2 shrink-0 border-t border-border/60 bg-surface/40 safe-bottom">
                 <span className="text-[10px] sm:text-[11px] text-muted-foreground truncate">
                   <span className="hidden sm:inline">tap to select &nbsp;</span>
