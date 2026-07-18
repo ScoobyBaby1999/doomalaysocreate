@@ -15,6 +15,7 @@ import { ToolIcons } from "../components/ToolIcons";
 import { QueueMonitor } from "../components/QueueMonitor";
 import { TemplateLibrary } from "../components/TemplateLibrary";
 import { SaveAsTemplateDialog } from "../components/SaveAsTemplateDialog";
+import { Popover } from "../components/Popover";
 
 export function AgentChat({ settings }: { settings: Settings }) {
   // Model store
@@ -197,6 +198,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
   // sandbox the agent works in.
   const [workspaces, setWorkspaces] = useState<{ id: string; title: string; source_repo?: string | null }[]>([]);
   const [wsOpen, setWsOpen] = useState(false);
+  const wsBtnRef = useRef<HTMLButtonElement>(null);
   const ghClient = useMemo(() => new GitHubClient(settings), [settings]);
 
   // "Save as Template" dialog — opened from the chat input toolbar.
@@ -523,9 +525,13 @@ export function AgentChat({ settings }: { settings: Settings }) {
           } sm:flex items-center gap-1.5 px-2 sm:px-3 pb-2 sm:pb-1.5 pt-1 sm:pt-0 sm:h-10 overflow-x-auto no-scrollbar border-t border-white/5 sm:border-t-0`}
         >
           {/* Workspace selector — relative+shrink-0 keeps the dropdown
-              anchored to the button and out of the horizontal scroll. */}
+              anchored to the button and out of the horizontal scroll.
+              The dropdown itself uses a portal (see Popover component) so
+              it escapes the header's backdrop-filter containing block +
+              Row 2's overflow-x-auto clipping. */}
           <div className="relative shrink-0">
             <button
+              ref={wsBtnRef}
               onClick={() => setWsOpen((v) => !v)}
               disabled={running}
               title={workspaceId || "No workspace (ephemeral)"}
@@ -543,47 +549,37 @@ export function AgentChat({ settings }: { settings: Settings }) {
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
-            {wsOpen && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setWsOpen(false)} />
-                <div className="absolute right-0 top-full mt-1.5 z-50 min-w-[220px] max-w-[280px] rounded-2xl border border-white/5 surface-card shadow-2xl shadow-black/40 overflow-hidden animate-popover-in">
-                  <div className="flex items-center justify-between px-3 py-2 border-b border-white/5">
-                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium">Workspace</span>
-                    <button
-                      onClick={() => setWsOpen(false)}
-                      aria-label="Close"
-                      className="touch-target w-6 h-6 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-white/5 transition-colors flex items-center justify-center"
-                    >
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18" />
-                        <line x1="6" y1="6" x2="18" y2="18" />
-                      </svg>
-                    </button>
-                  </div>
-                  <button
-                    onClick={() => { setWorkspaceId(null); setWsOpen(false); }}
-                    className={`w-full text-left px-3 py-2.5 text-[12px] hover:bg-accent/10 transition-colors ${!workspaceId ? "text-accent font-medium" : ""}`}
-                  >
-                    No workspace (ephemeral)
-                  </button>
-                  {workspaces.map((ws) => (
-                    <button
-                      key={ws.id}
-                      onClick={() => { setWorkspaceId(ws.id); setWsOpen(false); }}
-                      className={`w-full text-left px-3 py-2.5 text-[12px] hover:bg-accent/10 transition-colors truncate ${workspaceId === ws.id ? "text-accent font-medium" : ""}`}
-                    >
-                      <div className="truncate">{ws.title}</div>
-                      {ws.source_repo && <div className="text-[10px] text-muted-foreground truncate">{ws.source_repo}</div>}
-                    </button>
-                  ))}
-                  {workspaces.length === 0 && (
-                    <div className="px-3 py-2.5 text-[11px] text-muted-foreground">
-                      No workspaces. Connect GitHub in the Workspaces tab.
-                    </div>
-                  )}
+            <Popover
+              open={wsOpen}
+              onClose={() => setWsOpen(false)}
+              anchorRef={wsBtnRef}
+              align="right"
+              direction="down"
+              width={240}
+              title="Workspace"
+            >
+              <button
+                onClick={() => { setWorkspaceId(null); setWsOpen(false); }}
+                className={`w-full text-left px-3 py-2.5 text-[12px] hover:bg-accent/10 transition-colors rounded-xl ${!workspaceId ? "text-accent font-medium" : ""}`}
+              >
+                No workspace (ephemeral)
+              </button>
+              {workspaces.map((ws) => (
+                <button
+                  key={ws.id}
+                  onClick={() => { setWorkspaceId(ws.id); setWsOpen(false); }}
+                  className={`w-full text-left px-3 py-2.5 text-[12px] hover:bg-accent/10 transition-colors truncate rounded-xl ${workspaceId === ws.id ? "text-accent font-medium" : ""}`}
+                >
+                  <div className="truncate">{ws.title}</div>
+                  {ws.source_repo && <div className="text-[10px] text-muted-foreground truncate">{ws.source_repo}</div>}
+                </button>
+              ))}
+              {workspaces.length === 0 && (
+                <div className="px-3 py-2.5 text-[11px] text-muted-foreground">
+                  No workspaces. Connect GitHub in the Workspaces tab.
                 </div>
-              </>
-            )}
+              )}
+            </Popover>
           </div>
 
           {/* Model verification badge — shows what the backend ACTUALLY resolved. */}
@@ -1091,9 +1087,11 @@ function ModePill({
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
   return (
     <div className="relative shrink-0">
       <button
+        ref={btnRef}
         onClick={() => !disabled && setOpen((o) => !o)}
         disabled={disabled}
         aria-label={`Execution mode: ${mode}`}
@@ -1109,43 +1107,33 @@ function ModePill({
         </svg>
         <span className="hidden sm:inline">{mode}</span>
       </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-full left-0 mb-1.5 z-50 w-56 rounded-2xl border border-white/5 surface-card shadow-2xl shadow-black/40 p-1.5 animate-popover-in-up">
-            <div className="flex items-center justify-between px-2 py-1 mb-0.5 border-b border-white/5">
-              <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium">Execution Mode</span>
-              <button
-                onClick={() => setOpen(false)}
-                aria-label="Close"
-                className="touch-target w-6 h-6 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-white/5 transition-colors flex items-center justify-center"
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
+      <Popover
+        open={open}
+        onClose={() => setOpen(false)}
+        anchorRef={btnRef}
+        align="left"
+        direction="up"
+        width={224}
+        title="Execution Mode"
+      >
+        {(["auto", "build", "plan"] as const).map((m) => (
+          <button
+            key={m}
+            onClick={() => { setMode(m); setOpen(false); }}
+            className={`w-full text-left px-3 py-2 rounded-xl text-[12px] transition-colors ${
+              mode === m ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="capitalize">{m}</span>
+              {mode === m && <span className="text-[10px] text-accent">●</span>}
             </div>
-            {(["auto", "build", "plan"] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => { setMode(m); setOpen(false); }}
-                className={`w-full text-left px-3 py-2 rounded-xl text-[12px] transition-colors ${
-                  mode === m ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="capitalize">{m}</span>
-                  {mode === m && <span className="text-[10px] text-accent">●</span>}
-                </div>
-                <div className="text-[10px] opacity-60 mt-0.5">
-                  {m === "auto" ? "Execute autonomously" : m === "build" ? "Step-by-step with confirmation" : "Plan first, wait for approval"}
-                </div>
-              </button>
-            ))}
-          </div>
-        </>
-      )}
+            <div className="text-[10px] opacity-60 mt-0.5">
+              {m === "auto" ? "Execute autonomously" : m === "build" ? "Step-by-step with confirmation" : "Plan first, wait for approval"}
+            </div>
+          </button>
+        ))}
+      </Popover>
     </div>
   );
 }
