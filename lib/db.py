@@ -474,6 +474,40 @@ def list_user_workspaces(user_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def find_user_workspace_by_repo(user_id: str, full_name: str) -> dict | None:
+    """Find a user's workspace by GitHub repo full name (``owner/repo``).
+
+    ``source_repo`` is stored as the clone URL (https://github.com/owner/repo.git
+    or https://github.com/owner/repo). We match the trailing ``owner/repo``
+    segment so callers can pass either the bare full name or the full clone URL.
+    Returns the most recently modified matching workspace, or None.
+    """
+    if not full_name:
+        return None
+    # Normalise: accept "owner/repo", "owner/repo.git", full URLs, trailing slash.
+    key = full_name.strip().rstrip("/")
+    if key.endswith(".git"):
+        key = key[:-4]
+    if "/" in key:
+        key = key.split("/")[-2] + "/" + key.split("/")[-1]
+    rows = _db().execute(
+        "SELECT * FROM workspaces WHERE user_id = ? ORDER BY last_modified DESC",
+        (user_id,)).fetchall()
+    for row in rows:
+        src = (row["source_repo"] or "").strip().rstrip("/")
+        if not src:
+            continue
+        if src.endswith(".git"):
+            src = src[:-4]
+        if "/" in src:
+            src_norm = src.split("/")[-2] + "/" + src.split("/")[-1]
+        else:
+            src_norm = src
+        if src_norm.lower() == key.lower():
+            return dict(row)
+    return None
+
+
 def update_workspace(workspace_id: str, **fields) -> dict | None:
     allowed = {"title", "description", "visibility", "current_branch",
                "hf_space_id", "auto_sync", "last_modified", "sandbox_path",

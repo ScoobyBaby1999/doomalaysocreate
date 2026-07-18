@@ -1285,6 +1285,7 @@ class Handler(BaseHTTPRequestHandler):
                     "GET /api/debug/logs?cat=&tail=100&level=": "view structured debug logs (auth-gated)",
                     "DELETE /api/debug/clear?cat=": "clear debug log ring buffer (auth-gated)",
                     "GET /api/memory?workspace_id=": "workspace memory layer state (.pied sanity log)",
+                    "POST /api/memory": "write to / clear a workspace's memory layer",
                     "GET /api/benchmarks": "live model benchmarks from OpenRouter (pricing, context, caps)",
                     "GET /api/workspace/files?workspace_id=": "list files in a workspace sandbox",
                     "GET /api/roster": "per-model benchmark + hosts + privacy-safe routability + frontier guarantee",
@@ -1299,6 +1300,10 @@ class Handler(BaseHTTPRequestHandler):
                     "GET /api/auth/status": "check GitHub + HF auth status",
                     "GET /api/github/repos": "list authenticated user's GitHub repos",
                     "GET /api/github/repos/<owner>/<repo>/branches": "list branches for a repo",
+                    "POST /api/github/repos/create": "create a new GitHub repo for the user (or under an org)",
+                    "GET /api/github/gitignore/templates": "list .gitignore templates GitHub offers",
+                    "GET /api/github/licenses": "list license templates GitHub offers",
+                    "GET /api/github/orgs": "list orgs the user can create repos in",
                     "GET /api/workspaces": "list user's workspaces",
                     "POST /api/workspaces": "create workspace (optionally clone from GitHub repo)",
                     "GET /api/workspaces/<id>": "get workspace details",
@@ -1465,26 +1470,39 @@ class Handler(BaseHTTPRequestHandler):
             ]
             self._send_json(200, {"tools": tools, "count": len(tools)})
             return
-        # Memory layer endpoint — returns the .pied state for a workspace
+        # Memory layer endpoint — returns the .pied state for a workspace.
+        #
+        # Auth: resolves the user from the JWT (Authorization bearer OR X-JWT
+        # header — see ``_require_user``).  This is the fix for the
+        # "workspace not found" bug: the previous version used ``_auth_ok()``
+        # which only accepts the rotation token, so users with a JWT but no
+        # rotation token got 401 → frontend read it as "workspace not found".
+        # We now also accept the workspace_id being either the internal ID
+        # OR a GitHub repo full name (``owner/repo``), and auto-create the
+        # DB row if the user owns the repo on GitHub but it's not yet in
+        # the workspaces table (covers freshly-cloned repos).
         if route == "/api/memory":
-            if not self._auth_ok():
-                self._send_json(401, {"error": "missing or invalid bearer token"})
+            user_id = self._require_user()
+            if not user_id:
                 return
             from urllib.parse import parse_qs, urlsplit
             qs = parse_qs(urlsplit(self.path).query)
-            workspace_id = qs.get("workspace_id", [""])[0]
+            workspace_id = (qs.get("workspace_id", [""])[0] or "").strip()
             if not workspace_id:
                 self._send_json(400, {"error": "workspace_id query parameter is required"})
                 return
             try:
-                import db
-                import memory_layer
-                from pathlib import Path
-                ws = db.get_workspace(workspace_id)
-                if not ws or not ws.get("sandbox_path"):
+                ws = self._resolve_workspace_for_user(user_id, workspace_id)
+                if ws is None:
                     self._send_json(404, {"error": "workspace not found"})
                     return
+                from pathlib import Path
+                import memory_layer
+                # Make sure the sandbox directory + .pied/ exist (a freshly
+                # cloned workspace has a sandbox but no .pied yet).
+                github_integration.ensure_workspace_sandbox(ws["id"])
                 ws_path = Path(ws["sandbox_path"])
+                memory_layer.init_memory(ws_path)
                 state = memory_layer.read_state(ws_path)
                 recent_log = memory_layer.get_recent_log(ws_path, limit=20)
                 blackboard = memory_layer.read_blackboard(ws_path)
@@ -1496,6 +1514,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json(500, {"error": str(e)[:200]})
             return
+
         # Benchmarks endpoint — live model data from OpenRouter (pricing, context, caps)
         if route == "/api/benchmarks":
             if not self._auth_ok():
@@ -1667,6 +1686,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route.startswith("/api/github/repos/") and route.endswith("/branches"):
             self._handle_github_branches(route)
+            return
+        if route == "/api/github/gitignore/templates":
+            self._handle_github_gitignore_templates()
+            return
+        if route == "/api/github/licenses":
+            self._handle_github_licenses()
+            return
+        if route == "/api/github/orgs":
+            self._handle_github_orgs()
             return
         if route == "/api/workspaces":
             self._handle_workspaces_list()
@@ -3003,6 +3031,245 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json(502, {"error": str(exc)})
 
+    def _handle_github_repos_create(self) -> None:
+        """POST /api/github/repos/create — create a new GitHub repo for the
+        authenticated user.  Body mirrors GitHub's API:
+
+            { name, description?, private?, auto_init?,
+              gitignore_template?, license_template?, owner? }
+
+        ``owner`` defaults to the authenticated user; if it's an org login,
+        the repo is created under that org (``POST /orgs/{owner}/repos``).
+        """
+        user_id = self._require_user()
+        if not user_id:
+            return
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        name = (payload.get("name") or "").strip()
+        if not name:
+            self._send_json(400, {"error": "'name' is required"})
+            return
+        try:
+            repo = github_integration.create_repo(
+                user_id,
+                name=name,
+                description=payload.get("description", "") or "",
+                private=bool(payload.get("private", True)),
+                auto_init=bool(payload.get("auto_init", False)),
+                gitignore_template=payload.get("gitignore_template"),
+                license_template=payload.get("license_template"),
+                owner=payload.get("owner"),
+            )
+            self._send_json(201, repo)
+        except Exception as exc:
+            self._send_json(502, {"error": str(exc)[:300]})
+
+    def _handle_github_gitignore_templates(self) -> None:
+        """GET /api/github/gitignore/templates — list .gitignore templates
+        GitHub offers.  Authenticated so the user gets the higher rate limit;
+        falls back to anonymous if the user has no GitHub token yet."""
+        user_id = self._require_user()
+        if not user_id:
+            return
+        try:
+            templates = github_integration.list_gitignore_templates(user_id)
+            self._send_json(200, {"templates": templates})
+        except Exception as exc:
+            # Best-effort anonymous fallback so the create-repo form is still
+            # usable for users mid-GitHub-connect.
+            try:
+                templates = github_integration.list_gitignore_templates(None)
+                self._send_json(200, {"templates": templates})
+            except Exception as exc2:
+                self._send_json(502, {"error": str(exc)[:200] + " | " + str(exc2)[:200]})
+
+    def _handle_github_licenses(self) -> None:
+        """GET /api/github/licenses — list license templates GitHub offers."""
+        user_id = self._require_user()
+        if not user_id:
+            return
+        try:
+            licenses = github_integration.list_licenses(user_id)
+            self._send_json(200, {"licenses": licenses})
+        except Exception as exc:
+            try:
+                licenses = github_integration.list_licenses(None)
+                self._send_json(200, {"licenses": licenses})
+            except Exception as exc2:
+                self._send_json(502, {"error": str(exc)[:200] + " | " + str(exc2)[:200]})
+
+    def _handle_github_orgs(self) -> None:
+        """GET /api/github/orgs — list orgs the user can create repos in."""
+        user_id = self._require_user()
+        if not user_id:
+            return
+        try:
+            orgs = github_integration.list_user_orgs(user_id)
+            self._send_json(200, {"orgs": orgs})
+        except Exception as exc:
+            self._send_json(502, {"error": str(exc)[:300]})
+
+    def _resolve_workspace_for_user(self, user_id: str,
+                                    workspace_id_or_full_name: str) -> dict | None:
+        """Resolve a workspace reference for a user.
+
+        Accepts either:
+        - the internal workspace ID (UUID), or
+        - a GitHub repo full name (``owner/repo``) — useful when the frontend
+          holds the repo full name but the workspace hasn't been cloned yet.
+
+        Ownership is enforced: a workspace that exists but belongs to a
+        different user returns None.
+
+        If the workspace is missing from the DB AND the reference is a GitHub
+        full name AND the user owns that repo on GitHub, we auto-create the
+        DB row + clone the sandbox so memory works on freshly-cloned repos
+        without requiring a separate ``POST /api/workspaces`` round-trip.
+        """
+        if not workspace_id_or_full_name:
+            return None
+        ref = workspace_id_or_full_name.strip()
+        # 1. Try internal ID lookup (fast path).
+        ws = db.get_workspace(ref)
+        if ws:
+            if ws.get("user_id") != user_id:
+                return None
+            return ws
+        # 2. Try matching by source_repo full name (covers cloned workspaces
+        #    whose DB row stores the clone URL).
+        ws = db.find_user_workspace_by_repo(user_id, ref)
+        if ws:
+            return ws
+        # 3. Auto-create: only if the ref looks like a GitHub full name and
+        #    the user actually owns that repo on GitHub.
+        if "/" not in ref:
+            return None
+        try:
+            owner, _, repo_name = ref.partition("/")
+            if not owner or not repo_name:
+                return None
+            # Verify ownership on GitHub.  A 404 / 403 means the user can't
+            # access it — don't auto-create.
+            token = github_integration._token_for_user(user_id)
+            try:
+                info = github_integration._gh_httpx(
+                    "GET", f"/repos/{owner}/{repo_name}", token=token)
+            except RuntimeError:
+                return None
+            if not isinstance(info, dict) or not info.get("full_name"):
+                return None
+            # Only auto-create if the user is the owner (or a collaborator with
+            # admin/push perms — but for safety require owner match).
+            owner_obj = info.get("owner") or {}
+            me = github_integration._gh_httpx("GET", "/user", token=token)
+            my_login = (me or {}).get("login", "")
+            if not my_login or my_login.lower() != owner_obj.get("login", "").lower():
+                return None
+            clone_url = info.get("clone_url") or ""
+            default_branch = info.get("default_branch") or "main"
+            title = info.get("name") or repo_name
+            description = info.get("description") or ""
+            try:
+                ws = github_integration.create_workspace(
+                    user_id,
+                    title=title,
+                    description=description,
+                    source_repo=clone_url,
+                    source_branch=default_branch,
+                    visibility="private" if info.get("private") else "public",
+                )
+                return ws
+            except Exception as exc:
+                log_event("memory_auto_create_workspace_failed",
+                          user_id=user_id, ref=ref, error=repr(exc)[:300])
+                return None
+        except Exception as exc:
+            log_event("memory_resolve_workspace_error",
+                      user_id=user_id, ref=ref, error=repr(exc)[:300])
+            return None
+
+    def _handle_memory_post(self) -> None:
+        """POST /api/memory — write to (or clear) a workspace's memory layer.
+
+        Two body shapes are accepted:
+
+        1. The frontend's WorkspaceMemoryPanel format (kind-dispatched):
+             { workspace_id, kind: "note"|"goal"|"plan"|"task"|"event"|...,
+               agent?, data?, goal?, plan?, task? }
+
+        2. The action-based format from the BACKEND-GITHUB-MEMORY spec:
+             { workspace_id, action: "write"|"clear", content?, key? }
+           - action="write" with content+key → posts a note to the blackboard
+           - action="clear" → wipes the memory layer
+
+        Returns ``{ok: true}`` on success or ``{error: "..."}`` with the
+        appropriate HTTP status.
+        """
+        user_id = self._require_user()
+        if not user_id:
+            return
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        workspace_id = (payload.get("workspace_id") or "").strip()
+        if not workspace_id:
+            self._send_json(400, {"error": "'workspace_id' is required"})
+            return
+        try:
+            ws = self._resolve_workspace_for_user(user_id, workspace_id)
+            if ws is None:
+                self._send_json(404, {"error": "workspace not found"})
+                return
+            from pathlib import Path
+            import memory_layer
+            github_integration.ensure_workspace_sandbox(ws["id"])
+            ws_path = Path(ws["sandbox_path"])
+            memory_layer.init_memory(ws_path)
+
+            action = (payload.get("action") or "").strip().lower()
+            if action == "clear":
+                memory_layer.clear_memory(ws_path)
+                self._send_json(200, {"ok": True, "cleared": True})
+                return
+            if action == "write":
+                content = payload.get("content")
+                if content is None:
+                    self._send_json(400, {"error": "'content' is required for action='write'"})
+                    return
+                key = (payload.get("key") or "note").strip() or "note"
+                agent_id = (payload.get("agent") or "user").strip() or "user"
+                memory_layer.write_note(ws_path, agent_id, str(content), key=key)
+                self._send_json(200, {"ok": True})
+                return
+
+            # Kind-dispatched (frontend format)
+            kind = (payload.get("kind") or "note").strip() or "note"
+            agent_id = (payload.get("agent") or "user").strip() or "user"
+            if kind == "goal" or payload.get("goal") is not None:
+                goal = payload.get("goal")
+                if goal is not None:
+                    memory_layer.update_goal(ws_path, str(goal))
+            if kind == "plan" or payload.get("plan") is not None:
+                plan = payload.get("plan")
+                if plan is not None:
+                    memory_layer.update_plan(ws_path, str(plan))
+            if kind == "task" and payload.get("task"):
+                memory_layer.add_task(ws_path, str(payload["task"]), agent_id=agent_id)
+            if kind in ("note", "event") or payload.get("data") is not None:
+                # Generic event log + (for notes) blackboard post.
+                data = payload.get("data") or {}
+                if kind == "note" and isinstance(data, dict) and data.get("note"):
+                    memory_layer.write_note(
+                        ws_path, agent_id, str(data["note"]),
+                        key=str(payload.get("key") or "note"))
+                else:
+                    memory_layer.log_event(ws_path, agent_id, kind, data)
+            self._send_json(200, {"ok": True})
+        except Exception as e:
+            self._send_json(500, {"error": str(e)[:200]})
+
     def _handle_github_branches(self, route: str) -> None:
         user_id = self._require_user()
         if not user_id:
@@ -3441,6 +3708,12 @@ class Handler(BaseHTTPRequestHandler):
         # --- GitHub integration POST routes --------------------------------------
         if route == "/api/auth/github/disconnect":
             self._handle_github_disconnect()
+            return
+        if route == "/api/github/repos/create":
+            self._handle_github_repos_create()
+            return
+        if route == "/api/memory":
+            self._handle_memory_post()
             return
         if route == "/api/workspaces":
             self._handle_workspace_create()

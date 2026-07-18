@@ -213,6 +213,176 @@ def get_repo_tree(user_id: str, owner: str, repo: str,
 
 
 # ---------------------------------------------------------------------------
+# Repo creation + metadata (gitignore templates, licenses, orgs) — uses httpx
+# ---------------------------------------------------------------------------
+
+def _gh_httpx(method: str, path: str, *, token: str = "",
+              body: dict | None = None, timeout: float = 30.0):
+    """Call the GitHub API via httpx.  Returns the parsed JSON response.
+
+    Raises ``RuntimeError`` on HTTP failure so callers can surface a clean
+    error message.  Uses httpx (already a project dependency) per the
+    BACKEND-GITHUB-MEMORY task spec.
+    """
+    import httpx
+    url = f"{GITHUB_API}{path}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.request(method, url, headers=headers,
+                                  json=body if body is not None else None)
+        if resp.status_code >= 400:
+            detail = resp.text[:400] if resp.text else ""
+            raise RuntimeError(
+                f"GitHub API {path} failed (HTTP {resp.status_code}): {detail}")
+        if not resp.text.strip():
+            return {}
+        return resp.json()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"GitHub API {path} network error: {exc}") from exc
+
+
+def create_repo(user_id: str, *, name: str, description: str = "",
+                private: bool = True, auto_init: bool = False,
+                gitignore_template: str | None = None,
+                license_template: str | None = None,
+                owner: str | None = None) -> dict:
+    """Create a new GitHub repo for the user.
+
+    If ``owner`` is None or equals the user's own login, calls
+    ``POST /user/repos``.  Otherwise ``owner`` is treated as an org login and
+    ``POST /orgs/{owner}/repos`` is used (the user must have repo-creation
+    rights in that org).
+
+    Returns the slim repo dict the frontend expects (same shape as
+    ``list_user_repos`` entries).
+    """
+    import re
+    if not name or not isinstance(name, str):
+        raise RuntimeError("'name' is required")
+    # GitHub repo name rules: alphanumeric + - _ ., max 100 chars
+    if not re.match(r'^[A-Za-z0-9._-]+$', name) or len(name) > 100:
+        raise RuntimeError(f"invalid repo name: {name!r}")
+    token = _token_for_user(user_id)
+
+    body = {
+        "name": name,
+        "description": description or "",
+        "private": bool(private),
+        "auto_init": bool(auto_init),
+    }
+    if gitignore_template:
+        body["gitignore_template"] = str(gitignore_template)
+    if license_template:
+        body["license_template"] = str(license_template)
+
+    # Decide user-vs-org endpoint.  We fetch /user once to know the user's
+    # own login so an explicit owner matching it still uses /user/repos.
+    if owner and "/" in owner:
+        # tolerate "owner/repo" being passed as owner
+        owner = owner.split("/", 1)[0]
+    if owner:
+        try:
+            me = _gh_httpx("GET", "/user", token=token)
+            my_login = (me or {}).get("login", "")
+        except RuntimeError:
+            my_login = ""
+        if not my_login or owner.lower() != my_login.lower():
+            # org-scoped create
+            from urllib.parse import quote
+            result = _gh_httpx(
+                "POST", f"/orgs/{quote(owner, safe='')}/repos",
+                token=token, body=body)
+            return _slim_repo(result, owner)
+    # user-scoped create
+    result = _gh_httpx("POST", "/user/repos", token=token, body=body)
+    return _slim_repo(result)
+
+
+def _slim_repo(r: dict, fallback_owner: str = "") -> dict:
+    """Reduce a GitHub repo object to the slim fields the frontend needs."""
+    if not isinstance(r, dict):
+        return {}
+    owner_obj = r.get("owner") or {}
+    return {
+        "full_name": r.get("full_name", ""),
+        "name": r.get("name", ""),
+        "owner": owner_obj.get("login", fallback_owner),
+        "private": bool(r.get("private", False)),
+        "default_branch": r.get("default_branch", "main"),
+        "description": r.get("description") or "",
+        "updated_at": r.get("updated_at", ""),
+        "clone_url": r.get("clone_url", ""),
+    }
+
+
+def list_gitignore_templates(user_id: str | None = None) -> list[str]:
+    """List the .gitignore templates GitHub offers.
+
+    Public endpoint on GitHub's side (no auth required), but if ``user_id``
+    is supplied we attach the user's token — that lifts the unauthenticated
+    rate limit.  Returns a list of template names (e.g. ["Node", "Python", ...]).
+    """
+    token = _token_for_user(user_id) if user_id else ""
+    result = _gh_httpx("GET", "/gitignore/templates", token=token)
+    if isinstance(result, list):
+        names = []
+        for item in result:
+            if isinstance(item, str):
+                names.append(item)
+            elif isinstance(item, dict) and item.get("name"):
+                names.append(item["name"])
+        return names
+    return []
+
+
+def list_licenses(user_id: str | None = None) -> list[dict]:
+    """List the license templates GitHub offers.
+
+    Returns slim dicts: ``{key, name, spdx_id, url}``.
+    """
+    token = _token_for_user(user_id) if user_id else ""
+    result = _gh_httpx("GET", "/licenses", token=token)
+    if not isinstance(result, list):
+        return []
+    slim = []
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        slim.append({
+            "key": item.get("key", ""),
+            "name": item.get("name", ""),
+            "spdx_id": item.get("spdx_id"),
+            "url": item.get("url", ""),
+        })
+    return slim
+
+
+def list_user_orgs(user_id: str) -> list[dict]:
+    """List orgs the user can create repos in.  Returns slim dicts:
+    ``{login, id, avatar_url}``."""
+    token = _token_for_user(user_id)
+    result = _gh_httpx("GET", "/user/orgs?per_page=100", token=token)
+    if not isinstance(result, list):
+        return []
+    slim = []
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        slim.append({
+            "login": item.get("login", ""),
+            "id": item.get("id"),
+            "avatar_url": item.get("avatar_url", ""),
+        })
+    return slim
+
+
+# ---------------------------------------------------------------------------
 # Workspace CRUD
 # ---------------------------------------------------------------------------
 

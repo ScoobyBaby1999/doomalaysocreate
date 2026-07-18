@@ -258,3 +258,61 @@ def agent_log(workspace: Path, agent_id: str, entry: str) -> None:
     log_file = d / "agents" / f"{agent_id}.log"
     with open(log_file, "a") as f:
         f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())}] {entry}\n")
+
+
+def clear_memory(workspace: Path) -> None:
+    """Reset the memory layer for a workspace.
+
+    Truncates the event log, the blackboard, and the per-agent logs, and
+    re-initialises the state file. The workspace's ``.pied`` directory itself
+    is preserved so subsequent reads/writes don't need to recreate it.
+    """
+    d = memory_dir(workspace)
+    # Truncate the event log
+    (d / "_log.jsonl").write_text("")
+    # Reset state to a fresh active state (preserves created_at if present)
+    state_file = d / "_state.json"
+    created_at = time.time()
+    try:
+        prev = json.loads(state_file.read_text()) if state_file.exists() else {}
+        created_at = prev.get("created_at", created_at)
+    except Exception:
+        pass
+    fresh = {
+        "goal": "",
+        "plan": "",
+        "status": "active",
+        "created_at": created_at,
+        "updated_at": time.time(),
+        "active_agents": [],
+        "completed_tasks": [],
+        "pending_tasks": [],
+    }
+    state_file.write_text(json.dumps(fresh, indent=2))
+    # Clear the blackboard
+    bb_dir = d / "blackboard"
+    if bb_dir.is_dir():
+        for f in bb_dir.glob("*.jsonl"):
+            try:
+                f.write_text("")
+            except Exception:
+                pass
+    # Clear per-agent logs
+    agents_dir = d / "agents"
+    if agents_dir.is_dir():
+        for f in agents_dir.glob("*.log"):
+            try:
+                f.write_text("")
+            except Exception:
+                pass
+
+
+def write_note(workspace: Path, agent_id: str, content: str,
+               key: str = "note") -> None:
+    """Append a free-form note to the blackboard and the event log.
+
+    This is the write-side counterpart of ``read_state`` — used by the
+    ``POST /api/memory`` endpoint when the client wants to drop a note for
+    the next agent turn.
+    """
+    post_blackboard(workspace, "notes", key, content, agent_id=agent_id)
