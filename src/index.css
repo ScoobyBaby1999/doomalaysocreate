@@ -370,10 +370,16 @@ img { max-width: 100%; height: auto; }
 
 /* ── Virtualization-like perf for long lists ────────────────────────
  * Apply `.cv-auto` to list items so the browser skips rendering
- * off-screen children. Cheap + works without a virtualizer dependency. */
+ * off-screen children. Cheap + works without a virtualizer dependency.
+ * FE-COMPLETION Task 4: intrinsic-size set to 44px to match the actual
+ * min row height (40px providers / 36px condensed + a 4px breathing
+ * margin). The previous 64px estimate caused perceived overlap during
+ * fast scroll because off-screen rows reserved 64px but rendered at
+ * 36–40px, producing a 24–28px "jump" that looked like the next row
+ * painting under the current one. */
 .cv-auto {
   content-visibility: auto;
-  contain-intrinsic-size: 64px;
+  contain-intrinsic-size: 44px;
 }
 
 /* ── No horizontal scroll anywhere — critical for mobile-first ──── */

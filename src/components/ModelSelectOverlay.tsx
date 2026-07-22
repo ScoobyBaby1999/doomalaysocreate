@@ -291,7 +291,7 @@ const ModelRow = memo(function ModelRow({
       data-selected={isSelected ? "true" : undefined}
       aria-pressed={isSelected}
       className={`
-        cv-auto flex flex-col w-full text-left rounded-xl px-2 py-1.5 min-h-[32px] overflow-hidden transition-colors duration-100 cursor-pointer touch-target
+        flex flex-col w-full text-left rounded-xl px-2 py-1.5 min-h-[40px] overflow-hidden transition-colors duration-100 cursor-pointer touch-target
         ${isSelected ? "bg-accent/20 ring-1 ring-accent/40" : dimmed ? "" : "hover:bg-muted/40"}
         ${dimmed && !isSelected ? "opacity-35" : ""}
       `}
@@ -545,9 +545,13 @@ function ProviderBox({
         </button>
       )}
 
-      {/* Model list — only rendered when expanded. Properly spaced rows. */}
+      {/* Model list — only rendered when expanded. FE-COMPLETION Task 4:
+          gap-2 + min-h-[40px] rows + removed cv-auto (it caused perceived
+          overlap because contain-intrinsic-size was 64px but rows are 40px,
+          so the browser painted 24px of empty space over the next row when
+          scrolling). Flexbox column layout — never CSS columns/masonry. */}
       {expanded && (
-        <div className="flex flex-col gap-1 p-1.5 max-h-[50vh] overflow-y-auto">
+        <div className="flex flex-col gap-2 p-1.5 max-h-[50vh] overflow-y-auto">
           {empty ? (
             <div className="flex items-center justify-center h-10 text-[11px] text-muted-foreground/50">
               no models synced
@@ -708,7 +712,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
             {isSelected && <IcoCheck />}
           </span>
           <span
-            className={`text-[11px] leading-tight truncate flex-1 font-medium ${isSelected ? "text-white" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
+            className={`text-xs leading-tight truncate flex-1 font-medium ${isSelected ? "text-white" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
             title={model.logical}
           >
             {model.displayName}

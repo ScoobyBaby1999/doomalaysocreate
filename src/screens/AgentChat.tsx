@@ -411,29 +411,11 @@ export function AgentChat({ settings }: { settings: Settings }) {
               : "New Chat"}
           </div>
 
-          {/* Spacer pushes the model badge toward the center/right. */}
+          {/* Spacer pushes the right-side cluster (context circle, price,
+           *  stop, more) toward the right edge. The model badge lives in
+           *  the chat INPUT toolbar now (BATCH-2 Task 5.2 / FE-COMPLETION
+           *  Task 1) so the header stays uncluttered. */}
           <div className="flex-1" />
-
-          {/* Model selector — pill-shaped, subtle gradient, large touch target.
-              Uses border-white/5 (thin, subtle) instead of border-border (thick, bricky). */}
-          <button
-            onClick={() => !running && openOverlay()}
-            disabled={running}
-            aria-label="Select model"
-            title={selectedProviderName || "Select model"}
-            className="touch-target shrink-0 flex items-center gap-1.5 px-2.5 h-9 rounded-full border border-white/5 bg-gradient-to-br from-surface2/80 to-surface/80 hover:from-surface2 hover:to-surface3 hover:border-accent/40 transition-all text-[12px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[44vw] sm:max-w-[220px] shadow-sm"
-          >
-            <span
-              className="w-2 h-2 rounded-full shrink-0 ring-1 ring-white/10"
-              style={{ background: modelDisplay?.color || "#a855f7" }}
-            />
-            <span className="truncate text-accentLight font-medium">
-              {modelDisplay?.label || "Select model"}
-            </span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground/70 shrink-0">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </button>
 
           {/* Context usage circle — uses the selected model's REAL
               contextLength. Hidden on the very smallest screens so the
@@ -460,12 +442,11 @@ export function AgentChat({ settings }: { settings: Settings }) {
             </div>
           )}
 
-          {/* BATCH-2 Task 5.3 — removed the always-visible "+" New button
-           *  (it sat between price and the 3-dots More toggle, overlapping
-           *  on small screens). The Stop button still appears here while
-           *  generating — but per Task 5.1, stop also lives at the bottom
-           *  of the streaming reply, so this header stop is the fallback.
-           *  New chat is reachable via the SessionSidebar hamburger menu. */}
+          {/* FE-COMPLETION Task 2 — the always-visible "+" New button has
+           *  been removed entirely (it sat between price and the 3-dots More
+           *  toggle, overlapping on small screens and wasn't useful — new
+           *  chat is reachable from the SessionSidebar). Only the Stop
+           *  button remains here while a turn is generating. */}
           {running && (
             <button
               onClick={handleStop}
@@ -855,6 +836,29 @@ export function AgentChat({ settings }: { settings: Settings }) {
         {/* Tool bar — horizontally scrollable on mobile. Subtle bg so it
             reads as a distinct toolbar above the input. */}
         <div className="flex items-center gap-1 max-w-3xl mx-auto mb-1.5 px-1 min-h-[36px] overflow-x-auto no-scrollbar">
+          {/* FE-COMPLETION Task 1 — Model badge lives here in the chat input
+           *  toolbar (moved out of the header so the header is uncluttered).
+           *  Pill-shaped with the provider color dot + model name + chevron.
+           *  Tapping opens the ModelSelectOverlay. */}
+          <button
+            onClick={() => !running && openOverlay()}
+            disabled={running}
+            aria-label="Select model"
+            title={selectedProviderName || "Select model"}
+            className="touch-target shrink-0 flex items-center gap-1.5 px-2.5 h-8 rounded-full border border-white/5 bg-gradient-to-br from-surface2/80 to-surface/80 hover:from-surface2 hover:to-surface3 hover:border-accent/40 transition-all text-[11.5px] disabled:opacity-50 disabled:cursor-not-allowed max-w-[40vw] sm:max-w-[200px]"
+          >
+            <span
+              className="w-2 h-2 rounded-full shrink-0 ring-1 ring-white/10"
+              style={{ background: modelDisplay?.color || "#a855f7" }}
+            />
+            <span className="truncate text-foreground font-medium">
+              {modelDisplay?.label || "Select model"}
+            </span>
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground/70 shrink-0">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+
           <ToolIcons
             effort={effort}
             webSearch={webSearch}
@@ -1177,15 +1181,18 @@ function EmptyState({ onSend }: { onSend: (text: string) => void }) {
           ))}
         </div>
 
-        {/* Tips — hidden on mobile (no keyboard) */}
+        {/* Tips — hidden on mobile (no keyboard). FE-COMPLETION Task 8:
+            Enter = newline (phone-first); send via the explicit Send
+            button. The old "Enter to send / Shift+Enter newline" hint
+            was wrong after the Enter-to-send handler was removed. */}
         <div className="hidden sm:flex mt-6 items-center justify-center gap-4 text-[10px] text-muted-foreground/50">
           <span className="flex items-center gap-1">
             <kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Enter</kbd>
-            to send
+            for newline
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Shift+Enter</kbd>
-            newline
+            <kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Send</kbd>
+            button to send
           </span>
           <span>·</span>
           <span>Queue messages while agent works</span>
