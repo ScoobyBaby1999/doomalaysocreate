@@ -235,6 +235,39 @@ def resolve_quirks(catalog: dict[str, dict], *, logical: str | None,
     return dict(quirks) if isinstance(quirks, dict) else {}
 
 
+def resolve_effort_levels(catalog: dict[str, dict], *, logical: str | None,
+                          who: str | None, family: str | None) -> list[str]:
+    """Return the ordered list of effort level names this (provider, model)
+    supports on its host, e.g. ``["low", "medium", "high"]`` or
+    ``["none", "minimal", "low", "medium", "high", "xhigh", "max"]``.
+
+    Empty list ``[]`` means the model has no reasoning/effort parameter
+    (either it doesn't reason at all, or it reasons natively with no
+    configurable level — phi-4-reasoning, deepseek-r1).
+
+    The frontend uses this to:
+      * show/hide the effort-mode button (hidden when ``effort_levels == []``)
+      * populate the effort-mode dropdown with the model's canonical names
+        (some models have 3 levels, some have 7, with different names).
+
+    Resolution order: exact 'provider/model' -> logical -> family -> '*'
+    (same as resolve_reasoning_entry). The '*' default has ``effort_levels=[]``.
+    """
+    entry = resolve_reasoning_entry(catalog, logical=logical, who=who, family=family)
+    levels = entry.get("effort_levels")
+    if not isinstance(levels, list):
+        return []
+    # Coerce to list[str], drop empties, preserve order + dedupe.
+    out: list[str] = []
+    seen: set[str] = set()
+    for lvl in levels:
+        s = str(lvl).strip() if lvl is not None else ""
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
 
 # --- web-search catalog (provider-native web search) -------------------------
 # Same shape as the reasoning catalog, but for the per-provider "do they have a
@@ -398,9 +431,18 @@ def get_model_capabilities(provider_name: str | None, model_id: str | None, *,
         if "function calling" in full or "tool" in full:
             has_tools = True
 
+    # Effort levels: the ordered list of effort level names this
+    # (provider, model) supports on its host. Empty list = no effort param
+    # (model either doesn't reason, or reasons natively with no knob).
+    # The frontend uses this to show/hide the effort button AND to render
+    # the correct variant names (some models have 3 levels, some have 7,
+    # with different names like 'low/mid/ultra' vs 'none/minimal/low/.../max').
+    effort_levels = resolve_effort_levels(rcat, logical=logical, who=who, family=family)
+
     return {
         "effort": bool(rbody),
         "effort_param": effort_param,
+        "effort_levels": effort_levels,
         "web_search": ws_native,
         "web_search_native": ws_native,
         "tools": has_tools,

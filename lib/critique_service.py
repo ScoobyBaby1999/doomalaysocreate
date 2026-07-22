@@ -368,12 +368,25 @@ class Panel:
             any_tools = False
             any_vision = False
             effort_params: set[str] = set()
+            # Per-logical-model effort_levels: ordered union of every host's
+            # supported effort levels. The frontend uses this to render the
+            # effort-mode dropdown with the model's canonical level names
+            # (e.g. deepseek-v4-pro has 3 levels: none/high/max; OpenRouter
+            # :free models have 7: none/minimal/low/medium/high/xhigh/max).
+            # Empty list = no effort button shown for this logical model.
+            effort_levels: list[str] = []
+            _seen_levels: set[str] = set()
             for h in hosts:
                 hc = h.get("capabilities") or {}
                 if hc.get("effort"):
                     any_effort = True
                     if hc.get("effort_param"):
                         effort_params.add(hc["effort_param"])
+                for lvl in (hc.get("effort_levels") or []):
+                    s = str(lvl).strip() if lvl is not None else ""
+                    if s and s not in _seen_levels:
+                        _seen_levels.add(s)
+                        effort_levels.append(s)
                 if hc.get("web_search") or hc.get("web_search_native"):
                     any_native_ws = True
                 if hc.get("tools"):
@@ -383,6 +396,7 @@ class Panel:
             capabilities = {
                 "effort": any_effort,
                 "effort_param": sorted(p for p in effort_params if p),
+                "effort_levels": effort_levels,
                 "web_search": any_native_ws,
                 "web_search_native": any_native_ws,
                 # Backwards-compat aliases (frontend may still use these):
@@ -1973,26 +1987,36 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             if resolved:
                 model = resolved
-        # optional workspace_id: link agent to a user workspace sandbox
+        # optional workspace_id: link agent to a user workspace sandbox.
+        # If the workspace_id is provided but NOT found (or not owned by the
+        # caller), we DON'T 404 — we log a warning and proceed WITHOUT a
+        # workspace so the chat still works (Bug 8: the frontend sometimes
+        # sends a stale/invalid workspace_id after a Space wipe or session
+        # restore, and the chat shouldn't fail because of it).
         workspace_id = payload.get("workspace_id")
         workspace_id = workspace_id.strip() if isinstance(workspace_id, str) and workspace_id.strip() else None
         if workspace_id:
             ws = db.get_workspace(workspace_id)
             if not ws:
-                self._send_json(404, {"error": "workspace not found"})
-                return
-            # ownership check: agent must operate in caller's workspace.
-            # The service bearer token in Authorization was already verified by
-            # _auth_and_body; here we additionally require GitHub identity,
-            # carried in the X-JWT header (NOT Authorization, which is reserved
-            # for the service/rotation token).
-            user_id = self._require_user_from_jwt()
-            if not user_id:
-                self._send_json(401, {"error": "GitHub identity required — connect GitHub in settings"})
-                return
-            if ws["user_id"] != user_id:
-                self._send_json(403, {"error": "access denied"})
-                return
+                log_event("agent_post_workspace_not_found",
+                          workspace_id=workspace_id,
+                          note="proceeding without workspace (stale id from frontend?)")
+                workspace_id = None
+            else:
+                # ownership check: agent must operate in caller's workspace.
+                # The service bearer token in Authorization was already verified by
+                # _auth_and_body; here we additionally require GitHub identity,
+                # carried in the X-JWT header (NOT Authorization, which is reserved
+                # for the service/rotation token).
+                user_id = self._require_user_from_jwt()
+                if not user_id:
+                    self._send_json(401, {"error": "GitHub identity required — connect GitHub in settings"})
+                    return
+                if ws["user_id"] != user_id:
+                    log_event("agent_post_workspace_access_denied",
+                              workspace_id=workspace_id,
+                              note="proceeding without workspace (not owned by caller)")
+                    workspace_id = None
         # Optional chat_session_id: link this agent turn to a persistent chat
         # session for history. If absent, we auto-create one so every message
         # has a persistent home (matches the frontend's expectations).
