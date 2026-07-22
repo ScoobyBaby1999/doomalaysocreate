@@ -2020,13 +2020,34 @@ class Handler(BaseHTTPRequestHandler):
         # true, the session uses ResearchAdapter instead of the Claude/Strands
         # SDK and drives research_templates directly from the panel's slots.
         panel_for_research: Panel = self.server.panel  # type: ignore[attr-defined]
+        # Task 6 — per-chat metadata fallback: if the request didn't
+        # explicitly set a param, fall back to the chat session's stored
+        # metadata so switching chats restores the right model/tools.
+        # ``cs_meta`` is None if no chat_session_id was resolved.
+        cs_meta: dict | None = None
+        if chat_session_id:
+            try:
+                import chat_routes
+                cs_meta = chat_routes.get_chat_session(chat_session_id)
+            except Exception:
+                cs_meta = None
+        # model fallback (already resolved above, but if the request didn't
+        # send a model, use the session's stored model)
+        if not model and cs_meta and cs_meta.get("model"):
+            model = cs_meta["model"].strip() or None
         effort = str(payload.get("effort", "")).strip().lower() or None
+        if not effort and cs_meta:
+            effort = (cs_meta.get("effort") or "").strip().lower() or None
         if effort and effort not in ("low", "med", "high", "max"):
             self._send_json(400, {"error": "'effort' must be one of low|med|high|max"})
             return
         web_search = bool(payload.get("webSearch") or payload.get("web_search"))
+        if "webSearch" not in payload and "web_search" not in payload and cs_meta:
+            web_search = bool(cs_meta.get("web_search", 0))
         web_search_template = (payload.get("webSearchTemplate")
                                 or payload.get("web_search_template"))
+        if not web_search_template and cs_meta:
+            web_search_template = cs_meta.get("web_template") or None
         if web_search_template and web_search_template not in (
                 "breadth", "deep_dive", "compare", "fact_check"):
             self._send_json(400, {"error": "'webSearchTemplate' must be one of breadth|deep_dive|compare|fact_check"})
@@ -2034,18 +2055,51 @@ class Handler(BaseHTTPRequestHandler):
         if web_search and not web_search_template:
             web_search_template = "breadth"  # default template
         deep_research = bool(payload.get("deepResearch") or payload.get("deep_research"))
+        if "deepResearch" not in payload and "deep_research" not in payload and cs_meta:
+            deep_research = bool(cs_meta.get("deep_research", 0))
         deep_research_mode = (payload.get("deepResearchMode")
                                or payload.get("deep_research_mode"))
+        if not deep_research_mode and cs_meta:
+            deep_research_mode = cs_meta.get("deep_mode") or None
         if deep_research_mode and deep_research_mode not in (
                 "default", "react", "extended_thinking"):
             self._send_json(400, {"error": "'deepResearchMode' must be one of default|react|extended_thinking"})
             return
         deep_research_template = (payload.get("deepResearchTemplate")
                                    or payload.get("deep_research_template"))
+        if not deep_research_template and cs_meta:
+            deep_research_template = cs_meta.get("deep_template") or None
         if deep_research_template and deep_research_template not in (
                 "breadth", "deep_dive", "compare", "fact_check"):
             self._send_json(400, {"error": "'deepResearchTemplate' must be one of breadth|deep_dive|compare|fact_check"})
             return
+        # Task 6 — persist the resolved metadata back to the chat session so
+        # the next turn (which may not send these params) picks them up.
+        # Skip if the chat session was just auto-created (it already has
+        # these values from the create call). Best-effort — never block the
+        # turn on a DB write failure.
+        if chat_session_id and cs_meta:
+            try:
+                import chat_routes
+                updates: dict = {}
+                if model and model != (cs_meta.get("model") or ""):
+                    updates["model"] = model
+                if effort and effort != (cs_meta.get("effort") or ""):
+                    updates["effort"] = effort
+                if web_search != bool(cs_meta.get("web_search", 0)):
+                    updates["web_search"] = web_search
+                if (web_search_template or "") != (cs_meta.get("web_template") or ""):
+                    updates["web_template"] = web_search_template
+                if deep_research != bool(cs_meta.get("deep_research", 0)):
+                    updates["deep_research"] = deep_research
+                if (deep_research_mode or "") != (cs_meta.get("deep_mode") or ""):
+                    updates["deep_mode"] = deep_research_mode
+                if (deep_research_template or "") != (cs_meta.get("deep_template") or ""):
+                    updates["deep_template"] = deep_research_template
+                if updates:
+                    chat_routes.update_chat_session_meta(chat_session_id, **updates)
+            except Exception as e:  # noqa: BLE001
+                log_event("agent_chat_meta_persist_error", error=repr(e)[:200])
         try:
             mode = str(payload.get("mode", "auto")).strip().lower()
             if mode not in ("auto", "build", "plan"):

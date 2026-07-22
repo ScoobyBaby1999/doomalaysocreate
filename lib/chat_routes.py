@@ -43,13 +43,23 @@ def _iso_now() -> str:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chat_sessions (
-    id           TEXT PRIMARY KEY,
-    title        TEXT NOT NULL DEFAULT 'New Chat',
-    model        TEXT,
-    workspace_id TEXT,
-    user_id      TEXT,
-    created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL DEFAULT 'New Chat',
+    model           TEXT,
+    workspace_id    TEXT,
+    user_id         TEXT,
+    -- Per-chat session metadata (Task 6): each chat remembers its own
+    -- tool/model/judge config so switching chats restores the right setup.
+    effort          TEXT,              -- 'low'|'med'|'high'|'max'
+    web_search      INTEGER DEFAULT 0, -- 0/1 toggle
+    web_template    TEXT,              -- template id or label
+    deep_research   INTEGER DEFAULT 0, -- 0/1 toggle
+    deep_template   TEXT,              -- template id or label
+    deep_mode       TEXT,              -- 'default'|'react'|'extended_thinking'
+    judge_count     INTEGER DEFAULT 3, -- 1..6 judges for in-chat panel
+    judge_template  TEXT,              -- 'critique'|'verify'|'improve'|'debate'
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS chat_events (
@@ -80,6 +90,31 @@ def _migrate_user_id() -> None:
         pass  # column already exists
 
 
+def _migrate_session_meta() -> None:
+    """Add per-chat metadata columns to legacy chat_sessions tables.
+
+    Task 6: each chat session now remembers its own tool/model/judge config
+    so switching chats restores the right setup. The columns are added
+    idempotently via ALTER TABLE (silently skipped if they already exist).
+    """
+    db = _dbmod._db()
+    for col, decl in (
+        ("effort",          "TEXT"),
+        ("web_search",      "INTEGER DEFAULT 0"),
+        ("web_template",    "TEXT"),
+        ("deep_research",   "INTEGER DEFAULT 0"),
+        ("deep_template",   "TEXT"),
+        ("deep_mode",       "TEXT"),
+        ("judge_count",     "INTEGER DEFAULT 3"),
+        ("judge_template",  "TEXT"),
+    ):
+        try:
+            db.execute(f"ALTER TABLE chat_sessions ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    db.commit()
+
+
 _schema_initialized = False
 _schema_lock = threading.Lock()
 
@@ -92,6 +127,7 @@ def _ensure_schema_once() -> None:
         if not _schema_initialized:
             _ensure_schema()
             _migrate_user_id()
+            _migrate_session_meta()
             _schema_initialized = True
 
 
@@ -99,18 +135,75 @@ def _ensure_schema_once() -> None:
 # CRUD
 # ---------------------------------------------------------------------------
 
+# Allowed keys for per-chat metadata (Task 6). Used by create_chat_session
+# and update_chat_session_meta. Everything else is rejected (defensive).
+_SESSION_META_KEYS = ("title", "model", "workspace_id", "effort",
+                      "web_search", "web_template", "deep_research",
+                      "deep_template", "deep_mode", "judge_count",
+                      "judge_template")
+
+
+def _coerce_meta_value(key: str, value: Any) -> Any:
+    """Coerce a metadata value to its SQLite-storable form. Booleans become
+    0/1 (for the web_search/deep_research INTEGER columns). ``judge_count``
+    is clamped to 1..6. ``effort`` / ``deep_mode`` / ``judge_template`` are
+    validated against their respective allowlists (None if invalid)."""
+    if key in ("web_search", "deep_research"):
+        return 1 if value else 0
+    if key == "judge_count":
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            n = 3
+        return max(1, min(6, n))
+    if key == "effort" and value is not None:
+        v = str(value).strip().lower()
+        return v if v in ("low", "med", "high", "max") else None
+    if key == "deep_mode" and value is not None:
+        v = str(value).strip().lower()
+        return v if v in ("default", "react", "extended_thinking") else None
+    if key == "judge_template" and value is not None:
+        v = str(value).strip().lower()
+        return v if v in ("critique", "verify", "improve", "debate") else None
+    if key in ("model", "web_template", "deep_template", "title", "workspace_id"):
+        if value is None:
+            return None
+        v = str(value).strip()
+        return v or None
+    return value
+
+
 def create_chat_session(*, title: str = "New Chat", model: str | None = None,
                         workspace_id: str | None = None,
-                        user_id: str | None = None) -> dict:
+                        user_id: str | None = None,
+                        effort: str | None = None,
+                        web_search: bool = False,
+                        web_template: str | None = None,
+                        deep_research: bool = False,
+                        deep_template: str | None = None,
+                        deep_mode: str | None = None,
+                        judge_count: int = 3,
+                        judge_template: str | None = None) -> dict:
     _ensure_schema_once()
     db = _dbmod._db()
     sid = _gen_id()
     now = _iso_now()
     with _write_lock:
         db.execute(
-            "INSERT INTO chat_sessions (id, title, model, workspace_id, user_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (sid, title, model, workspace_id, user_id, now, now))
+            "INSERT INTO chat_sessions (id, title, model, workspace_id, user_id, "
+            "effort, web_search, web_template, deep_research, deep_template, "
+            "deep_mode, judge_count, judge_template, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (sid, title, model, workspace_id, user_id,
+             _coerce_meta_value("effort", effort),
+             _coerce_meta_value("web_search", web_search),
+             _coerce_meta_value("web_template", web_template),
+             _coerce_meta_value("deep_research", deep_research),
+             _coerce_meta_value("deep_template", deep_template),
+             _coerce_meta_value("deep_mode", deep_mode),
+             _coerce_meta_value("judge_count", judge_count),
+             _coerce_meta_value("judge_template", judge_template),
+             now, now))
         db.commit()
     return get_chat_session(sid) or {
         "id": sid, "title": title, "model": model,
@@ -146,31 +239,42 @@ def list_chat_sessions(user_id: str | None = None, limit: int = 100) -> list[dic
     return [dict(r) for r in rows]
 
 
-def update_chat_session(session_id: str, *, title: str | None = None,
-                        model: str | None = None,
-                        workspace_id: str | None = None) -> dict | None:
+def update_chat_session(session_id: str, **fields) -> dict | None:
+    """Update a chat session's fields. Accepts any of _SESSION_META_KEYS.
+
+    Task 6: this now accepts all the per-chat metadata fields (effort,
+    web_search, web_template, deep_research, deep_template, deep_mode,
+    judge_count, judge_template) in addition to the legacy title/model/
+    workspace_id. Values are coerced via _coerce_meta_value before storage.
+    """
     _ensure_schema_once()
-    fields: list[str] = []
+    fields_out: list[str] = []
     params: list[Any] = []
-    if title is not None:
-        fields.append("title = ?")
-        params.append(title)
-    if model is not None:
-        fields.append("model = ?")
-        params.append(model)
-    if workspace_id is not None:
-        fields.append("workspace_id = ?")
-        params.append(workspace_id)
-    if not fields:
+    for k, v in fields.items():
+        if k not in _SESSION_META_KEYS:
+            continue
+        # Skip None values to allow partial updates (caller can still
+        # explicitly clear by passing "" or 0).
+        if v is None:
+            continue
+        fields_out.append(f"{k} = ?")
+        params.append(_coerce_meta_value(k, v))
+    if not fields_out:
         return get_chat_session(session_id)
-    fields.append("updated_at = ?")
+    fields_out.append("updated_at = ?")
     params.append(_iso_now())
     params.append(session_id)
     with _write_lock:
         _dbmod._db().execute(
-            f"UPDATE chat_sessions SET {', '.join(fields)} WHERE id = ?", params)
+            f"UPDATE chat_sessions SET {', '.join(fields_out)} WHERE id = ?", params)
         _dbmod._db().commit()
     return get_chat_session(session_id)
+
+
+def update_chat_session_meta(session_id: str, **fields) -> dict | None:
+    """Alias for update_chat_session — explicit name for the per-chat
+    metadata update (Task 6). Accepts the same _SESSION_META_KEYS."""
+    return update_chat_session(session_id, **fields)
 
 
 def delete_chat_session(session_id: str) -> bool:
@@ -345,8 +449,25 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             title = str(body.get("title", "New Chat")).strip() or "New Chat"
             model = str(body.get("model", "")).strip() or None
             workspace_id = str(body.get("workspace_id", "")).strip() or None
+            # Per-chat metadata (Task 6): accept the new fields from the
+            # body. All are optional; missing values fall back to defaults.
+            kwargs: dict[str, Any] = {}
+            for k in ("effort", "web_template", "deep_template",
+                      "deep_mode", "judge_template"):
+                if k in body:
+                    kwargs[k] = body[k]
+            if "web_search" in body:
+                kwargs["web_search"] = bool(body["web_search"])
+            if "deep_research" in body:
+                kwargs["deep_research"] = bool(body["deep_research"])
+            if "judge_count" in body:
+                try:
+                    kwargs["judge_count"] = int(body["judge_count"])
+                except (TypeError, ValueError):
+                    pass
             cs = create_chat_session(title=title, model=model,
-                                     workspace_id=workspace_id, user_id=user_id)
+                                     workspace_id=workspace_id, user_id=user_id,
+                                     **kwargs)
             _ok_session(handler, cs, status=201)
             return True
         if route.startswith("/api/chat/sessions/"):
@@ -357,16 +478,14 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             if not _check_ownership(handler, cs, user_id):
                 return True
             if sub == "update":
+                # Task 6: accept ALL per-chat metadata fields, not just
+                # title/model/workspace_id. Values are coerced inside
+                # update_chat_session.
                 fields: dict[str, Any] = {}
-                if "title" in body:
-                    t = str(body["title"]).strip()
-                    if t:
-                        fields["title"] = t
-                if "model" in body:
-                    fields["model"] = str(body["model"]).strip() or None
-                if "workspace_id" in body:
-                    fields["workspace_id"] = str(body["workspace_id"]).strip() or None
-                updated = update_chat_session(sid, **fields)
+                for k in _SESSION_META_KEYS:
+                    if k in body:
+                        fields[k] = body[k]
+                updated = update_chat_session(sid, **fields) if fields else get_chat_session(sid)
                 _ok_session(handler, updated)
                 return True
             if sub == "persist":
