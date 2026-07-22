@@ -40,15 +40,9 @@ export default function App() {
 
   const setBaseUrl = useModelStore((s) => s.setBaseUrl);
   const fetchProviders = useModelStore((s) => s.fetchProviders);
-  const openOverlay = useModelStore((s) => s.openOverlay);
-  const selectedModelId = useModelStore((s) => s.selectedModelId);
-  const selectedProviderName = useModelStore((s) => s.selectedProviderName);
-  const providers = useModelStore((s) => s.providers);
-  const selectedProviderColor = (() => {
-    if (!selectedProviderName) return "#a855f7";
-    const p = providers.find((g) => g.name === selectedProviderName);
-    return p?.color || "#a855f7";
-  })();
+  // NOTE: BATCH-2 Task 2 — removed `openOverlay`, `selectedModelId`,
+  //  `selectedProviderName`, `providers`, `selectedProviderColor` from here.
+  //  The model selector is owned by AgentChat's header now.
 
   useEffect(() => {
     setBaseUrl(settings.baseUrl);
@@ -229,15 +223,10 @@ export default function App() {
        <header className="flex items-center gap-2 px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content bg-surface/60 backdrop-blur">
          <span className="font-semibold tracking-tight text-foreground">doomalaysocreate</span>
          <span className="text-[11px] text-muted hidden sm:inline">panel · agentic coder</span>
-         <button
-           onClick={openOverlay}
-           className="touch-target ml-auto flex items-center gap-1.5 px-3 h-9 rounded-xl border border-border hover:border-accent/60 transition-colors text-[12px] bg-surface2/60"
-           title="Select provider model"
-           aria-label="Select provider model"
-         >
-           <span className="w-2.5 h-2.5 rounded-full ring-2 ring-background" style={{ background: selectedProviderColor || "#a855f7" }} />
-           <span className="text-muted max-w-[80px] sm:max-w-[160px] truncate">{selectedModelId || selectedProviderName || "Model"}</span>
-         </button>
+         {/* NOTE: BATCH-2 Task 2 — removed duplicate model-select button here.
+          *  The model selector already lives in AgentChat's header (right of
+          *  the session title). Showing it twice was clutter + confusing. */}
+         <div className="ml-auto" />
        </header>
 
       <main className="flex-1 min-h-0">

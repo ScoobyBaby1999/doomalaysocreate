@@ -49,11 +49,16 @@ interface ChatMessageBubbleProps {
   message: ChatMessage;
   /** Optional retry callback for the last assistant message. */
   onRetry?: () => void;
+  /** BATCH-2 Task 5.1 — Stop callback shown as small white/grey text at
+   *  the bottom of a streaming assistant message. Removed automatically
+   *  when generation is done (i.e. when message.isStreaming flips to false). */
+  onStop?: () => void;
 }
 
 export const ChatMessageBubble = memo(function ChatMessageBubble({
   message,
   onRetry,
+  onStop,
 }: ChatMessageBubbleProps) {
   // -- User message: right-aligned bubble with pending indicator ----------
   //  Purple bubble + white text — high contrast on the dark surface.
@@ -128,6 +133,24 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
             {message.isStreaming && hasMeta && (
               <div className="flex items-center gap-2 mt-1.5">
                 <MessageMeta message={message} />
+              </div>
+            )}
+            {/* BATCH-2 Task 5.1 — Stop link at the bottom of the streaming
+                reply. Small white/grey text, removed when generation is
+                done (the whole bubble re-renders without isStreaming). */}
+            {message.isStreaming && onStop && (
+              <div className="mt-2 flex items-center gap-1.5">
+                <button
+                  onClick={onStop}
+                  className="touch-target inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[11px] text-muted-foreground hover:text-foreground hover:bg-surface2/60 transition-colors"
+                  title="Stop generating"
+                  aria-label="Stop generating"
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="6" y="6" width="12" height="12" rx="1.5" />
+                  </svg>
+                  Stop
+                </button>
               </div>
             )}
           </div>

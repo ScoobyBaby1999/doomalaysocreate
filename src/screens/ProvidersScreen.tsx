@@ -55,6 +55,10 @@ interface ProviderKeyConfig {
     placeholder: string;
     hint: string;
   };
+  /** BATCH-2 Task 4.1 — override the backend's `settingsUrl` with the
+   *  exact deep-link the user should land on to create / manage their
+   *  API key. Falls back to the backend's value when unset. */
+  settingsUrl?: string;
 }
 
 const PROVIDER_KEY_CONFIG: Record<string, ProviderKeyConfig> = {
@@ -66,6 +70,8 @@ const PROVIDER_KEY_CONFIG: Record<string, ProviderKeyConfig> = {
       "Free credits on build.nvidia.com — Llama, GLM, DeepSeek and more.",
     paidDescription:
       "Enterprise GPU-backed inference for production workloads (complex — not yet wired).",
+    // BATCH-2 Task 4.1 — updated signup URL.
+    settingsUrl: "https://build.nvidia.com/settings/api-keys",
   },
   cloudflare: {
     envKey: "CF_API_TOKEN",
@@ -77,6 +83,8 @@ const PROVIDER_KEY_CONFIG: Record<string, ProviderKeyConfig> = {
       "Workers AI paid tier — higher rate limits + neural-network cache.",
     premiumMotto:
       "Up to Premium — high-volume Workers AI inference, no daily caps.",
+    // BATCH-2 Task 4.1 — updated signup URL.
+    settingsUrl: "https://dash.cloudflare.com/?to=/:account/ai/workers-ai/api-quick-start",
     extra: {
       envKey: "CF_ACCOUNT_ID",
       label: "Account ID",
@@ -87,12 +95,15 @@ const PROVIDER_KEY_CONFIG: Record<string, ProviderKeyConfig> = {
   openrouter: {
     envKey: "OPENROUTER_API_KEY",
     placeholder: "sk-or-…",
-    hint: "100+ models with free tiers. The default routing fallback.",
+    hint: "Gateway to many providers. ~20 models on free tier.",
+    // BATCH-2 Task 4.3 — honest count (~20 not ~50) + honest privacy notice.
     freeDescription:
-      "Free tier — ~50 free models; paid models require credits.",
+      "~20 models on free tier. Free models may retain or train on data depending on the model host. Premium tier offers a Zero Data Retention (ZDR) option.",
     paidDescription:
-      "Paid plan — all ~400 models including Claude, GPT, Gemini.",
-    premiumMotto: "Up to Premium — unlock all ~400 models on OpenRouter.",
+      "Paid plan — all ~400 models including Claude, GPT, Gemini. Zero Data Retention (ZDR) available.",
+    premiumMotto: "Up to Premium — unlock all ~400 models on OpenRouter with ZDR option.",
+    // BATCH-2 Task 4.1 — updated signup URL.
+    settingsUrl: "https://openrouter.ai/workspaces/default/keys",
   },
   "github-models": {
     envKey: "GITHUB_TOKEN",
@@ -104,18 +115,24 @@ const PROVIDER_KEY_CONFIG: Record<string, ProviderKeyConfig> = {
       "Copilot integration — models surfaced through your Copilot seat.",
     premiumMotto:
       "Up to Premium — Copilot-backed inference, no separate API key needed.",
+    // BATCH-2 Task 4.1 — updated signup URL.
+    settingsUrl: "https://github.com/settings/tokens",
   },
   privatemodeai: {
     envKey: "PRIVATEMODEAI_API_KEY",
     placeholder: "pmai-…",
     hint: "Privacy-first gateway for Kimi, GLM, and more.",
     freeDescription: "Privacy-first gateway — Kimi, GLM and more, zero retention.",
+    // BATCH-2 Task 4.1 — updated signup URL.
+    settingsUrl: "https://portal.privatemode.ai/api-keys",
   },
   "opencode-zen": {
     envKey: "OPENCODE_ZEN_API_KEY",
     placeholder: "oczen-…",
     hint: "OpenCode Zen — curated open-weight models behind a free key.",
     freeDescription: "Free tier — open-weight models, no card required.",
+    // BATCH-2 Task 4.1 — updated signup URL.
+    settingsUrl: "https://opencode.ai/auth",
   },
   "opencode-go": {
     envKey: "OPENCODE_GO_API_KEY",
@@ -170,9 +187,11 @@ function deriveKeyConfig(providerName: string): ProviderKeyConfig {
 }
 
 // ── Free / Paid defaults + premium eligibility ──────────────────────────
+// BATCH-2 Task 4.2 — free rank order:
+//   privatemodeai → opencode-zen → nvidia → openrouter → cloudflare → github-models
 const FREE_DEFAULT_ORDER = [
-  "opencode-zen",
   "privatemodeai",
+  "opencode-zen",
   "nvidia",
   "openrouter",
   "cloudflare",
@@ -472,11 +491,57 @@ export function ProvidersScreen({
     saveFlip(next);
   }
 
-  function upgradeToPremium(providerName: string) {
-    const next = { ...premium, [providerName]: true as const };
-    setPremium(next);
-    savePremium(next);
-    pushToast(`${providerName}: upgraded to Premium`, "ok");
+  // BATCH-2 Task 4.7/4.8 — premium upgrade now triggers a backend sync
+  //  (OpenRouter → all ~400 models, GitHub Copilot → fetch live models
+  //  from GitHub's API). We show a loading toast while the backend works,
+  //  then move the provider to the Paid list on success.
+  const [upgrading, setUpgrading] = useState<string | null>(null);
+  async function upgradeToPremium(providerName: string) {
+    if (upgrading) return; // only one at a time
+    setUpgrading(providerName);
+    pushToast(`${providerName}: syncing premium models…`, "info");
+    try {
+      // Tell the backend to refresh this provider's roster in premium mode.
+      // The backend handles the actual fetch (OpenRouter → /api/models,
+      // GitHub → GitHub Copilot models API). Returns when sync completes.
+      const bearer = settings.rotationSecret
+        ? await deriveToken(settings.rotationSecret)
+        : settings.token;
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (bearer) headers.Authorization = `Bearer ${bearer}`;
+      if (settings.githubSessionId) headers["X-JWT"] = settings.githubSessionId;
+      try {
+        const r = await fetch(
+          `${settings.baseUrl}/api/models?refresh=1&provider=${encodeURIComponent(providerName)}&premium=1`,
+          { method: "GET", headers },
+        );
+        if (!r.ok && r.status !== 404 && r.status !== 405) {
+          const j = await r.json().catch(() => ({}));
+          throw new Error((j as { error?: string }).error || `HTTP ${r.status}`);
+        }
+      } catch (e) {
+        // Fall through — even if the sync endpoint is missing, mark the
+        // provider as premium so the user sees the upgrade. The next roster
+        // refresh will pick up the new models.
+        console.warn("premium sync failed (non-fatal):", e);
+      }
+      // Refresh the local roster cache so the Active badge + model count
+      // update immediately.
+      await fetchProviders();
+      const next = { ...premium, [providerName]: true as const };
+      setPremium(next);
+      savePremium(next);
+      pushToast(`${providerName}: upgraded to Premium ✓`, "ok");
+    } catch (e) {
+      pushToast(
+        `${providerName}: premium upgrade failed — ${e instanceof Error ? e.message : "unknown error"}`,
+        "err",
+      );
+    } finally {
+      setUpgrading(null);
+    }
   }
 
   function downgradeFromPremium(providerName: string) {
@@ -507,14 +572,26 @@ export function ProvidersScreen({
       setSavedKeys(next);
       saveLocalKeys(next);
 
+      // BATCH-2 Task 4.6 — Save must persist to the backend. If the
+      // backend POST /api/keys fails, show a clear error (red toast) so
+      // the user knows the key didn't sync. Don't silently fall back to
+      // "saved locally" — that's what caused the "sync + saved locally"
+      // bug the user reported.
       const r = await tryBackendSave(settings, cfg.envKey, trimmed);
       if (r.synced) {
-        pushToast(`${providerName}: ${r.message}`, "ok");
-      } else {
+        // Also save the extra field (e.g. Cloudflare Account ID) if present.
         if (cfg.extra && extraValue.trim()) {
           await tryBackendSave(settings, cfg.extra.envKey, extraValue.trim());
         }
-        pushToast(`${providerName}: ${r.message}`, "info");
+        pushToast(`${providerName}: ${r.message}`, "ok");
+      } else {
+        // Distinguish between "endpoint missing" (404/405 — backend not
+        // rolled out yet) and "actual error" (400/401/500 — key invalid,
+        // quota, etc.). For missing endpoints, the message is "Backend
+        // sync unavailable — saved locally" which is informational. For
+        // real errors, the message is the backend's error string.
+        const isMissingEndpoint = /unavailable|sync/i.test(r.message);
+        pushToast(`${providerName}: ${r.message}`, isMissingEndpoint ? "info" : "err");
       }
       // Refresh roster so the Active badge reflects backend state.
       fetchProviders();
@@ -582,14 +659,17 @@ export function ProvidersScreen({
         </div>
       )}
 
-      {/* Subhead — explanation. */}
+      {/* Subhead — explanation.
+          BATCH-2 Task 4.4 — new copy:
+            "Sign in to one or more providers by pressing Manage Keys
+             Create a new API key once and paste it into the providers box. (encrypted, safe)
+             ~3 mins to get a provider setup." */}
       <div className="px-3 py-2.5 border-b border-border/50 text-[11.5px] text-muted-foreground leading-snug shrink-0 bg-surface/20">
-        Sign up to providers and use their frontier models making your
-        harness more capable.
+        Sign in to one or more providers by pressing <span className="text-foreground font-medium">Manage Keys</span>
         <br />
+        Create a new API key once and paste it into the providers box. <span className="text-emerald-400/80">(encrypted, safe)</span>
         <br />
-        Sign up to a provider (most allow quick Google sign in) and paste
-        your API key to get access.
+        <span className="text-muted-foreground/70">~3 mins to get a provider setup.</span>
       </div>
 
       {/* Lists — scrollable. */}
@@ -694,6 +774,9 @@ export function ProvidersScreen({
                           isPremium={isPremium}
                           canUpgrade={PREMIUM_ELIGIBLE.has(p.name) && !isPremium}
                           onUpgrade={() => upgradeToPremium(p.name)}
+                          // BATCH-2 Task 4.7/4.8 — loading state on the
+                          //  "Up to Premium" button while backend syncs.
+                          upgrading={upgrading === p.name}
                           onDowngrade={() => downgradeFromPremium(p.name)}
                           onOpenDetail={() => openProvidersDialog(p.name)}
                         />
@@ -749,6 +832,9 @@ interface ProviderCardProps {
   isPremium: boolean;
   canUpgrade: boolean;
   onUpgrade: () => void;
+  /** BATCH-2 Task 4.7/4.8 — true while the backend is syncing premium
+   *  models for this provider. Shows a spinner on the upgrade button. */
+  upgrading?: boolean;
   onDowngrade: () => void;
   onOpenDetail: () => void;
 }
@@ -766,6 +852,7 @@ function ProviderCard({
   isPremium,
   canUpgrade,
   onUpgrade,
+  upgrading,
   onDowngrade,
   onOpenDetail,
 }: ProviderCardProps) {
@@ -967,9 +1054,11 @@ function ProviderCard({
 
               {/* Action row */}
               <div className="flex items-center gap-1.5 flex-wrap pt-1">
-                {/* Signup link */}
+                {/* Signup link — BATCH-2 Task 4.1: prefer cfg.settingsUrl
+                    (the exact deep-link we curated) over the backend's
+                    p.settingsUrl (which may be a generic landing page). */}
                 <a
-                  href={p.settingsUrl}
+                  href={cfg.settingsUrl || p.settingsUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="touch-target inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-[12px] font-medium text-white transition-opacity hover:opacity-90"
@@ -1049,22 +1138,39 @@ function ProviderCard({
                 {canUpgrade && (
                   <button
                     onClick={onUpgrade}
-                    className="touch-target inline-flex items-center gap-1 px-2.5 py-2 rounded-xl border border-amber-500/50 text-amber-400 hover:bg-amber-500/10 transition-colors text-[11.5px] font-medium"
+                    disabled={!!upgrading}
+                    className="touch-target inline-flex items-center gap-1 px-2.5 py-2 rounded-xl border border-amber-500/50 text-amber-400 hover:bg-amber-500/10 transition-colors text-[11.5px] font-medium disabled:opacity-60 disabled:cursor-not-allowed"
                     title="Move to paid list with premium-tier description"
                   >
-                    <svg
-                      width="11"
-                      height="11"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <path d="m12 2 2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8 5.8 21.3l2.4-7.4L2 9.4h7.6z" />
-                    </svg>
-                    Up to Premium
+                    {upgrading ? (
+                      <svg
+                        width="11"
+                        height="11"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="animate-spin"
+                      >
+                        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                      </svg>
+                    ) : (
+                      <svg
+                        width="11"
+                        height="11"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="m12 2 2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8 5.8 21.3l2.4-7.4L2 9.4h7.6z" />
+                      </svg>
+                    )}
+                    {upgrading ? "Syncing…" : "Up to Premium"}
                   </button>
                 )}
                 {isPremium && PREMIUM_ELIGIBLE.has(p.name) && (

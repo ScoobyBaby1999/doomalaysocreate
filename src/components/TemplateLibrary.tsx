@@ -20,6 +20,10 @@ import { motion, AnimatePresence } from "framer-motion";
 import { TemplateClient, type Template, type TemplateKind } from "../api/templates";
 import type { Settings } from "../api/panel";
 import { Markdown } from "./Markdown";
+// BATCH-2 Task 6.4 — chatStore is used by the AI-generate flow to drop
+// the user's template request into the chat input (so the agent can
+// create the template).
+import { useChatStore } from "../state/chatStore";
 
 type Tab = "mine" | "explore";
 type Sort = "hearts" | "recent" | "relevant";
@@ -92,6 +96,12 @@ export function TemplateLibrary({
   // (full-modal on desktop, bottom sheet on mobile). Null = no editor open.
   const [editing, setEditing] = useState<Template | null>(null);
   const [creating, setCreating] = useState(false);
+
+  // BATCH-2 Task 6.4 — AI template generation dialog. When open, asks the
+  // user what kind of template they want, then sends a message to the agent
+  // to create it. The agent's reply (a markdown template) is captured and
+  // saved as a new template via the editor flow.
+  const [aiDialogOpen, setAiDialogOpen] = useState(false);
 
   // Sync tab + kind filter when the overlay opens with new initial values.
   useEffect(() => {
@@ -505,17 +515,33 @@ export function TemplateLibrary({
                         ))}
                       </select>
                       {tab === "mine" && (
-                        <button
-                          onClick={() => setCreating(true)}
-                          className="text-[11px] px-2 py-1.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors shrink-0 flex items-center gap-1"
-                          title="Create a new template"
-                        >
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            <line x1="12" y1="5" x2="12" y2="19" />
-                            <line x1="5" y1="12" x2="19" y2="12" />
-                          </svg>
-                          New
-                        </button>
+                        <>
+                          {/* BATCH-2 Task 6.4 — "Generate with AI" button.
+                              Opens a dialog asking what kind of template
+                              the user wants, then sends a message to the
+                              agent to create it. */}
+                          <button
+                            onClick={() => setAiDialogOpen(true)}
+                            className="text-[11px] px-2 py-1.5 rounded-xl border border-accent/40 text-accent hover:bg-accent/10 transition-colors shrink-0 flex items-center gap-1"
+                            title="Generate a template with AI"
+                          >
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M12 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                            </svg>
+                            AI
+                          </button>
+                          <button
+                            onClick={() => setCreating(true)}
+                            className="text-[11px] px-2 py-1.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors shrink-0 flex items-center gap-1"
+                            title="Create a new template"
+                          >
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <line x1="12" y1="5" x2="12" y2="19" />
+                              <line x1="5" y1="12" x2="19" y2="12" />
+                            </svg>
+                            New
+                          </button>
+                        </>
                       )}
                     </div>
 
@@ -531,14 +557,31 @@ export function TemplateLibrary({
                         ) : mineFiltered.length === 0 ? (
                           <EmptyState
                             title="No templates yet"
-                            body="Create one to reuse a prompt across chats. You can also browse what the community has shared in the Explore tab."
+                            body="Browse what the community has shared in the Explore tab, or generate one with AI."
                             cta={
-                              <button
-                                onClick={() => setCreating(true)}
-                                className="text-[12px] px-3 py-1.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors"
-                              >
-                                Create your first template
-                              </button>
+                              <div className="flex items-center gap-2">
+                                {/* BATCH-2 Task 6.3 — empty state CTA is now
+                                    "Explore community templates" (not "Create
+                                    new template"). Users rarely manually
+                                    create templates — they download from the
+                                    community or generate with AI. */}
+                                <button
+                                  onClick={() => setTab("explore")}
+                                  className="text-[12px] px-3 py-1.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors"
+                                >
+                                  Explore community templates
+                                </button>
+                                <button
+                                  onClick={() => setAiDialogOpen(true)}
+                                  className="text-[12px] px-3 py-1.5 rounded-xl border border-border text-foreground hover:bg-surface2 transition-colors flex items-center gap-1.5"
+                                  title="Generate a template with AI"
+                                >
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M12 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                                  </svg>
+                                  Generate with AI
+                                </button>
+                              </div>
                             }
                           />
                         ) : (
@@ -623,6 +666,29 @@ export function TemplateLibrary({
                   {/* (Mobile preview is handled by the `mobilePreview` take-over above.) */}
                 </div>
               )}
+
+              {/* BATCH-2 Task 6.4 — AI template generation dialog. Modal on
+                  top of the library; asks what kind of template the user
+                  wants, then drops the request into the chat input so the
+                  agent can create it. */}
+              <AiGenerateDialog
+                open={aiDialogOpen}
+                onClose={() => setAiDialogOpen(false)}
+                onSubmit={(kind, description) => {
+                  // Compose the prompt the agent will see. The agent's
+                  // backend has a template-creation tool it can invoke.
+                  const prompt = [
+                    `Create a ${KIND_LABELS[kind] || kind} template for me.`,
+                    description.trim() ? `What it should do: ${description.trim()}` : "",
+                    "",
+                    "Use the roles.py system (planner, generator, critiquer, etc.).",
+                    "Return the full markdown prompt — I'll save it to my template library.",
+                  ].filter(Boolean).join("\n");
+                  useChatStore.getState().setInputText(prompt);
+                  useChatStore.getState().closeTemplateLibrary();
+                  setAiDialogOpen(false);
+                }}
+              />
             </div>
           </motion.div>
         </>
@@ -1012,19 +1078,20 @@ function TemplatePreview({
         )}
       </div>
 
-      {/* Body — rendered markdown OR raw source <pre>. */}
+      {/* Body — rendered markdown OR color-coded raw source.
+          BATCH-2 Task 6.2 — raw view now uses .md-raw (CSS-based syntax
+          highlighting with purple/pink/green/cyan colors for headers,
+          code, lists, etc.) instead of a flat black/white <pre>. */}
       {viewMode === "human" ? (
         <div className={`flex-1 overflow-y-auto ${compact ? "p-2" : "p-3"}`}>
           <Markdown text={t.markdown || "_No markdown body._"} />
         </div>
       ) : (
         <div className="flex-1 overflow-auto bg-background/60">
-          <pre
-            className={`font-mono text-[11px] leading-relaxed text-foreground/90 whitespace-pre-wrap break-words ${compact ? "p-2" : "p-3"}`}
-            spellCheck={false}
-          >
-            {t.markdown || "(empty template — no markdown body)"}
-          </pre>
+          <MarkdownRaw
+            text={t.markdown || "(empty template — no markdown body)"}
+            className={compact ? "p-2" : "p-3"}
+          />
         </div>
       )}
 
@@ -1356,4 +1423,301 @@ function EmptyState({
       {cta && <div className="mt-3">{cta}</div>}
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// AiGenerateDialog — BATCH-2 Task 6.4
+// Asks the user what kind of template they want, then drops the request
+// into the chat input so the agent can create it.
+// ---------------------------------------------------------------------------
+
+function AiGenerateDialog({
+  open,
+  onClose,
+  onSubmit,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSubmit: (kind: TemplateKind, description: string) => void;
+}) {
+  const [kind, setKind] = useState<TemplateKind>("websearch");
+  const [description, setDescription] = useState("");
+
+  // Reset on open.
+  useEffect(() => {
+    if (open) {
+      setKind("websearch");
+      setDescription("");
+    }
+  }, [open]);
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.13 }}
+            className="absolute inset-0 z-[70] bg-black/60"
+            onClick={onClose}
+            aria-hidden="true"
+          />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 8 }}
+            transition={{ duration: 0.15, ease: [0.19, 1, 0.22, 1] }}
+            className="absolute inset-x-2 sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 top-1/2 -translate-y-1/2 z-[70] w-auto sm:w-[440px] max-w-[calc(100vw-1rem)] flex flex-col rounded-2xl border border-border bg-surface shadow-2xl shadow-black/40 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Generate template with AI"
+          >
+            <div className="flex items-center gap-2 px-3.5 h-11 border-b border-border shrink-0">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent shrink-0">
+                <path d="M12 2L3 14h9l-1 8 10-12h-9l1-8z" />
+              </svg>
+              <span className="text-[13px] font-semibold text-foreground shrink-0">
+                Generate with AI
+              </span>
+              <button
+                onClick={onClose}
+                className="touch-target ml-auto p-1.5 rounded-xl text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors shrink-0"
+                aria-label="Close"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3.5 space-y-3">
+              <div>
+                <label className="block text-[10px] uppercase tracking-wide text-muted-foreground/70 mb-1">
+                  Kind
+                </label>
+                <select
+                  value={kind}
+                  onChange={(e) => setKind(e.target.value as TemplateKind)}
+                  className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[16px] sm:text-[12.5px] text-foreground outline-none focus:border-accent"
+                >
+                  {ALL_KINDS.map((k) => (
+                    <option key={k} value={k}>
+                      {KIND_LABELS[k]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] uppercase tracking-wide text-muted-foreground/70 mb-1">
+                  What should it do?
+                </label>
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  rows={4}
+                  placeholder="e.g. Audit a repo for security issues, then suggest fixes with code samples."
+                  className="w-full px-2.5 py-1.5 rounded-xl bg-surface2 border border-border text-[16px] sm:text-[12.5px] text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent resize-y min-h-[96px]"
+                />
+                <p className="text-[10px] text-muted-foreground/60 mt-1 leading-snug">
+                  The agent will create a {KIND_LABELS[kind] || kind.toLowerCase()} template using
+                  the roles.py system (planner, generator, critiquer, etc.) and drop it into your
+                  chat — review + save it from there.
+                </p>
+              </div>
+            </div>
+            <div className="px-3.5 py-2.5 border-t border-border shrink-0 flex items-center gap-2 justify-end">
+              <button
+                onClick={onClose}
+                className="touch-target text-[11.5px] px-3 py-1.5 rounded-xl text-muted-foreground hover:text-foreground hover:bg-surface2 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => onSubmit(kind, description)}
+                className="touch-target text-[11.5px] px-3 py-1.5 rounded-xl bg-accent text-white hover:bg-accent/90 transition-colors font-medium flex items-center gap-1.5"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                </svg>
+                Send to agent
+              </button>
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// MarkdownRaw — BATCH-2 Task 6.2
+// Color-coded raw markdown view. Renders the raw source with syntax
+// highlighting: headers in purple/pink, code in cyan/green, lists in soft
+// gray, {{variables}} in amber, etc. CSS classes live in index.css (.md-raw).
+// Reads as a "code editor" view of the prompt skeleton (role definitions,
+// fanout config, shards).
+// ---------------------------------------------------------------------------
+
+function MarkdownRaw({
+  text,
+  className = "",
+}: {
+  text: string;
+  className?: string;
+}) {
+  // Tokenize the markdown into spans with color classes. We use a simple
+  // line-based tokenizer (no full markdown parser) — good enough for the
+  // raw view, which is meant to look like a syntax-highlighted code editor.
+  const lines = text.split("\n");
+  const inFence = { current: false }; // mutates as we walk; tracks ``` blocks
+  const out: React.ReactNode[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    // Fence toggle.
+    if (/^```/.test(trimmed)) {
+      inFence.current = !inFence.current;
+      out.push(
+        <div key={i} className="md-raw-fence-start">
+          {line || "\u00a0"}
+        </div>,
+      );
+      continue;
+    }
+    if (inFence.current) {
+      // Inside a fence — color the whole line as code.
+      out.push(
+        <div key={i} className="md-raw-fence">
+          {line || "\u00a0"}
+        </div>,
+      );
+      continue;
+    }
+    // Headers.
+    const h = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (h) {
+      const level = h[1].length;
+      const cls = level <= 1 ? "md-raw-h1" : level === 2 ? "md-raw-h2" : level === 3 ? "md-raw-h3" : "md-raw-h4";
+      out.push(
+        <div key={i} className={cls}>
+          {renderInlineSpans(h[2])}
+        </div>,
+      );
+      continue;
+    }
+    // Horizontal rule.
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      out.push(
+        <div key={i} className="md-raw-hr">
+          {line || "\u00a0"}
+        </div>,
+      );
+      continue;
+    }
+    // Blockquote.
+    if (/^>\s?/.test(line)) {
+      out.push(
+        <div key={i} className="md-raw-bq">
+          {renderInlineSpans(line.replace(/^>\s?/, ""))}
+        </div>,
+      );
+      continue;
+    }
+    // Unordered list item.
+    if (/^[-*+]\s+/.test(line)) {
+      out.push(
+        <div key={i}>
+          <span className="md-raw-li">{"• "}</span>
+          {renderInlineSpans(line.replace(/^[-*+]\s+/, ""))}
+        </div>,
+      );
+      continue;
+    }
+    // Ordered list item.
+    if (/^\d+\.\s+/.test(line)) {
+      const m = /^(\d+\.)\s+(.*)$/.exec(line);
+      out.push(
+        <div key={i}>
+          <span className="md-raw-ol">{m ? m[1] + " " : ""}</span>
+          {renderInlineSpans(m ? m[2] : "")}
+        </div>,
+      );
+      continue;
+    }
+    // Key: value (common in YAML frontmatter / config blocks).
+    const kv = /^([A-Za-z_][A-Za-z0-9_]*):(.*)$/.exec(line);
+    if (kv && !line.startsWith(" ")) {
+      out.push(
+        <div key={i}>
+          <span className="md-raw-kv">{kv[1]}:</span>
+          {renderInlineSpans(kv[2])}
+        </div>,
+      );
+      continue;
+    }
+    // Comment.
+    if (/^<!--.*-->\s*$/.test(line)) {
+      out.push(
+        <div key={i} className="md-raw-comment">
+          {line || "\u00a0"}
+        </div>,
+      );
+      continue;
+    }
+    // Empty line.
+    if (!line.trim()) {
+      out.push(<div key={i}>{"\u00a0"}</div>);
+      continue;
+    }
+    // Default paragraph.
+    out.push(<div key={i}>{renderInlineSpans(line)}</div>);
+  }
+  return <div className={`md-raw ${className}`}>{out}</div>;
+}
+
+/** Render inline markdown spans (bold, italic, code, links, vars) with
+ *  appropriate color classes. Cheap regex tokenizer — good enough for
+ *  the raw view. */
+function renderInlineSpans(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  // Pattern matches: **bold**, *italic*, `code`, [text](url), {{var}}, <!--comment-->
+  const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)]+\)|\{\{[^}]+\}\}|<!--[^>]+-->)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let key = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    const tok = m[0];
+    if (tok.startsWith("**")) {
+      nodes.push(<span key={key++} className="md-raw-strong">{tok.slice(2, -2)}</span>);
+    } else if (tok.startsWith("*")) {
+      nodes.push(<span key={key++} className="md-raw-em">{tok.slice(1, -1)}</span>);
+    } else if (tok.startsWith("`")) {
+      nodes.push(<span key={key++} className="md-raw-code">{tok.slice(1, -1)}</span>);
+    } else if (tok.startsWith("[")) {
+      const lm = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(tok);
+      if (lm) {
+        nodes.push(
+          <span key={key++}>
+            <span className="md-raw-link">{lm[1]}</span>
+            <span className="md-raw-url"> ({lm[2]})</span>
+          </span>,
+        );
+      } else {
+        nodes.push(tok);
+      }
+    } else if (tok.startsWith("{{")) {
+      nodes.push(<span key={key++} className="md-raw-var">{tok}</span>);
+    } else if (tok.startsWith("<!--")) {
+      nodes.push(<span key={key++} className="md-raw-comment">{tok}</span>);
+    } else {
+      nodes.push(tok);
+    }
+    last = m.index + tok.length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
 }

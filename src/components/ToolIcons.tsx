@@ -82,16 +82,12 @@ const DEEP_TEMPLATES: {
   { id: "extended", label: "Extended Thinking", description: "Long silent reasoning before responding. Best for hard problems" },
 ];
 
-const JUDGE_TEMPLATES: {
-  id: "critique" | "verify" | "improve" | "debate";
-  label: string;
-  description: string;
-}[] = [
-  { id: "critique", label: "Critique", description: "Find flaws, missing cases, security holes" },
-  { id: "verify", label: "Verify", description: "Check correctness against authoritative sources" },
-  { id: "improve", label: "Improve", description: "Rewrite with concrete fixes applied" },
-  { id: "debate", label: "Debate", description: "Judges argue opposing sides, then synthesize" },
-];
+// BATCH-2 Task 5.10 — JUDGE_TEMPLATES quick-picks removed from the judge
+// popover. Templates now flow from the Template Library exclusively
+// (Browse Templates… button). Kept the legacy IDs here for backwards-compat
+// with the store's `judge.template` default ("critique") — they're the
+// legacy template IDs the backend still understands.
+const LEGACY_JUDGE_TEMPLATE_IDS = ["critique", "verify", "improve", "debate"] as const;
 
 export function ToolIcons({
   effort,
@@ -154,7 +150,7 @@ export function ToolIcons({
   // selected — used to render the "Using: <id>" affordance.
   const isCustomWebTemplate = webTemplate && !["breadth", "deepdive", "compare", "factcheck"].includes(webTemplate);
   const isCustomDeepTemplate = deepTemplate && !["react", "extended"].includes(deepTemplate);
-  const isCustomJudgeTemplate = judge.template && !["critique", "verify", "improve", "debate"].includes(judge.template);
+  const isCustomJudgeTemplate = judge.template && !LEGACY_JUDGE_TEMPLATE_IDS.includes(judge.template as any);
 
   return (
     <div className="flex items-center gap-0.5 shrink-0 mb-0.5">
@@ -431,23 +427,14 @@ export function ToolIcons({
             ))}
           </div>
           <div className="text-[9px] uppercase tracking-wide text-muted-foreground/50 px-2 pt-1 pb-1 border-t border-white/5">
-            Template (quick picks)
+            Template
           </div>
-          {JUDGE_TEMPLATES.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setJudgeTemplate(t.id)}
-              className={`touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors ${
-                judgeTemplate === t.id ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-surface2"
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-medium">{t.label}</span>
-                {judgeTemplate === t.id && <span className="text-[10px] text-accent">●</span>}
-              </div>
-              <div className="text-[10px] opacity-60 mt-0.5">{t.description}</div>
-            </button>
-          ))}
+          {/* BATCH-2 Task 5.10 — removed TEMPLATE QUICK PICKS (Critique /
+              Verify / Improve / Debate). The user said these were redundant
+              with the "Browse Templates…" library entry below. The default
+              judge.template ("critique") is still set by the store, so the
+              Judge panel runs with a sensible default until the user picks
+              one from the library. */}
 
           {isCustomJudgeTemplate && (
             <div className="mx-2 mt-1 px-1.5 py-1 rounded bg-accent/10 border border-accent/30 text-[10px] text-accent flex items-center gap-1">

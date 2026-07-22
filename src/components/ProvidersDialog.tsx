@@ -2,6 +2,22 @@ import { useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useModelStore, type ProviderGroup } from "../lib/model-store";
 
+// BATCH-2 Task 4.1 — override the backend's settingsUrl with curated
+// deep-links (mirrors PROVIDER_KEY_CONFIG in ProvidersScreen.tsx). When
+// a key exists here, it wins over the backend's value.
+const PROVIDER_SETTINGS_URL_OVERRIDES: Record<string, string> = {
+  nvidia: "https://build.nvidia.com/settings/api-keys",
+  cloudflare: "https://dash.cloudflare.com/?to=/:account/ai/workers-ai/api-quick-start",
+  openrouter: "https://openrouter.ai/workspaces/default/keys",
+  "github-models": "https://github.com/settings/tokens",
+  privatemodeai: "https://portal.privatemode.ai/api-keys",
+  "opencode-zen": "https://opencode.ai/auth",
+};
+
+function settingsUrlFor(provider: ProviderGroup): string {
+  return PROVIDER_SETTINGS_URL_OVERRIDES[provider.name] || provider.settingsUrl;
+}
+
 function IcoX() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -94,7 +110,7 @@ function ProviderCard({ provider }: { provider: ProviderGroup }) {
 
         <div className="flex flex-wrap gap-2 pt-1">
           <a
-            href={provider.settingsUrl}
+            href={settingsUrlFor(provider)}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[11px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
@@ -169,13 +185,9 @@ export function ProvidersDialog() {
 
               <div className="flex-1 min-h-0 overflow-y-auto">
                 <div className="flex flex-col gap-3 p-4">
-                  <div className="rounded-xl border border-dashed border-border/60 bg-muted/30 px-3 py-2">
-                    <p className="text-[10px] leading-snug text-muted-foreground">
-                      <span className="font-semibold text-foreground">Temporary providers screen.</span> Use the
-                      buttons below to open each provider&apos;s console and disable data-retention / training
-                      toggles for maximum privacy. A dedicated providers screen is planned.
-                    </p>
-                  </div>
+                  {/* BATCH-2 Task 4.5 — removed the "Temporary providers
+                      screen" warning banner. The providers screen is no
+                      longer temporary. */}
 
                   {ordered.map((p) => (
                     <ProviderCard key={p.name} provider={p} />

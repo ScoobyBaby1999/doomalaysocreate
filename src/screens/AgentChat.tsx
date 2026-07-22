@@ -67,7 +67,8 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const webTemplate = useChatStore((s) => s.webTemplate);
   const deepTemplate = useChatStore((s) => s.deepTemplate);
   const judge = useChatStore((s) => s.judge);
-  const busyMode = useChatStore((s) => s.busyMode);
+  // BATCH-2 Task 5.1 — removed busyMode + setBusyMode subscriptions. The
+  // queue/stop toggle was removed from the UI; queue is always the default.
   const files = useChatStore((s) => s.files);
   const fileDrawerOpen = useChatStore((s) => s.fileDrawerOpen);
   const agentSessionId = useChatStore((s) => s._agentSessionId);
@@ -161,7 +162,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
   const setWebTemplate = useChatStore((s) => s.setWebTemplate);
   const setDeepTemplate = useChatStore((s) => s.setDeepTemplate);
   const setJudge = useChatStore((s) => s.setJudge);
-  const setBusyMode = useChatStore((s) => s.setBusyMode);
+  // BATCH-2 Task 5.1 — setBusyMode no longer used (queue/stop toggle removed).
   const resetTools = useChatStore((s) => s.resetTools);
   const setSidebarOpen = useChatStore((s) => s.setSidebarOpen);
   const setFileDrawerOpen = useChatStore((s) => s.setFileDrawerOpen);
@@ -325,17 +326,10 @@ export function AgentChat({ settings }: { settings: Settings }) {
     URL.revokeObjectURL(url);
   }, [messages, resolvedModel, resolvedProvider, effectiveModelId]);
 
-  // Handle keydown — Enter sends, Shift+Enter newlines. While busy, Enter
-  // queues instead of being disabled.
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        handleSend();
-      }
-    },
-    [handleSend],
-  );
+  // BATCH-2 Task 5.8 — Enter = newline (phone-first). Removed the
+  // Enter-to-send handler. The user sends via the explicit Send button
+  // (already 48×48 next to the textarea). This makes long messages on
+  // mobile much easier to compose without accidental sends.
 
   // Auto-resize textarea
   const handleInputChange = useCallback(
@@ -466,8 +460,13 @@ export function AgentChat({ settings }: { settings: Settings }) {
             </div>
           )}
 
-          {/* Stop / New — primary action, large tap target. */}
-          {running ? (
+          {/* BATCH-2 Task 5.3 — removed the always-visible "+" New button
+           *  (it sat between price and the 3-dots More toggle, overlapping
+           *  on small screens). The Stop button still appears here while
+           *  generating — but per Task 5.1, stop also lives at the bottom
+           *  of the streaming reply, so this header stop is the fallback.
+           *  New chat is reachable via the SessionSidebar hamburger menu. */}
+          {running && (
             <button
               onClick={handleStop}
               aria-label="Stop"
@@ -478,19 +477,6 @@ export function AgentChat({ settings }: { settings: Settings }) {
                 <rect x="6" y="6" width="12" height="12" rx="1.5" />
               </svg>
               <span className="hidden sm:inline">Stop</span>
-            </button>
-          ) : (
-            <button
-              onClick={handleNewSession}
-              aria-label="New chat"
-              title="New chat"
-              className="touch-target shrink-0 flex items-center gap-1.5 px-3 h-9 rounded-full bg-accent/15 text-accent hover:bg-accent/25 border border-accent/20 transition-colors font-medium text-[12px]"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              <span className="hidden sm:inline">New</span>
             </button>
           )}
 
@@ -700,6 +686,25 @@ export function AgentChat({ settings }: { settings: Settings }) {
               </svg>
             </button>
           )}
+
+          {/* BATCH-2 Task 5.9 — Save-as-Template moved here from the chat
+              input toolbar. Lives in the header (under the 3-dots More
+              toggle, right of the queue monitor) so the input toolbar is
+              less cluttered. Disabled when the chat is empty. */}
+          {messages.length > 0 && (
+            <button
+              onClick={() => setSaveAsTemplateOpen(true)}
+              aria-label="Save as Template"
+              title="Save this chat as a reusable template"
+              className="touch-target shrink-0 w-9 h-9 rounded-xl text-muted-foreground hover:text-accent hover:bg-surface2 transition-colors"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                <polyline points="17 21 17 13 7 13 7 21" />
+                <polyline points="7 3 7 8 15 8" />
+              </svg>
+            </button>
+          )}
         </div>
       </header>
 
@@ -742,6 +747,15 @@ export function AgentChat({ settings }: { settings: Settings }) {
                           handleSend(lastUserMsgRef.current);
                         }
                       }
+                    : undefined
+                }
+                onStop={
+                  // BATCH-2 Task 5.1 — Stop link at the bottom of the
+                  // streaming reply. Only rendered on the LAST assistant
+                  // message while it's actively streaming. Removed
+                  // automatically when isStreaming flips to false.
+                  i === messages.length - 1 && msg.role === "assistant" && msg.isStreaming && isBusy
+                    ? handleStop
                     : undefined
                 }
               />
@@ -879,55 +893,22 @@ export function AgentChat({ settings }: { settings: Settings }) {
             </button>
           )}
 
-          {/* Save as Template — quick capture flow. Opens a dialog that
-              pre-fills the markdown with the most-recent user + assistant
-              messages and lets the user pick a kind, then saves via the
-              template library API. Disabled when the chat is empty. */}
-          <button
-            onClick={() => setSaveAsTemplateOpen(true)}
-            disabled={messages.length === 0}
-            className="touch-target shrink-0 text-[11px] px-2.5 h-7 rounded-full text-muted-foreground hover:text-accent hover:bg-surface2 transition-colors flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
-            title="Save this chat as a reusable template"
-            aria-label="Save as Template"
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
-              <polyline points="17 21 17 13 7 13 7 21" />
-              <polyline points="7 3 7 8 15 8" />
-            </svg>
-            <span className="hidden sm:inline">Save as Template</span>
-          </button>
-
-          {/* Spacer pushes Queue/Stop toggle to the right (desktop only —
-              on mobile the toolbar scrolls horizontally instead). */}
-          <div className="hidden sm:flex flex-1" />
-
-          {/* Queue / Stop mode toggle (default: Queue). */}
-          <div className="flex items-center bg-surface2/60 border border-white/5 rounded-full p-0.5 text-[11px] shrink-0" title="What happens when you press Enter while the agent is busy">
-            <button
-              onClick={() => setBusyMode("queue")}
-              className={`touch-target px-2.5 h-7 rounded-full transition-colors ${
-                busyMode === "queue" ? "bg-accent text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              Queue
-            </button>
-            <button
-              onClick={() => setBusyMode("stop")}
-              className={`touch-target px-2.5 h-7 rounded-full transition-colors ${
-                busyMode === "stop" ? "bg-accent text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              Stop
-            </button>
-          </div>
-
-          {/* Queued message count — appears when there's anything in the queue. */}
+          {/* BATCH-2 Task 5.1 — removed the Queue/Stop mode toggle and the
+           *  "Save as Template" button from here. Queue is now the default
+           *  (always); Stop lives at the bottom of the streaming reply.
+           *  Save-as-Template moved to the header (under the 3-dots More
+           *  toggle, right of the queue monitor) per Task 5.9.
+           *
+           * Queued-message count chip — still here so the user can see at
+           * a glance how many messages are pending. */}
           {queueCount > 0 && (
             <span className="text-[11px] px-2.5 h-6 inline-flex items-center rounded-full bg-accent/15 text-accent font-mono tabular-nums shrink-0">
               {queueCount} queued
             </span>
           )}
+
+          {/* Spacer pushes the queued-count to the left on desktop. */}
+          <div className="hidden sm:flex flex-1" />
         </div>
 
         {/* Input row — textarea + send/stop button. */}
@@ -936,16 +917,13 @@ export function AgentChat({ settings }: { settings: Settings }) {
             ref={inputRef}
             value={inputText}
             onChange={handleInputChange}
-            onKeyDown={handleKeyDown}
             rows={1}
             placeholder={
               isBusy
-                ? busyMode === "queue"
-                  ? "Queue another message… (Enter to queue, Shift+Enter for newline)"
-                  : "Type to replace the running turn… (Enter to stop + send)"
+                ? "Queue another message… (Enter for newline, Send to queue)"
                 : "Ask the agent to build, edit, run, or pack something…"
             }
-            className="chat-input-glow flex-1 resize-none bg-surface2/70 border border-white/5 rounded-2xl px-4 py-3 text-[16px] sm:text-[14.5px] leading-relaxed outline-none min-h-[48px] max-h-[160px] transition-all placeholder:text-muted-foreground/60"
+            className="chat-input-glow flex-1 resize-none bg-surface2/70 border border-white/5 rounded-2xl px-4 py-3 text-[16px] sm:text-[14.5px] leading-relaxed outline-none min-h-[48px] max-h-[160px] transition-colors placeholder:text-muted-foreground/60"
           />
 
           {/* Send / Stop / Queue — primary action button.
@@ -992,13 +970,13 @@ export function AgentChat({ settings }: { settings: Settings }) {
           </button>
         </div>
 
-        {/* Keyboard shortcut hint — hidden on mobile (no keyboard). */}
+        {/* BATCH-2 Task 5.8 — Enter = newline hint. */}
         <div className="hidden sm:flex items-center justify-center gap-3 mt-1 text-[9px] text-muted-foreground/40">
-          <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Enter</kbd> to send</span>
-          <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Shift+Enter</kbd> for newline</span>
+          <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Enter</kbd> for newline</span>
+          <span><kbd className="px-1 py-0.5 rounded bg-surface2 border border-white/5 font-mono">Send</kbd> button to send</span>
           {isBusy && (
             <span className="text-amber-400/60">
-              {busyMode === "queue" ? "Queue mode active" : "Stop mode active"}
+              Messages will queue while the agent works
             </span>
           )}
         </div>
