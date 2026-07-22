@@ -361,13 +361,21 @@ def publish_template(template_dict: dict) -> bool:
             "is_public": bool(template_dict.get("is_public", True)),
             "created_at": template_dict.get("created_at") or now,
             "updated_at": template_dict.get("updated_at") or now,
-            # Role-based template parts (Task 4).
+            # Role-based template parts (Task 4 — legacy single-role).
             "role": template_dict.get("role"),
             "instructions": template_dict.get("instructions") or "",
             "output_rules": template_dict.get("output_rules") or "",
             "inputs": template_dict.get("inputs") or "",
             "template": template_dict.get("template") or "",
             "required_schema": template_dict.get("required_schema") or "",
+            # Multi-stage template fields (REAL template format):
+            # the full pipeline (stages + output_rules) so other users who
+            # browse the public library get the structured template, not
+            # just the compiled markdown preview.
+            "task_type": template_dict.get("task_type"),
+            "task": template_dict.get("task"),
+            "stages": template_dict.get("stages") or [],
+            "output_rules_obj": template_dict.get("output_rules_obj") or {},
         }
         if existing and existing.get("published_at"):
             record["published_at"] = existing["published_at"]

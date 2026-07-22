@@ -233,6 +233,15 @@ def _ensure_schema() -> None:
         ("inputs",          "TEXT"),
         ("template_part",   "TEXT"),  # `template` is a SQL keyword — use template_part
         ("required_schema", "TEXT"),
+        # Multi-stage template system (REAL template format from the
+        # reference repo): a template is now a JSON object with task_type,
+        # stages (array of stage objects), and output_rules (object). The
+        # legacy single-role fields above are kept for backward compat;
+        # the new fields are the source-of-truth for multi-stage templates.
+        ("task_type",        "TEXT"),   # e.g. "research_paper", "code_review"
+        ("task",             "TEXT"),   # short label
+        ("stages_json",      "TEXT"),   # JSON array of stage objects
+        ("output_rules_json","TEXT"),   # JSON object with format/min_words/etc.
     ):
         try:
             db.execute(f"ALTER TABLE templates ADD COLUMN {col} {decl}")
@@ -307,6 +316,208 @@ def _migrate_legacy_favorites() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Multi-stage template helpers (REAL template format)
+# ---------------------------------------------------------------------------
+# A multi-stage template is a JSON object with:
+#   task_type:   str           — e.g. "research_paper", "code_review"
+#   task:        str           — short label
+#   description: str           — human-readable description
+#   stages:      list[stage]   — ordered pipeline of stages
+#   output_rules: dict         — format/min_words/required_sections/tone/etc.
+#
+# Each stage is:
+#   name:         str           — stage identifier (unique within the template)
+#   role:         str           — planner|parser|critiquer|verifier|generator|
+#                                 transformer|assembler|reviewer|extractor
+#   instructions: str           — detailed prompt for this stage
+#   inputs:       list[str]     — context paths this stage reads (e.g.
+#                                 ["prompt", "outline.topics.{i}"])
+#   fanout:       dict|None     — {"over": "outline.topics", "max_parallel": 3}
+#   max_tokens:   int|None      — per-stage token budget
+#
+# The legacy single-role fields (role, instructions, output_rules, inputs,
+# template, required_schema) are kept for backward compat. A template can be
+# EITHER single-role (legacy) OR multi-stage (new). When both are present,
+# the multi-stage fields take precedence.
+
+def _normalize_stages(stages: Any) -> str:
+    """Coerce a stages input (list of dicts) into a JSON array string for
+    storage. Validates each stage has a name + role. Returns "[]" on bad input.
+    """
+    if not isinstance(stages, list):
+        return "[]"
+    out: list[dict] = []
+    for st in stages:
+        if not isinstance(st, dict):
+            continue
+        name = str(st.get("name", "")).strip()
+        role = _normalize_role(st.get("role"))
+        if not name or not role:
+            continue  # skip invalid stages
+        stage: dict[str, Any] = {
+            "name": name,
+            "role": role,
+            "instructions": str(st.get("instructions", "") or "").strip(),
+        }
+        inputs = st.get("inputs")
+        if isinstance(inputs, list):
+            stage["inputs"] = [str(i).strip() for i in inputs if str(i).strip()]
+        elif isinstance(inputs, str) and inputs.strip():
+            stage["inputs"] = [inputs.strip()]
+        else:
+            stage["inputs"] = []
+        fanout = st.get("fanout")
+        if isinstance(fanout, dict) and fanout:
+            fo: dict[str, Any] = {}
+            over = fanout.get("over")
+            if isinstance(over, str) and over.strip():
+                fo["over"] = over.strip()
+            mp = fanout.get("max_parallel")
+            if isinstance(mp, int) and mp > 0:
+                fo["max_parallel"] = mp
+            if fo:
+                stage["fanout"] = fo
+        mt = st.get("max_tokens")
+        if isinstance(mt, int) and mt > 0:
+            stage["max_tokens"] = mt
+        out.append(stage)
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _normalize_output_rules(rules: Any) -> str:
+    """Coerce an output_rules input (dict) into a JSON object string for
+    storage. Returns "{}" on bad input."""
+    if not isinstance(rules, dict):
+        return "{}"
+    out: dict[str, Any] = {}
+    fmt = rules.get("format")
+    if isinstance(fmt, str) and fmt.strip():
+        out["format"] = fmt.strip()
+    for k in ("min_words", "max_words"):
+        v = rules.get(k)
+        if isinstance(v, int) and v > 0:
+            out[k] = v
+    rs = rules.get("required_sections")
+    if isinstance(rs, list):
+        out["required_sections"] = [str(s).strip() for s in rs if str(s).strip()]
+    bp = rules.get("banned_phrases")
+    if isinstance(bp, list):
+        out["banned_phrases"] = [str(s).strip() for s in bp if str(s).strip()]
+    tone = rules.get("tone")
+    if isinstance(tone, str) and tone.strip():
+        out["tone"] = tone.strip()
+    # Preserve any extra keys the caller supplied (forward-compat).
+    for k, v in rules.items():
+        if k not in out and v is not None:
+            out[k] = v
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _parse_json_field(raw: Any, default: Any) -> Any:
+    """Parse a JSON string field back into a Python object. Returns ``default``
+    on parse failure or if ``raw`` is already a Python object (passthrough)."""
+    if raw is None:
+        return default
+    if isinstance(raw, (list, dict)):
+        return raw
+    if isinstance(raw, str):
+        if not raw.strip():
+            return default
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return default
+    return default
+
+
+def compile_stages_markdown(*, task_type: str = "", task: str = "",
+                            description: str = "",
+                            stages: list | None = None,
+                            output_rules: dict | None = None) -> str:
+    """Compile a multi-stage template into a human-readable markdown summary.
+
+    This is the COMPILED prompt stored in the ``markdown`` column for backward
+    compat with consumers that read markdown directly. It is NOT the actual
+    pipeline runner — the runner executes each stage separately via the
+    orchestrator. This markdown is a PREVIEW of what the template does.
+
+    Format:
+        # <task_type>: <task>
+
+        <description>
+
+        ## Stages
+        1. **<name>** (<role>) — <instructions[:120]>...
+           inputs: [a, b] | fanout: over=X, max_parallel=N | max_tokens: T
+        2. ...
+
+        ## Output Rules
+        - format: markdown
+        - min_words: 4000
+        - required_sections: [References, ...]
+        - banned_phrases: [clearly, ...]
+        - tone: rigorous
+    """
+    parts: list[str] = []
+    title_bits = []
+    if task_type:
+        title_bits.append(task_type)
+    if task:
+        title_bits.append(task)
+    if title_bits:
+        parts.append("# " + ": ".join(title_bits))
+    if description:
+        parts.append(description.strip())
+    if stages:
+        parts.append("## Stages")
+        lines = []
+        for i, st in enumerate(stages, 1):
+            name = st.get("name", "?")
+            role = st.get("role", "?")
+            instr = (st.get("instructions", "") or "").strip()
+            preview = (instr[:120] + "...") if len(instr) > 120 else instr
+            line = f"{i}. **{name}** ({role})"
+            if preview:
+                line += f" — {preview}"
+            lines.append(line)
+            meta_bits = []
+            inputs = st.get("inputs") or []
+            if inputs:
+                meta_bits.append(f"inputs: {inputs}")
+            fanout = st.get("fanout") or {}
+            if fanout:
+                meta_bits.append(
+                    f"fanout: over={fanout.get('over','?')}, "
+                    f"max_parallel={fanout.get('max_parallel','?')}")
+            mt = st.get("max_tokens")
+            if mt:
+                meta_bits.append(f"max_tokens: {mt}")
+            if meta_bits:
+                lines.append(f"   - " + " | ".join(meta_bits))
+        parts.append("\n".join(lines))
+    if output_rules:
+        parts.append("## Output Rules")
+        rule_lines = []
+        if output_rules.get("format"):
+            rule_lines.append(f"- format: {output_rules['format']}")
+        if output_rules.get("min_words"):
+            rule_lines.append(f"- min_words: {output_rules['min_words']}")
+        if output_rules.get("max_words"):
+            rule_lines.append(f"- max_words: {output_rules['max_words']}")
+        if output_rules.get("required_sections"):
+            rule_lines.append(
+                f"- required_sections: {output_rules['required_sections']}")
+        if output_rules.get("banned_phrases"):
+            rule_lines.append(
+                f"- banned_phrases: {output_rules['banned_phrases']}")
+        if output_rules.get("tone"):
+            rule_lines.append(f"- tone: {output_rules['tone']}")
+        if rule_lines:
+            parts.append("\n".join(rule_lines))
+    return "\n\n".join(p for p in parts if p and p.strip())
+
+
+# ---------------------------------------------------------------------------
 # Row -> dict mapper
 # ---------------------------------------------------------------------------
 
@@ -334,6 +545,15 @@ def _row_to_dict(row: sqlite3.Row | dict | None) -> dict | None:
     for k in ("role", "instructions", "output_rules", "inputs",
               "template", "required_schema"):
         d.setdefault(k, None)
+    # Multi-stage template fields (REAL template format): parse the JSON
+    # columns into Python objects so the frontend gets structured stages +
+    # output_rules, not raw JSON strings.
+    d["stages"] = _parse_json_field(d.get("stages_json"), [])
+    d["output_rules_obj"] = _parse_json_field(d.get("output_rules_json"), {})
+    # Expose task_type + task at the top level (the DB columns are already
+    # named task_type / task — no aliasing needed).
+    d.setdefault("task_type", None)
+    d.setdefault("task", None)
     # If the template has a role but no compiled markdown (e.g. an old row
     # migrated to role-based), compile it on the fly so the frontend always
     # has a markdown preview.
@@ -346,6 +566,19 @@ def _row_to_dict(row: sqlite3.Row | dict | None) -> dict | None:
                 inputs=d.get("inputs") or "",
                 template=d.get("template") or "",
                 required_schema=d.get("required_schema") or "")
+        except Exception:
+            pass
+    # Multi-stage templates: if stages are present but markdown is empty,
+    # compile a preview markdown from the stages so legacy consumers still
+    # get a non-empty markdown field.
+    if d.get("stages") and not (d.get("markdown") or "").strip():
+        try:
+            d["markdown"] = compile_stages_markdown(
+                task_type=d.get("task_type") or "",
+                task=d.get("task") or "",
+                description=d.get("description") or "",
+                stages=d["stages"],
+                output_rules=d["output_rules_obj"])
         except Exception:
             pass
     return d
@@ -388,7 +621,11 @@ def create_template(*, user_id: str | None, name: str,
                     output_rules: str | None = None,
                     inputs: str | None = None,
                     template: str | None = None,
-                    required_schema: str | None = None) -> dict:
+                    required_schema: str | None = None,
+                    task_type: str | None = None,
+                    task: str | None = None,
+                    stages: Any = None,
+                    output_rules_obj: Any = None) -> dict:
     """Create a new template. Returns the template dict.
 
     Role-based system (Task 4): if ``role`` is provided, the template is
@@ -400,12 +637,40 @@ def create_template(*, user_id: str | None, name: str,
 
     Legacy mode: if ``role`` is NOT provided, ``markdown`` must be a
     non-empty string (the old plain-text template format).
+
+    Multi-stage system (REAL template format): if ``stages`` is provided
+    (a list of stage dicts), the template is stored as a multi-stage
+    pipeline. The ``markdown`` column is populated with a compiled preview
+    (via :func:`compile_stages_markdown`) so legacy consumers keep working.
+    The ``stages_json`` + ``output_rules_json`` columns store the structured
+    pipeline (the source-of-truth for multi-stage templates). ``task_type``
+    and ``task`` are short labels for the template type.
     """
     _ensure_schema_once()
     if not name or not name.strip():
         raise ValueError("'name' is required")
     norm_role = _normalize_role(role)
-    if norm_role:
+    # Normalize multi-stage fields (REAL template format).
+    norm_task_type = (str(task_type).strip() if task_type else None)
+    norm_task = (str(task).strip() if task else None)
+    stages_json = _normalize_stages(stages) if stages is not None else "[]"
+    output_rules_json = (_normalize_output_rules(output_rules_obj)
+                         if output_rules_obj is not None else "{}")
+    has_stages = stages_json not in ("[]", "")
+    if has_stages:
+        # Multi-stage: compile a preview markdown from the stages.
+        parsed_stages = _parse_json_field(stages_json, [])
+        parsed_rules = _parse_json_field(output_rules_json, {})
+        compiled = compile_stages_markdown(
+            task_type=norm_task_type or "",
+            task=norm_task or "",
+            description=(description or "").strip(),
+            stages=parsed_stages,
+            output_rules=parsed_rules)
+        if not compiled or not compiled.strip():
+            raise ValueError("could not compile multi-stage template markdown")
+        markdown = compiled
+    elif norm_role:
         # Role-based: compile the markdown from parts.
         compiled = compile_template_markdown(
             role=norm_role,
@@ -420,7 +685,7 @@ def create_template(*, user_id: str | None, name: str,
     else:
         # Legacy plain-text: markdown is required.
         if not markdown or not markdown.strip():
-            raise ValueError("'markdown' (or 'role' + parts) is required")
+            raise ValueError("'markdown' (or 'role' + parts or 'stages') is required")
     if kind not in VALID_KINDS:
         # Default to 'custom' for role-based templates that don't fit a kind.
         kind = "custom"
@@ -434,8 +699,9 @@ def create_template(*, user_id: str | None, name: str,
             "INSERT INTO templates (id, author_id, author_name, name, description, "
             "markdown, kind, tags, is_public, hearts, downloads, "
             "role, instructions, output_rules, inputs, template_part, required_schema, "
+            "task_type, task, stages_json, output_rules_json, "
             "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (tid, author_id, author, name.strip(),
              (description or "").strip() or None,
              markdown, kind, _normalize_tags(tags),
@@ -446,6 +712,10 @@ def create_template(*, user_id: str | None, name: str,
              (inputs or "").strip() or None,
              (template or "").strip() or None,
              (required_schema or "").strip() or None,
+             norm_task_type,
+             norm_task,
+             stages_json,
+             output_rules_json,
              now, now))
         db.commit()
     row = db.execute("SELECT * FROM templates WHERE id = ?", (tid,)).fetchone()
@@ -681,7 +951,11 @@ def update_template(template_id: str, user_id: str | None, *,
                     output_rules: str | None = None,
                     inputs: str | None = None,
                     template: str | None = None,
-                    required_schema: str | None = None) -> dict | None:
+                    required_schema: str | None = None,
+                    task_type: str | None = None,
+                    task: str | None = None,
+                    stages: Any = None,
+                    output_rules_obj: Any = None) -> dict | None:
     """Update a template (owner only). Returns the updated template or None
     if not found / not owned by caller.
 
@@ -739,15 +1013,64 @@ def update_template(template_id: str, user_id: str | None, *,
     if required_schema is not None:
         fields.append("required_schema = ?")
         params.append(required_schema.strip() or None)
+    # Multi-stage template fields (REAL template format).
+    if task_type is not None:
+        fields.append("task_type = ?")
+        params.append(str(task_type).strip() or None)
+    if task is not None:
+        fields.append("task = ?")
+        params.append(str(task).strip() or None)
+    if stages is not None:
+        stages_json = _normalize_stages(stages)
+        fields.append("stages_json = ?")
+        params.append(stages_json)
+    if output_rules_obj is not None:
+        output_rules_json = _normalize_output_rules(output_rules_obj)
+        fields.append("output_rules_json = ?")
+        params.append(output_rules_json)
     if not fields:
         return existing
-    # Re-compile markdown if any role part changed. We read the current
-    # parts from `existing` and override with the new values.
+    # Re-compile markdown if any role part OR multi-stage field changed.
+    # We read the current parts from `existing` and override with the new
+    # values. Multi-stage templates take precedence over single-role.
+    changed_fields = {f.split(" = ")[0].strip() for f in fields}
     role_keys = ("role", "instructions", "output_rules", "inputs",
                  "template", "required_schema")
-    if any(k in {f.split(" = ")[0].strip() for f in fields} for k in
-           ("role", "instructions", "output_rules", "inputs",
-            "template_part", "required_schema")):
+    multi_stage_changed = bool(changed_fields & {
+        "task_type", "task", "stages_json", "output_rules_json"})
+    role_changed = bool(changed_fields & {
+        "role", "instructions", "output_rules", "inputs",
+        "template_part", "required_schema"})
+    if multi_stage_changed:
+        # Re-compile the multi-stage markdown preview.
+        merged_stages = (_parse_json_field(
+            _normalize_stages(stages) if stages is not None
+            else existing.get("stages_json"), [])
+            if stages is not None
+            else (existing.get("stages") or []))
+        merged_rules = (_parse_json_field(
+            _normalize_output_rules(output_rules_obj) if output_rules_obj is not None
+            else existing.get("output_rules_json"), {})
+            if output_rules_obj is not None
+            else (existing.get("output_rules_obj") or {}))
+        merged_task_type = (task_type if task_type is not None
+                            else existing.get("task_type"))
+        merged_task = (task if task is not None else existing.get("task"))
+        if merged_stages:
+            try:
+                compiled = compile_stages_markdown(
+                    task_type=merged_task_type or "",
+                    task=merged_task or "",
+                    description=(description if description is not None
+                                 else existing.get("description")) or "",
+                    stages=merged_stages,
+                    output_rules=merged_rules)
+                if compiled and compiled.strip():
+                    fields.append("markdown = ?")
+                    params.append(compiled)
+            except Exception:
+                pass
+    elif role_changed:
         merged = {k: existing.get(k) for k in role_keys}
         if norm_role is not None:
             merged["role"] = norm_role
@@ -985,7 +1308,20 @@ def download_template(template_id: str, user_id: str | None) -> dict:
         kind=existing["kind"],
         tags=tags_value,
         is_public=False,
-        author_name=_author_label_for(user_id))
+        author_name=_author_label_for(user_id),
+        # Preserve the multi-stage structure (REAL template format) so the
+        # local copy is a fully editable pipeline, not just a markdown blob.
+        task_type=existing.get("task_type"),
+        task=existing.get("task"),
+        stages=existing.get("stages") or [],
+        output_rules_obj=existing.get("output_rules_obj") or {},
+        # Preserve the legacy single-role fields too (for older templates).
+        role=existing.get("role"),
+        instructions=existing.get("instructions"),
+        output_rules=existing.get("output_rules"),
+        inputs=existing.get("inputs"),
+        template=existing.get("template"),
+        required_schema=existing.get("required_schema"))
     return local
 
 
@@ -1057,281 +1393,241 @@ def _author_label_for(user_id: str | None) -> str:
 # Default template catalog (seeded idempotently on first use)
 # ---------------------------------------------------------------------------
 
+
 DEFAULT_TEMPLATES: list[dict] = [
-    # --- planner ---
+    # 1. research_paper — 10-stage research pipeline (from reference repo)
     {
-        "name": "Research Planner",
-        "description": "Decompose a research question into a multi-stage plan with small, focused stages.",
-        "role": "planner",
-        "instructions": (
-            "Plan a research paper that answers the user's question. "
-            "Break the work into 4-7 small stages, each with a clear "
-            "role + bounded scope. Use the non-destructive stitch pattern "
-            "(small connective generator stages + one assembler) — never "
-            "ask a transformer to combine N sections."
-        ),
-        "output_rules": (
-            "Emit ONLY the JSON object. No prose, no markdown fences.\n"
-            "Prefer 4-7 stages with small scopes over 1-2 sweeping ones.\n"
-            "Use fanout ONLY when iterating over a context key a prior stage "
-            "explicitly produces as a list."
-        ),
-        "inputs": "",
-        "template": (
-            "Reference task type: research_paper.\n"
-            "Suggested stages: intro, section_drafts (fanout over sub_topics), "
-            "conclusion, references, uncertainties_synthesis, assembler."
-        ),
-        "required_schema": "",
-        "kind": "custom",
-        "tags": ["planner", "research", "decompose", "plan"],
+        "name": "Research Paper",
+        "description": "10-stage research pipeline: parse outline, discover peer-reviewed URLs, verify URLs, plan sub-questions, draft grounded sections with strict citation rules, intro, conclusion, references, uncertainties, assemble. Best for multi-section research papers with real source grounding.",
+        "task_type": "research_paper",
+        "task": "research paper",
+        "kind": "deepresearch",
+        "tags": ["research", "paper", "citations", "multi-stage"],
+        "stages": [
+            {"name": "outline", "role": "parser", "instructions": "From the user prompt, extract the numbered topic list as JSON with the EXACT shape {\"topics\": [{\"name\": str, \"scope\": str, \"target_words\": int}, ...]}. EVERY topic object MUST contain all three keys. If the prompt has no numbered list, infer 4-6 topics from the prompt's headings or central themes.", "inputs": ["prompt"], "max_tokens": 1000},
+            {"name": "source_discovery", "role": "planner", "instructions": "For this topic, identify 1-10 specific URLs pointing to peer-reviewed articles, academic papers, or authoritative sources. Output JSON array: [{\"url\": str, \"title\": str, \"relevance\": str}]. DO NOT invent URLs. Prefer .edu, .gov, arxiv.org, nature.com, science.org. If uncertain, OMIT it.", "fanout": {"over": "outline.topics", "max_parallel": 3}, "inputs": ["outline.topics.{i}"], "max_tokens": 1200},
+            {"name": "url_verification", "role": "parser", "instructions": "Verify and filter proposed URLs against fetched_sources. Output JSON: {\"verified\": [...], \"dropped\": [...]}. Reasons for dropping: not_fetched, empty_content, paywall_detected, unreachable.", "inputs": ["source_discovery.*", "fetched_sources"], "max_tokens": 1500},
+            {"name": "research_plan", "role": "planner", "instructions": "For this single topic, list 3-5 specific sub-questions worth researching to write 600-800 words. Output JSON: [{\"question\": str, \"why\": str}]. Use VERIFIED sources to guide questions.", "fanout": {"over": "outline.topics", "max_parallel": 3}, "inputs": ["outline.topics.{i}", "url_verification.verified"], "max_tokens": 800},
+            {"name": "section_draft", "role": "generator", "instructions": "Draft 600-800 words on the given topic. Ground every factual claim in fetched_sources. Cite sources by number: [1]. NEVER invent citations. Begin with '## <topic name>'. End with '### Open questions:'.", "fanout": {"over": "outline.topics", "max_parallel": 3}, "inputs": ["prompt", "fetched_sources", "url_verification.verified", "outline.topics.{i}", "research_plan.{i}"], "max_tokens": 2500},
+            {"name": "intro", "role": "generator", "instructions": "Write a 200-250 word introduction. Frame the topic, motivate why it matters, end with a one-sentence summary. Begin with '# <derived title>'.", "inputs": ["outline.topics.*", "url_verification.verified", "prompt"], "max_tokens": 600},
+            {"name": "conclusion", "role": "generator", "instructions": "Write a 150-200 word conclusion synthesizing findings. Identify 2-3 cross-cutting takeaways. Begin with '## Conclusion'. No new claims.", "inputs": ["outline.topics.*", "section_draft.*"], "max_tokens": 500},
+            {"name": "references", "role": "generator", "instructions": "Build a '## References' section listing exactly the sources from url_verification.verified. Format: [N] Author. \"Title\". Year. URL. Do NOT add new sources.", "inputs": ["url_verification.verified"], "max_tokens": 1500},
+            {"name": "uncertainties_synthesis", "role": "generator", "instructions": "Build a '## What I am not sure about' section listing 3-5 substantive open questions. Synthesize cross-cutting themes from section Open questions notes.", "inputs": ["outline.topics.*", "section_draft.*"], "max_tokens": 700},
+            {"name": "assemble_body", "role": "assembler", "instructions": "Stitch together: intro, section_draft.*, conclusion, references, uncertainties_synthesis. Output the full paper.", "inputs": ["intro", "section_draft.*", "conclusion", "references", "uncertainties_synthesis"]},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 4000, "max_words": 12000, "required_sections": ["References", "What I am not sure about"], "banned_phrases": ["clearly", "obviously", "state-of-the-art", "industry standard", "everyone knows"], "tone": "rigorous, hedged, attribution-heavy"},
     },
+    # 2. freeform — single-stage generator (from reference repo)
     {
-        "name": "Code Spec Planner",
-        "description": "Plan a code spec: modules, interfaces, dependencies, test plan.",
-        "role": "planner",
-        "instructions": (
-            "Plan a code spec for the requested feature. List the modules, "
-            "their public interfaces, the dependencies between them, and a "
-            "test plan. Use generator stages for each module's interface doc "
-            "and an assembler to stitch them into the final spec."
-        ),
-        "output_rules": (
-            "Emit ONLY the JSON object.\n"
-            "Each module's interface doc should fit in <500 words.\n"
-            "The test plan stage must list concrete test cases, not vague categories."
-        ),
-        "template": "Reference task type: code_spec.",
-        "kind": "custom",
-        "tags": ["planner", "code", "spec", "architecture"],
+        "name": "Freeform",
+        "description": "Single-stage generator. Best for simple tasks: write an email, draft text, produce markdown from a prompt. One generator stage, no planning or review.",
+        "task_type": "freeform",
+        "task": "freeform write",
+        "kind": "chat",
+        "tags": ["freeform", "simple", "generator"],
+        "stages": [
+            {"name": "write", "role": "generator", "instructions": "Write the content the user asked for, exactly as requested. No preamble, no meta-commentary, no 'here is the content:' header. Begin with the content directly.", "inputs": ["prompt"], "max_tokens": 2000},
+        ],
+        "output_rules_obj": {"format": "markdown"},
     },
-    # --- generator ---
+    # 3. structured_lesson — 5-stage lesson pipeline (from reference repo)
     {
-        "name": "Section Draft Generator",
-        "description": "Draft one section of a longer document, grounded in fetched sources.",
-        "role": "generator",
-        "instructions": (
-            "Draft the requested section in full. Use [N] footnote markers "
-            "for citations (never [Title](URL) inline links). If "
-            "fetched_sources is empty, write without citations."
-        ),
-        "output_rules": (
-            "500-1500 words.\n"
-            "Lead with the section's main claim, then the evidence.\n"
-            "Do not invent URLs, citations, dates, or numbers."
-        ),
-        "inputs": "{{fetched_sources}}",
-        "kind": "custom",
-        "tags": ["generator", "draft", "section", "citations"],
+        "name": "Structured Lesson",
+        "description": "5-stage pipeline: extract params, generate Bloom's-taxonomy objectives, write full lesson with 6 required sections, quality critique, polish with transformer. Enforces exact time-budgeted procedure steps.",
+        "task_type": "structured_lesson",
+        "task": "structured lesson plan",
+        "kind": "deepresearch",
+        "tags": ["lesson", "education", "bloom", "multi-stage"],
+        "stages": [
+            {"name": "extract_params", "role": "parser", "instructions": "From the user prompt, extract JSON: topic (str), audience (str), duration_min (int, infer 30 if not stated), prerequisites (list of str). Emit ONLY the JSON object with these four keys.", "inputs": ["prompt"], "max_tokens": 400},
+            {"name": "objectives", "role": "generator", "instructions": "Generate 3-5 measurable learning objectives. Each MUST start with a Bloom's taxonomy action verb (identify, explain, demonstrate, calculate, compare, construct). Output JSON array: [\"Objective 1\", ...].", "inputs": ["prompt", "extract_params"], "max_tokens": 400},
+            {"name": "full_lesson", "role": "generator", "instructions": "Write a complete lesson plan with EXACT section headings: Learning Objectives, Prerequisites, Materials, Procedure (numbered steps with [N min] time allocations summing to duration_min), Assessment, Differentiation. Second-person imperative voice.", "inputs": ["prompt", "extract_params", "objectives"], "max_tokens": 4000},
+            {"name": "quality_check", "role": "critiquer", "instructions": "Audit the full_lesson: all 6 sections present, objectives start with action verbs, materials are specific, procedure times sum to duration_min, steps are actionable, assessment is concrete. Output bullet list of issues or 'No issues found'.", "inputs": ["full_lesson", "extract_params"], "max_tokens": 800},
+            {"name": "polish", "role": "transformer", "instructions": "Apply each fix from quality_check to the full_lesson. Return the FULL polished lesson plan with all sections intact.", "inputs": ["full_lesson", "quality_check", "extract_params"], "max_tokens": 4000},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 600, "max_words": 5000, "required_sections": ["Learning Objectives", "Prerequisites", "Materials", "Procedure", "Assessment", "Differentiation"], "tone": "instructive, supportive, second-person imperative"},
     },
+    # 4. code_review — multi-stage code review pipeline
     {
-        "name": "Creative Writer",
-        "description": "Generate a creative piece (story, poem, script) following the user's prompt.",
-        "role": "generator",
-        "instructions": (
-            "Write the creative piece the user requested. Lead with the "
-            "strongest opening line. Maintain a consistent voice. End at a "
-            "natural stopping point — do not pad."
-        ),
-        "output_rules": (
-            "Match the requested length (default: 500-1000 words).\n"
-            "No meta-commentary, no 'Here is your story:' preamble.\n"
-            "Begin with the content itself."
-        ),
-        "kind": "custom",
-        "tags": ["generator", "creative", "story", "writing"],
+        "name": "Code Review",
+        "description": "5-stage code review: parse structure, identify issues per file (fanout), verify fixes, critique architecture, assemble report. Surfaces bugs, security issues, and improvement suggestions.",
+        "task_type": "code_review",
+        "task": "code review",
+        "kind": "judge",
+        "tags": ["code", "review", "bugs", "security"],
+        "stages": [
+            {"name": "parse_structure", "role": "parser", "instructions": "From the code input, extract a JSON inventory of files/modules: [{\"path\": str, \"language\": str, \"lines\": int, \"summary\": str}]. Identify the entry points and public APIs.", "inputs": ["prompt"], "max_tokens": 1000},
+            {"name": "review_file", "role": "critiquer", "instructions": "Review this file for: bugs, security issues (injection, auth, crypto misuse), performance, readability. Output JSON: [{\"severity\": \"high|medium|low\", \"line\": int|null, \"issue\": str, \"fix\": str}]. Be specific — cite line numbers.", "fanout": {"over": "parse_structure.files", "max_parallel": 3}, "inputs": ["parse_structure.files.{i}", "prompt"], "max_tokens": 1500},
+            {"name": "verify_fixes", "role": "verifier", "instructions": "For each suggested fix, verify it would actually resolve the issue without introducing regressions. Output JSON: [{\"issue_id\": str, \"verdict\": \"valid|invalid|risky\", \"reason\": str}].", "inputs": ["review_file.*"], "max_tokens": 800},
+            {"name": "architecture_review", "role": "critiquer", "instructions": "Critique the overall architecture: coupling, cohesion, separation of concerns, error handling strategy, testability. Output 3-5 bullets, each with ONE issue + ONE concrete improvement.", "inputs": ["parse_structure", "prompt"], "max_tokens": 800},
+            {"name": "assemble_report", "role": "assembler", "instructions": "Assemble the final code review report: Executive Summary, File-by-File Issues (sorted by severity), Architecture Notes, Recommended Actions (prioritized).", "inputs": ["parse_structure", "review_file.*", "verify_fixes", "architecture_review"]},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 400, "required_sections": ["Executive Summary", "File-by-File Issues", "Architecture Notes", "Recommended Actions"], "tone": "constructive, specific, actionable"},
     },
-    # --- critiquer ---
+    # 5. brainstorm — idea generation + clustering
     {
-        "name": "Draft Critiquer",
-        "description": "Bulleted critique of a draft: one specific issue + one specific fix per bullet.",
-        "role": "critiquer",
-        "instructions": (
-            "Critique the draft for factual errors, logical gaps, missing "
-            "context, and concrete improvements. Do NOT rewrite the content."
-        ),
-        "output_rules": (
-            "Each bullet: ONE specific issue + ONE specific suggested fix.\n"
-            "Prioritise high-leverage problems; do not pad with nitpicks.\n"
-            "If the draft is genuinely strong, still surface its 1-3 weakest points."
-        ),
-        "inputs": "{{body}}",
-        "kind": "custom",
-        "tags": ["critiquer", "review", "issues", "feedback"],
+        "name": "Brainstorm",
+        "description": "3-stage brainstorm: generate diverse ideas, cluster into themes, rank by impact/effort. Best for product features, solutions, naming, content angles.",
+        "task_type": "brainstorm",
+        "task": "brainstorm",
+        "kind": "chat",
+        "tags": ["brainstorm", "ideas", "clustering"],
+        "stages": [
+            {"name": "generate_ideas", "role": "generator", "instructions": "Generate 15-25 diverse ideas for the prompt. Mix obvious and unconventional. Output JSON array: [{\"idea\": str, \"category\": str}]. No duplicates.", "inputs": ["prompt"], "max_tokens": 1500},
+            {"name": "cluster", "role": "parser", "instructions": "Cluster the ideas into 3-6 themes. Output JSON: [{\"theme\": str, \"ideas\": [str, ...], \"description\": str}].", "inputs": ["generate_ideas"], "max_tokens": 800},
+            {"name": "rank", "role": "critiquer", "instructions": "Rank the themes by impact (high/medium/low) and effort (high/medium/low). Output JSON: [{\"theme\": str, \"impact\": str, \"effort\": str, \"rationale\": str}]. Surface the top 3 quick wins (high impact, low effort).", "inputs": ["cluster"], "max_tokens": 800},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 200, "required_sections": ["Themes", "Quick Wins"], "tone": "creative, exploratory"},
     },
+    # 6. summary — extract key points + write summary
     {
-        "name": "Schematic Critiquer",
-        "description": "Critique a doomalaysocreate schematic JSON for dangling inputs, role misuse, ordering.",
-        "role": "critiquer",
-        "instructions": (
-            "Critique the schematic. Look for: dangling inputs (a stage's "
-            "inputs reference a context path no prior stage produces), "
-            "invalid fanout, destructive stitch (transformer used to combine "
-            "sections instead of assembler), role misuse, vague instructions."
-        ),
-        "output_rules": (
-            "Bulleted list only. No prose paragraphs.\n"
-            "Each bullet: ONE issue + ONE concrete fix.\n"
-            "Do NOT rewrite the schematic."
-        ),
-        "inputs": "{{schematic}}",
-        "kind": "custom",
-        "tags": ["critiquer", "schematic", "orchestrator", "plan-review"],
+        "name": "Summary",
+        "description": "3-stage summarizer: extract key claims, synthesize into a summary, verify no fabricated content. Best for long articles, transcripts, documents.",
+        "task_type": "summary",
+        "task": "summary",
+        "kind": "chat",
+        "tags": ["summary", "extract", "synthesize"],
+        "stages": [
+            {"name": "extract_claims", "role": "extractor", "instructions": "Extract every distinct factual claim from the source. Output JSON array: [{\"claim\": str, \"location\": str}]. Drop opinions.", "inputs": ["prompt"], "max_tokens": 1500},
+            {"name": "synthesize", "role": "generator", "instructions": "Write a concise summary (target length: 1/5 of the source). Lead with the main thesis, then supporting points. Preserve every factual claim from extract_claims. Do not invent new content.", "inputs": ["prompt", "extract_claims"], "max_tokens": 1000},
+            {"name": "verify", "role": "verifier", "instructions": "Verify each claim in the summary appears in extract_claims. Output JSON: {\"faithful\": bool, \"issues\": [str]}. If any claim is fabricated, list it.", "inputs": ["synthesize", "extract_claims"], "max_tokens": 400},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 100, "tone": "concise, faithful"},
     },
-    # --- verifier ---
+    # 7. translation — parse + translate + verify
     {
-        "name": "Fact Verifier",
-        "description": "Yes/no judgment on a single factual claim with one-sentence reason.",
-        "role": "verifier",
-        "instructions": (
-            "Verify whether the claim is supported by the provided sources. "
-            "Be strict: if uncertain, answer false with reason "
-            "'uncertain - <what you would need to verify>'."
-        ),
-        "output_rules": (
-            "EXACTLY one JSON object: {\"pass\": true|false, \"reason\": \"<one sentence>\"}.\n"
-            "The reason must reference SPECIFIC content from the input.\n"
-            "No prose, no markdown fences."
-        ),
-        "inputs": "{{claim}}\n{{sources}}",
-        "required_schema": "{\"pass\": boolean, \"reason\": string}",
-        "kind": "custom",
-        "tags": ["verifier", "fact-check", "judge", "yes-no"],
+        "name": "Translation",
+        "description": "4-stage translation: detect source language, translate preserving meaning/tone, verify key terms, polish for naturalness. Best for documents, UI strings, articles.",
+        "task_type": "translation",
+        "task": "translation",
+        "kind": "chat",
+        "tags": ["translation", "localization", "i18n"],
+        "stages": [
+            {"name": "detect_language", "role": "parser", "instructions": "Detect the source language and identify domain-specific terms (proper nouns, technical jargon, idioms). Output JSON: {\"source_language\": str, \"target_language\": str, \"key_terms\": [{\"source\": str, \"gloss\": str}]}.", "inputs": ["prompt"], "max_tokens": 400},
+            {"name": "translate", "role": "generator", "instructions": "Translate the source text into the target language. Preserve meaning, tone, and formatting. Use the gloss from detect_language for key terms. Output the translation only — no commentary.", "inputs": ["prompt", "detect_language"], "max_tokens": 3000},
+            {"name": "verify_terms", "role": "verifier", "instructions": "Verify every key term from detect_language was translated consistently. Output JSON: {\"consistent\": bool, \"inconsistencies\": [{\"term\": str, \"variants\": [str]}]}.", "inputs": ["translate", "detect_language"], "max_tokens": 400},
+            {"name": "polish", "role": "transformer", "instructions": "Polish the translation for naturalness in the target language. Fix any inconsistencies from verify_terms. Return the FULL polished translation.", "inputs": ["translate", "verify_terms"], "max_tokens": 3000},
+        ],
+        "output_rules_obj": {"format": "markdown", "tone": "natural, fluent, faithful"},
     },
+    # 8. creative_writing — outline + draft + polish
     {
-        "name": "Spec Conformance Verifier",
-        "description": "Check whether a piece of code conforms to a spec (yes/no + reason).",
-        "role": "verifier",
-        "instructions": (
-            "Verify whether the code conforms to the spec. Check: function "
-            "signatures match, edge cases handled, no extra/missing public "
-            "APIs, tests cover the spec's cases."
-        ),
-        "output_rules": (
-            "EXACTLY one JSON object: {\"pass\": boolean, \"reason\": \"<one sentence>\"}.\n"
-            "Reference the SPECIFIC spec clause + code line."
-        ),
-        "inputs": "{{spec}}\n{{code}}",
-        "kind": "custom",
-        "tags": ["verifier", "spec", "conformance", "code-review"],
+        "name": "Creative Writing",
+        "description": "4-stage creative pipeline: outline the arc, draft the piece, critique pacing/voice, polish. Best for short stories, scripts, poems, narrative content.",
+        "task_type": "creative_writing",
+        "task": "creative writing",
+        "kind": "chat",
+        "tags": ["creative", "writing", "story", "narrative"],
+        "stages": [
+            {"name": "outline", "role": "planner", "instructions": "Outline the creative piece: setup, inciting incident, rising action, climax, resolution. Output JSON: [{\"beat\": str, \"purpose\": str, \"target_words\": int}].", "inputs": ["prompt"], "max_tokens": 600},
+            {"name": "draft", "role": "generator", "instructions": "Write the full creative piece following the outline. Lead with the strongest opening line. Maintain a consistent voice. No meta-commentary, no 'Here is your story:' preamble.", "inputs": ["prompt", "outline"], "max_tokens": 3000},
+            {"name": "critique", "role": "critiquer", "instructions": "Critique the draft: pacing, voice consistency, show-don't-tell, dialogue naturalness, ending payoff. Output 3-5 bullets, each ONE issue + ONE specific fix.", "inputs": ["draft", "outline"], "max_tokens": 600},
+            {"name": "polish", "role": "transformer", "instructions": "Apply the critique fixes to the draft. Return the FULL polished piece. Preserve every plot point; only improve prose, pacing, voice.", "inputs": ["draft", "critique"], "max_tokens": 3000},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 400, "tone": "vivid, voice-consistent, no meta-commentary"},
     },
-    # --- transformer ---
+    # 9. repo_audit — security audit pipeline
     {
-        "name": "Improve Flow Transformer",
-        "description": "Rewrite a draft for smoother transitions and clearer logic (full revised content).",
-        "role": "transformer",
-        "instructions": (
-            "Rewrite the content to improve flow: smoother transitions, "
-            "clearer logic, no abrupt topic shifts. Preserve every claim "
-            "and citation. Do NOT invent new content."
-        ),
-        "output_rules": (
-            "Output the FULL transformed content. No diffs, no commentary.\n"
-            "Begin with the content itself — no 'Here is the revised version:' preamble.\n"
-            "If applying the directive would require inventing facts, DROP the affected content."
-        ),
-        "inputs": "{{body}}",
-        "kind": "custom",
-        "tags": ["transformer", "rewrite", "flow", "revision"],
+        "name": "Repository Audit",
+        "description": "5-stage security audit: inventory attack surface, audit each surface for vulnerabilities (fanout), verify findings, prioritize by risk, assemble report. Best for security reviews.",
+        "task_type": "repo_audit",
+        "task": "repository security audit",
+        "kind": "judge",
+        "tags": ["security", "audit", "vulnerabilities", "redteam"],
+        "stages": [
+            {"name": "inventory", "role": "parser", "instructions": "Inventory the attack surface: endpoints, auth flows, data stores, third-party deps, secrets handling. Output JSON: [{\"component\": str, \"type\": str, \"risk_factors\": [str]}].", "inputs": ["prompt"], "max_tokens": 1500},
+            {"name": "audit_component", "role": "critiquer", "instructions": "Audit this component for OWASP Top 10 + common vulns (injection, auth bypass, SSRF, secrets-in-code, insecure deserialization). Output JSON: [{\"vuln\": str, \"severity\": \"critical|high|medium|low\", \"evidence\": str, \"fix\": str}]. Cite specific code.", "fanout": {"over": "inventory.components", "max_parallel": 3}, "inputs": ["inventory.components.{i}", "prompt"], "max_tokens": 1500},
+            {"name": "verify_findings", "role": "verifier", "instructions": "Verify each finding is real (not a false positive) by checking the evidence. Output JSON: [{\"finding_id\": str, \"verdict\": \"confirmed|false_positive|needs_context\", \"reason\": str}].", "inputs": ["audit_component.*"], "max_tokens": 800},
+            {"name": "prioritize", "role": "critiquer", "instructions": "Prioritize confirmed findings by exploitability x impact. Output JSON: [{\"finding_id\": str, \"priority\": \"P0|P1|P2|P3\", \"rationale\": str}].", "inputs": ["verify_findings", "audit_component.*"], "max_tokens": 600},
+            {"name": "assemble_report", "role": "assembler", "instructions": "Assemble the security audit report: Executive Summary, Findings (sorted by priority), Remediation Plan (per-finding fix + owner suggestion), Risk Posture.", "inputs": ["inventory", "audit_component.*", "verify_findings", "prioritize"]},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 500, "required_sections": ["Executive Summary", "Findings", "Remediation Plan", "Risk Posture"], "banned_phrases": ["clearly", "obviously"], "tone": "objective, evidence-based, prioritized"},
     },
+    # 10. design_doc — design document pipeline
     {
-        "name": "Tone Adjuster",
-        "description": "Adjust the tone of a piece (formal/casual/technical) without changing the meaning.",
-        "role": "transformer",
-        "instructions": (
-            "Adjust the tone to match the requested target tone (formal, "
-            "casual, technical, etc.). Preserve the meaning, claims, and "
-            "citations. Do NOT add or remove content."
-        ),
-        "output_rules": (
-            "Output the FULL transformed content.\n"
-            "Preserve every [N] citation marker.\n"
-            "No meta-commentary."
-        ),
-        "inputs": "{{body}}\nTarget tone: {{tone}}",
-        "kind": "custom",
-        "tags": ["transformer", "tone", "rewrite", "style"],
+        "name": "Design Document",
+        "description": "5-stage design doc: extract requirements, propose architecture, identify trade-offs, critique for gaps, assemble final design doc. Best for feature/system design.",
+        "task_type": "design_doc",
+        "task": "design document",
+        "kind": "deepresearch",
+        "tags": ["design", "architecture", "spec", "planning"],
+        "stages": [
+            {"name": "extract_requirements", "role": "parser", "instructions": "From the prompt, extract functional + non-functional requirements. Output JSON: {\"functional\": [{\"id\": str, \"requirement\": str, \"acceptance\": str}], \"non_functional\": [{\"category\": \"scalability|security|performance|reliability\", \"requirement\": str}].", "inputs": ["prompt"], "max_tokens": 1000},
+            {"name": "architecture", "role": "planner", "instructions": "Propose an architecture: components, data flow, storage, APIs, deployment. Output JSON: {\"components\": [{\"name\": str, \"responsibility\": str, \"tech\": str}], \"data_flow\": str, \"storage\": str, \"apis\": [str]}.", "inputs": ["prompt", "extract_requirements"], "max_tokens": 1500},
+            {"name": "tradeoffs", "role": "critiquer", "instructions": "Identify 3-5 key trade-offs in the architecture (build vs buy, consistency vs availability, latency vs cost). For each: the choice made, the alternative, and why this choice. Output JSON array.", "inputs": ["architecture", "extract_requirements"], "max_tokens": 800},
+            {"name": "gap_review", "role": "critiquer", "instructions": "Review for gaps: missing error handling, no rollback plan, no observability, no capacity planning, security blind spots. Output 3-5 bullets, each ONE gap + ONE concrete addition.", "inputs": ["architecture", "tradeoffs", "extract_requirements"], "max_tokens": 800},
+            {"name": "assemble_doc", "role": "assembler", "instructions": "Assemble the final design doc: Overview, Requirements, Architecture, Trade-offs, Open Questions, Appendix (data models, API contracts).", "inputs": ["extract_requirements", "architecture", "tradeoffs", "gap_review"]},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 800, "required_sections": ["Overview", "Requirements", "Architecture", "Trade-offs", "Open Questions"], "tone": "precise, decision-oriented, evidence-based"},
     },
-    # --- parser ---
+    # 11. redteam — red team attack pipeline
     {
-        "name": "Citation Extractor",
-        "description": "Extract citations from text into a structured JSON array.",
-        "role": "parser",
-        "instructions": (
-            "Extract every citation from the source text. For each citation, "
-            "capture: the [N] marker, the cited author/title (if present), "
-            "and the surrounding claim."
-        ),
-        "output_rules": (
-            "Emit ONLY the JSON array. No prose, no fences.\n"
-            "If no citations are present, emit [].\n"
-            "Preserve original casing and punctuation in string values."
-        ),
-        "inputs": "{{body}}",
-        "required_schema": "Array<{\"n\": number, \"author\": string|null, \"title\": string|null, \"claim\": string}>",
-        "kind": "custom",
-        "tags": ["parser", "extract", "citations", "json"],
+        "name": "Red Team",
+        "description": "5-stage red team: identify attack surface, generate attacks per surface (fanout), verify attacks are feasible, prioritize by severity, assemble red team report. Best for offensive security testing.",
+        "task_type": "redteam",
+        "task": "red team assessment",
+        "kind": "judge",
+        "tags": ["redteam", "offensive-security", "attack", "testing"],
+        "stages": [
+            {"name": "attack_surface", "role": "parser", "instructions": "Identify the attack surface: entry points, trust boundaries, privileged operations, data flows. Output JSON: [{\"surface\": str, \"exposure\": \"public|internal|admin\", \"auth_required\": bool}].", "inputs": ["prompt"], "max_tokens": 1000},
+            {"name": "generate_attacks", "role": "generator", "instructions": "For this attack surface, generate 3-5 plausible attacks (NOT exploit code — describe the attack vector). Output JSON: [{\"attack\": str, \"vector\": str, \"preconditions\": str, \"impact\": str}]. Be specific to the surface.", "fanout": {"over": "attack_surface.surfaces", "max_parallel": 3}, "inputs": ["attack_surface.surfaces.{i}", "prompt"], "max_tokens": 1200},
+            {"name": "verify_attacks", "role": "verifier", "instructions": "For each attack, assess feasibility: are the preconditions realistic? Is the impact accurately characterized? Output JSON: [{\"attack_id\": str, \"feasible\": bool, \"confidence\": \"high|medium|low\", \"reason\": str}].", "inputs": ["generate_attacks.*"], "max_tokens": 800},
+            {"name": "prioritize", "role": "critiquer", "instructions": "Rank feasible attacks by severity (CVSS-like: critical/high/medium/low). Output JSON: [{\"attack_id\": str, \"severity\": str, \"priority\": \"P0|P1|P2|P3\", \"rationale\": str}].", "inputs": ["verify_attacks", "generate_attacks.*"], "max_tokens": 600},
+            {"name": "assemble_report", "role": "assembler", "instructions": "Assemble the red team report: Executive Summary, Attack Surface, Attacks (sorted by severity), Recommended Mitigations (per attack), Residual Risk.", "inputs": ["attack_surface", "generate_attacks.*", "verify_attacks", "prioritize"]},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 500, "required_sections": ["Executive Summary", "Attack Surface", "Attacks", "Recommended Mitigations", "Residual Risk"], "banned_phrases": ["clearly", "obviously", "trivially"], "tone": "adversarial, specific, evidence-based"},
     },
+    # 12. panel_debate — multi-perspective debate
     {
-        "name": "Action Items Parser",
-        "description": "Extract action items (owner + action + due) from meeting notes.",
-        "role": "parser",
-        "instructions": (
-            "Extract every action item from the meeting notes. For each, "
-            "capture: the owner (if named), the action (concrete verb + object), "
-            "and the due date (if mentioned)."
-        ),
-        "output_rules": (
-            "Emit ONLY the JSON array.\n"
-            "If no action items, emit [].\n"
-            "Do not infer owners/dates that are not literally present in the text."
-        ),
-        "inputs": "{{notes}}",
-        "required_schema": "Array<{\"owner\": string|null, \"action\": string, \"due\": string|null}>",
-        "kind": "custom",
-        "tags": ["parser", "extract", "action-items", "meetings"],
+        "name": "Panel Debate",
+        "description": "4-stage debate: assign perspectives, generate opening arguments per perspective (fanout), generate rebuttals, synthesize. Best for exploring contentious topics from multiple angles.",
+        "task_type": "panel_debate",
+        "task": "panel debate",
+        "kind": "judge",
+        "tags": ["debate", "panel", "perspectives", "multi-view"],
+        "stages": [
+            {"name": "assign_perspectives", "role": "planner", "instructions": "Assign 3-4 distinct perspectives on the topic (e.g. pro/con/synthesist/skeptic, or domain-specific roles). Output JSON: [{\"perspective\": str, \"stance\": str, \"key_values\": [str]}].", "inputs": ["prompt"], "max_tokens": 600},
+            {"name": "opening_arguments", "role": "generator", "instructions": "Write a 300-500 word opening argument from THIS perspective. Steelman the position. Cite evidence. No strawmen. Begin with '## <perspective>: Opening'.", "fanout": {"over": "assign_perspectives.perspectives", "max_parallel": 4}, "inputs": ["prompt", "assign_perspectives.perspectives.{i}"], "max_tokens": 1000},
+            {"name": "rebuttals", "role": "critiquer", "instructions": "For each perspective, write a 150-200 word rebuttal to the OTHER perspectives' arguments. Address specific points, not strawmen. Begin with '## <perspective>: Rebuttal'.", "fanout": {"over": "assign_perspectives.perspectives", "max_parallel": 4}, "inputs": ["assign_perspectives.perspectives.{i}", "opening_arguments.*"], "max_tokens": 600},
+            {"name": "synthesize", "role": "assembler", "instructions": "Synthesize the debate: where do perspectives agree? Where do they irreconcilably differ? What are the cruxes? Output a balanced synthesis that does NOT declare a winner but maps the disagreement.", "inputs": ["assign_perspectives", "opening_arguments.*", "rebuttals.*"], "max_tokens": 800},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 800, "required_sections": ["Opening Arguments", "Rebuttals", "Synthesis"], "banned_phrases": ["clearly", "obviously"], "tone": "balanced, steelman, no-winner-declared"},
     },
-    # --- reviewer ---
+    # 13. fact_check — claim extraction + verification
     {
-        "name": "Final Pass Reviewer",
-        "description": "Holistic final review: does this piece accomplish its stated goal?",
-        "role": "reviewer",
-        "instructions": (
-            "Review the piece holistically. Does it accomplish its stated "
-            "goal? Surface the top 3 strengths and the top 3 weaknesses. "
-            "End with a one-sentence verdict: ship / revise / reject."
-        ),
-        "output_rules": (
-            "3 strengths + 3 weaknesses + 1 verdict.\n"
-            "Each strength/weakness: one specific sentence.\n"
-            "Verdict: 'ship' | 'revise' | 'reject' + one-sentence reason."
-        ),
-        "inputs": "{{body}}\nStated goal: {{goal}}",
-        "kind": "custom",
-        "tags": ["reviewer", "final", "holistic", "verdict"],
+        "name": "Fact Check",
+        "description": "4-stage fact checker: extract claims, verify each claim (fanout), assess source credibility, assemble verdict. Best for articles, social media posts, political claims.",
+        "task_type": "fact_check",
+        "task": "fact check",
+        "kind": "judge",
+        "tags": ["fact-check", "verify", "claims", "verification"],
+        "stages": [
+            {"name": "extract_claims", "role": "extractor", "instructions": "Extract every distinct factual claim from the source. Output JSON: [{\"claim\": str, \"location\": str, \"claim_type\": \"statistic|quote|causal|prediction|definition\"}]. Drop opinions.", "inputs": ["prompt"], "max_tokens": 1000},
+            {"name": "verify_claim", "role": "verifier", "instructions": "Verify this single claim against fetched_sources. Output JSON: {\"claim\": str, \"verdict\": \"true|false|misleading|unverifiable\", \"evidence\": str, \"confidence\": \"high|medium|low\"}. Cite specific sources.", "fanout": {"over": "extract_claims.claims", "max_parallel": 4}, "inputs": ["extract_claims.claims.{i}", "fetched_sources"], "max_tokens": 500},
+            {"name": "assess_credibility", "role": "critiquer", "instructions": "Assess the source's overall credibility: methodology, citation quality, potential bias. Output JSON: {\"credibility\": \"high|medium|low\", \"biases\": [str], \"missing_context\": [str]}.", "inputs": ["prompt", "extract_claims", "verify_claim.*"], "max_tokens": 600},
+            {"name": "assemble_verdict", "role": "assembler", "instructions": "Assemble the fact-check report: Overall Verdict (true/mixed/false), Claim-by-Claim Verdicts, Source Credibility, Missing Context. Include a one-line summary at the top.", "inputs": ["extract_claims", "verify_claim.*", "assess_credibility"]},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 300, "required_sections": ["Overall Verdict", "Claim-by-Claim Verdicts", "Source Credibility"], "tone": "neutral, evidence-based, hedged appropriately"},
     },
-    # --- extractor ---
+    # 14. lesson_plan — simpler lesson plan (vs structured_lesson)
     {
-        "name": "Key Claims Extractor",
-        "description": "Extract the key factual claims from a piece (for downstream fact-checking).",
-        "role": "extractor",
-        "instructions": (
-            "Extract every distinct factual claim from the source. A "
-            "factual claim is a statement that could be true or false "
-            "(numbers, dates, named-thing-X-does-Y assertions). Drop "
-            "opinions and value judgments."
-        ),
-        "output_rules": (
-            "Emit ONLY the JSON array.\n"
-            "Each claim: one short sentence.\n"
-            "Preserve the original wording as closely as possible."
-        ),
-        "inputs": "{{body}}",
-        "required_schema": "Array<{\"claim\": string, \"location\": string}>",
-        "kind": "custom",
-        "tags": ["extractor", "claims", "facts", "fact-check"],
+        "name": "Lesson Plan",
+        "description": "4-stage lesson planner: extract topic/audience, list learning objectives, write the lesson procedure, assemble. Lighter than Structured Lesson — no critique/polish loop.",
+        "task_type": "lesson_plan",
+        "task": "lesson plan",
+        "kind": "deepresearch",
+        "tags": ["lesson", "education", "teaching"],
+        "stages": [
+            {"name": "extract_topic", "role": "parser", "instructions": "From the prompt, extract: topic (str), audience (str), duration_min (int, default 30), prerequisites (list of str). Output JSON.", "inputs": ["prompt"], "max_tokens": 300},
+            {"name": "objectives", "role": "generator", "instructions": "List 3-5 learning objectives starting with action verbs (explain, identify, demonstrate, calculate). Output JSON array of strings.", "inputs": ["prompt", "extract_topic"], "max_tokens": 300},
+            {"name": "procedure", "role": "generator", "instructions": "Write the lesson procedure: hook, direct instruction, guided practice, independent practice, closure. Each step has a time allocation [N min] summing to duration_min. Include 2-3 assessment checks.", "inputs": ["prompt", "extract_topic", "objectives"], "max_tokens": 2000},
+            {"name": "assemble", "role": "assembler", "instructions": "Assemble the lesson plan: Topic, Audience, Duration, Objectives, Materials (inferred), Procedure, Assessment. Output as a clean markdown document.", "inputs": ["extract_topic", "objectives", "procedure"]},
+        ],
+        "output_rules_obj": {"format": "markdown", "min_words": 300, "required_sections": ["Objectives", "Procedure", "Assessment"], "tone": "instructive, second-person imperative"},
     },
 ]
+
+
 
 
 def seed_defaults() -> int:
@@ -1356,11 +1652,22 @@ def seed_defaults() -> int:
             if existing:
                 continue
             tid = _gen_id()
-            # Compile the markdown from role + parts (Task 4 role-based
-            # system). Legacy templates with a hardcoded `markdown` field
-            # bypass compilation and use the literal markdown.
+            # Compile the markdown. Multi-stage templates (with `stages`)
+            # use compile_stages_markdown; legacy single-role templates use
+            # compile_template_markdown; legacy plain-text use the literal
+            # markdown field.
             norm_role = _normalize_role(tpl.get("role"))
-            if norm_role:
+            stages_list = tpl.get("stages")
+            output_rules_obj = tpl.get("output_rules_obj")
+            has_stages = bool(stages_list)
+            if has_stages:
+                markdown = compile_stages_markdown(
+                    task_type=tpl.get("task_type") or "",
+                    task=tpl.get("task") or "",
+                    description=tpl.get("description") or "",
+                    stages=stages_list,
+                    output_rules=output_rules_obj or {})
+            elif norm_role:
                 markdown = compile_template_markdown(
                     role=norm_role,
                     instructions=tpl.get("instructions") or "",
@@ -1370,12 +1677,17 @@ def seed_defaults() -> int:
                     required_schema=tpl.get("required_schema") or "")
             else:
                 markdown = tpl.get("markdown", "")
+            # Normalize multi-stage fields for storage.
+            stages_json = _normalize_stages(stages_list) if has_stages else "[]"
+            out_rules_json = (_normalize_output_rules(output_rules_obj)
+                              if output_rules_obj is not None else "{}")
             db.execute(
                 "INSERT INTO templates (id, author_id, author_name, name, description, "
                 "markdown, kind, tags, is_public, hearts, downloads, "
                 "role, instructions, output_rules, inputs, template_part, required_schema, "
+                "task_type, task, stages_json, output_rules_json, "
                 "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (tid, "system", "doomalaysocreate", tpl["name"],
                  tpl.get("description"), markdown, tpl.get("kind", "custom"),
                  _normalize_tags(tpl.get("tags")),
@@ -1385,6 +1697,10 @@ def seed_defaults() -> int:
                  (tpl.get("inputs") or "").strip() or None,
                  (tpl.get("template") or "").strip() or None,
                  (tpl.get("required_schema") or "").strip() or None,
+                 (tpl.get("task_type") or "").strip() or None,
+                 (tpl.get("task") or "").strip() or None,
+                 stages_json,
+                 out_rules_json,
                  now, now))
             inserted += 1
         db.commit()
@@ -1502,15 +1818,30 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             # frontend can render the correct button state when a user opens
             # a template detail view directly via URL.
             _annotate_user_flags([tpl], user_id)
-            # Role-based raw view (Task 4): ?view=raw returns the role
-            # skeleton + the parts separately so the frontend can render a
-            # color-coded "raw" view with syntax highlighting. The
-            # `markdown` field is the COMPILED prompt (skeleton + parts
-            # substituted); `raw` returns the UNFILLED skeleton + the parts
-            # so the user can see how the prompt was assembled.
+            # Raw view: ?view=raw returns the full template structure.
+            # For MULTI-STAGE templates (the REAL template format from the
+            # reference repo), this returns {task_type, task, description,
+            # stages, output_rules} so the frontend can render the pipeline
+            # with stage cards, fanout indicators, etc.
+            # For LEGACY single-role templates, it returns the role skeleton
+            # + the parts (backward compat with the Task-4 role-based raw view).
             q = parse_qs(urlsplit(path).query)
             view = (q.get("view", [None])[0] or "").strip().lower()
             if view == "raw":
+                if tpl.get("stages"):
+                    # Multi-stage template: return the full JSON pipeline.
+                    _json(handler, 200, {
+                        "template": tpl,
+                        "raw": {
+                            "task_type": tpl.get("task_type"),
+                            "task": tpl.get("task"),
+                            "description": tpl.get("description") or "",
+                            "stages": tpl.get("stages") or [],
+                            "output_rules": tpl.get("output_rules_obj") or {},
+                        },
+                    })
+                    return True
+                # Legacy single-role template: return the role skeleton + parts.
                 skeleton = _role_skeleton(tpl.get("role") or "")
                 _json(handler, 200, {
                     "template": tpl,
@@ -1548,12 +1879,20 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             inputs = body.get("inputs")
             template = body.get("template")
             required_schema = body.get("required_schema")
+            # Multi-stage template fields (REAL template format):
+            # task_type, task, stages, output_rules_obj. If `stages` is
+            # provided, the markdown is compiled from the stages.
+            task_type = body.get("task_type")
+            task = body.get("task")
+            stages = body.get("stages")
+            output_rules_obj = body.get("output_rules_obj") or body.get("output_rules_json")
             markdown = body.get("markdown")
             norm_role = _normalize_role(role) if role else None
-            if not norm_role:
+            has_stages = isinstance(stages, list) and bool(stages)
+            if not has_stages and not norm_role:
                 # Legacy plain-text mode: markdown is required.
                 if not isinstance(markdown, str) or not markdown.strip():
-                    _json(handler, 400, {"error": "'markdown' (or 'role' + parts) is required"})
+                    _json(handler, 400, {"error": "'markdown' (or 'role' + parts or 'stages') is required"})
                     return True
             kind = str(body.get("kind", "custom")).strip().lower()
             if kind not in VALID_KINDS:
@@ -1571,7 +1910,9 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
                     markdown=markdown, kind=kind, tags=tags, is_public=is_public,
                     role=norm_role, instructions=instructions,
                     output_rules=output_rules, inputs=inputs,
-                    template=template, required_schema=required_schema)
+                    template=template, required_schema=required_schema,
+                    task_type=task_type, task=task, stages=stages,
+                    output_rules_obj=output_rules_obj)
             except ValueError as e:
                 _json(handler, 400, {"error": str(e)})
                 return True
@@ -1644,6 +1985,21 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
                     kwargs[k] = body[k]
             if "is_public" in body:
                 kwargs["is_public"] = bool(body["is_public"])
+            # Role-based parts (legacy single-role templates).
+            for k in ("role", "instructions", "output_rules", "inputs",
+                      "template", "required_schema"):
+                if k in body:
+                    kwargs[k] = body[k]
+            # Multi-stage template fields (REAL template format).
+            for k in ("task_type", "task", "stages"):
+                if k in body:
+                    kwargs[k] = body[k]
+            # output_rules_obj comes through as "output_rules_obj" or
+            # "output_rules_json" in the request body.
+            if "output_rules_obj" in body:
+                kwargs["output_rules_obj"] = body["output_rules_obj"]
+            elif "output_rules_json" in body:
+                kwargs["output_rules_obj"] = body["output_rules_json"]
             if not kwargs:
                 _json(handler, 400, {"error": "no updatable fields supplied"})
                 return True
