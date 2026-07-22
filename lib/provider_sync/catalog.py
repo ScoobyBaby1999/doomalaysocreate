@@ -105,6 +105,16 @@ def is_free_model(model_id: str, prompt_price: float | None = None, completion_p
     return False
 
 
+def _safe_float(v: Any) -> float | None:
+    """Best-effort float coercion for pricing fields. Returns None on failure."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Static display config per provider (from Ts config.ts)
 # ---------------------------------------------------------------------------
@@ -282,18 +292,48 @@ def _fetch_json(url: str, headers: dict | None = None) -> Any:
 # ---------------------------------------------------------------------------
 # OpenRouter — richest source, builds the family registry
 # ---------------------------------------------------------------------------
+def _openrouter_premium() -> bool:
+    """Read the OpenRouter premium flag (env var OPENROUTER_PREMIUM).
+
+    Truthy values: 1, true, yes, on (case-insensitive). Default False.
+    Mirrors provider_sync.openrouter._env_premium so the catalog builder
+    and the sync class agree on the premium state without import cycles.
+    """
+    raw = os.environ.get("OPENROUTER_PREMIUM", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def _fetch_openrouter_family() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Fetch OpenRouter's full model list.
+    """Fetch OpenRouter's model list and build the family registry.
 
     Returns (models_list, family_registry) where family_registry maps
     family_key → {context, capabilities, benchmarks, pricing, ranks}.
+
+    Premium gating: when the user has NOT opted into premium mode
+    (env var OPENROUTER_PREMIUM unset/false), only ``:free`` models are
+    kept — paid models are filtered out of BOTH the raw list and the
+    family registry so the public catalog response never surfaces paid
+    OpenRouter routes to a free-tier user. When premium is enabled, the
+    full ~400-model list is returned.
     """
     url = "https://openrouter.ai/api/v1/models?output_modalities=text"
     data = _fetch_json(url)
     if not data:
         return [], {}
 
-    raw_models: list[dict] = data.get("data", [])
+    all_models: list[dict] = data.get("data", [])
+    # Free-tier filter: when not premium, keep only :free / $0-pricing models.
+    if not _openrouter_premium():
+        raw_models = [
+            m for m in all_models
+            if is_free_model(
+                m.get("id", ""),
+                _safe_float((m.get("pricing") or {}).get("prompt")),
+                _safe_float((m.get("pricing") or {}).get("completion")),
+            )
+        ]
+    else:
+        raw_models = list(all_models)
     registry: dict[str, dict[str, Any]] = {}
 
     # Pass 1: register every model's family metadata
@@ -463,6 +503,15 @@ def _sync_provider_models(catalog_entries: list[dict]) -> tuple[dict[str, list[s
         try:
             sync_instance = sync_class(api_key=None)
             models = sync_instance.fetch_models()
+            # Apply the provider's free-tier filter (e.g. OpenRouter's premium
+            # gate) — the docs-only fallback bypasses sync() which normally
+            # applies this. Without it, a free-tier user would see ALL ~400
+            # OpenRouter models instead of just the :free ones.
+            if hasattr(sync_instance, "filter_free_models"):
+                try:
+                    models = sync_instance.filter_free_models(models)
+                except Exception:
+                    pass  # best-effort — keep unfiltered on filter error
             if models:
                 result[name] = {
                     m.id.split("/")[-1] if "/" in m.id else m.id: m.id

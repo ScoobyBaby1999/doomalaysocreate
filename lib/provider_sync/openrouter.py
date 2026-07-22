@@ -1,29 +1,62 @@
 """OpenRouter model sync implementation.
 
 Dynamic model fetching — NEVER static. The /api/v1/models endpoint returns
-ALL ~400 models (free + paid). When the user has set OPENROUTER_API_KEY
-(premium access), we surface ALL models so the upgraded user can pick any
-paid model. When no key is set (anonymous free tier), we surface only the
-free models so the panel doesn't try to call paid models that will 401.
+ALL ~400 models (free + paid). Premium behaviour:
+
+  * **Default (free tier):** only the ``:free`` models are returned. This is
+    the safe default — having an OPENROUTER_API_KEY set does NOT imply the
+    user has paid credit on OpenRouter (anyone can sign up for a free key),
+    so we surface only the models that will not 401/402 when called.
+  * **Premium tier:** when the user has explicitly opted into premium mode
+    (env var ``OPENROUTER_PREMIUM=1`` OR an explicit ``premium=True`` kwarg
+    from the caller), ALL ~400 models are returned so the upgraded user can
+    pick any paid model.
+
+The premium flag is read once per :class:`OpenRouterSync` instance. The
+catalog builder (``provider_sync.catalog``) reads the env var when it
+constructs the sync instance and also passes it down to the family-fetch
+helper so the public roster endpoint respects the same flag.
 """
 from __future__ import annotations
 
+import os
+
 from provider_sync.base import BaseSync, ModelInfo
+
+
+def _env_premium() -> bool:
+    """Read the premium flag from the environment.
+
+    Truthy values: ``1``, ``true``, ``yes``, ``on`` (case-insensitive).
+    Everything else (including unset) is False.
+    """
+    raw = os.environ.get("OPENROUTER_PREMIUM", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 class OpenRouterSync(BaseSync):
     provider_name = "openrouter"
     models_url = "https://openrouter.ai/api/v1/models"
-    requires_auth = True
+    requires_auth = False  # /v1/models is public; only /chat/completions needs a key.
     env_var = "OPENROUTER_API_KEY"
 
     def __init__(self, api_key: str | None = None, **kwargs) -> None:
         super().__init__(api_key, **kwargs)
         self.output_modalities = kwargs.get("output_modalities", "text")
-        # Premium flag: when True, ALL models (free + paid) are returned.
-        # Defaults to True iff an api_key was supplied (having a key unlocks
-        # paid routes on OpenRouter). Callers can override via kwargs.
-        self.premium = bool(kwargs.get("premium", self.api_key is not None and self.api_key != ""))
+        # Premium flag resolution (in priority order):
+        #   1. Explicit kwarg from the caller (catalog builder / tests).
+        #   2. Env var OPENROUTER_PREMIUM (set by the frontend's "Upgrade to
+        #      Premium" flow via the Space secret mirror).
+        #   3. Default False — only :free models are returned.
+        #
+        # IMPORTANT: having an api_key alone does NOT enable premium. A free
+        # OpenRouter key is enough to call /v1/models but paid routes would
+        # 401/402 if the user has no credit. Default to the safe free-only
+        # behaviour and let the user opt in explicitly.
+        if "premium" in kwargs:
+            self.premium = bool(kwargs.get("premium"))
+        else:
+            self.premium = _env_premium()
 
     def fetch_models(self) -> list[ModelInfo]:
         url = f"{self.models_url}?output_modalities={self.output_modalities}"
@@ -68,11 +101,11 @@ class OpenRouterSync(BaseSync):
         return models
 
     def filter_free_models(self, models: list[ModelInfo]) -> list[ModelInfo]:
-        # Premium: return ALL models (free + paid). When the user has set
-        # their OPENROUTER_API_KEY they have paid access on OpenRouter, so
-        # we surface the full ~400-model catalog. Without a key (anonymous
-        # free tier) we keep only the :free routes so the panel doesn't
-        # try to call paid models that will 401.
+        # Premium: return ALL models (free + paid). Only enabled when the
+        # user has explicitly opted in (env var OPENROUTER_PREMIUM=1 or an
+        # explicit premium=True kwarg). Without explicit opt-in we keep
+        # only the :free routes so the panel doesn't try to call paid
+        # models that will 401/402.
         if self.premium:
             return list(models)
         return [m for m in models if m.is_free]
