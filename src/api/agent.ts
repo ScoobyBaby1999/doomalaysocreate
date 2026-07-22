@@ -160,6 +160,17 @@ export interface ChatSession {
   updated_at: string;
   /** Optional message count (populated when the backend returns `_count`). */
   message_count?: number;
+  // BATCH-2 Task 5.6 — per-chat metadata. The backend stores these per
+  // session so switching chats restores the user's tool selections.
+  // All optional — old sessions without these fields fall back to defaults.
+  effort?: string | null;
+  web_search?: boolean | null;
+  deep_research?: boolean | null;
+  mode?: string | null;
+  web_template?: string | null;
+  deep_template?: string | null;
+  judge_count?: number | null;
+  judge_template?: string | null;
 }
 
 export class AgentClient {
@@ -422,7 +433,7 @@ export class AgentClient {
     });
   }
 
-  updateChatSession(id: string, fields: { title?: string; model?: string; workspace_id?: string }) {
+  updateChatSession(id: string, fields: { title?: string; model?: string; workspace_id?: string; effort?: string; web_search?: boolean; deep_research?: boolean; mode?: string; web_template?: string; deep_template?: string; judge_count?: number; judge_template?: string }) {
     return this.req<ChatSession>(`/api/chat/sessions/${id}/update`, {
       method: "POST",
       body: JSON.stringify(fields),

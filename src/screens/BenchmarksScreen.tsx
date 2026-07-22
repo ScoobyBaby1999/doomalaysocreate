@@ -125,7 +125,7 @@ export function BenchmarksScreen({ settings }: { settings: Settings }) {
         <div className="flex items-center bg-surface2 rounded-xl p-0.5 text-[11px]">
           <button
             onClick={() => setTab("benchmarks")}
-            className={`px-2.5 py-1 rounded-lg transition-colors ${
+            className={`px-2.5 py-1 rounded-xl transition-colors ${
               tab === "benchmarks" ? "bg-accent text-white" : "text-muted-foreground hover:text-foreground"
             }`}
           >
@@ -133,7 +133,7 @@ export function BenchmarksScreen({ settings }: { settings: Settings }) {
           </button>
           <button
             onClick={() => setTab("pricing")}
-            className={`px-2.5 py-1 rounded-lg transition-colors ${
+            className={`px-2.5 py-1 rounded-xl transition-colors ${
               tab === "pricing" ? "bg-accent text-white" : "text-muted-foreground hover:text-foreground"
             }`}
           >

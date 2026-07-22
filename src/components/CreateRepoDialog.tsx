@@ -230,7 +230,7 @@ export function CreateRepoDialog({
             onClick={onClose}
             disabled={submitting}
             aria-label="Close"
-            className="touch-target w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text disabled:opacity-40"
+            className="touch-target w-9 h-9 rounded-xl bg-surface2 flex items-center justify-center text-muted hover:text-text disabled:opacity-40"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -241,13 +241,13 @@ export function CreateRepoDialog({
         {/* scrollable body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {error && (
-            <div className="text-sm text-rose-300 bg-rose-500/10 border border-rose-500/40 rounded-lg px-3 py-2">
+            <div className="text-sm text-rose-300 bg-rose-500/10 border border-rose-500/40 rounded-xl px-3 py-2">
               {error}
             </div>
           )}
 
           {stage === "done" && (
-            <div className="text-sm text-emerald-300 bg-emerald-500/10 border border-emerald-500/40 rounded-lg px-3 py-2">
+            <div className="text-sm text-emerald-300 bg-emerald-500/10 border border-emerald-500/40 rounded-xl px-3 py-2">
               ✓ Workspace ready — opening…
             </div>
           )}

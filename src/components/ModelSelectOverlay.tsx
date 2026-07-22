@@ -291,7 +291,7 @@ const ModelRow = memo(function ModelRow({
       data-selected={isSelected ? "true" : undefined}
       aria-pressed={isSelected}
       className={`
-        cv-auto flex flex-col w-full text-left rounded-lg px-2 py-1.5 min-h-[32px] max-h-[64px] overflow-hidden transition-colors duration-100 cursor-pointer touch-target
+        cv-auto flex flex-col w-full text-left rounded-xl px-2 py-1.5 min-h-[32px] overflow-hidden transition-colors duration-100 cursor-pointer touch-target
         ${isSelected ? "bg-accent/20 ring-1 ring-accent/40" : dimmed ? "" : "hover:bg-muted/40"}
         ${dimmed && !isSelected ? "opacity-35" : ""}
       `}
@@ -449,7 +449,7 @@ function ProviderBox({
         <button
           {...(dragHandleProps || {})}
           onClick={(e) => e.stopPropagation()}
-          className="touch-target inline-flex items-center justify-center size-7 rounded-lg text-muted-foreground/40 hover:text-muted-foreground hover:bg-surface2/40 transition-colors shrink-0 cursor-grab active:cursor-grabbing"
+          className="touch-target inline-flex items-center justify-center size-7 rounded-xl text-muted-foreground/40 hover:text-muted-foreground hover:bg-surface2/40 transition-colors shrink-0 cursor-grab active:cursor-grabbing"
           aria-label={`Drag to reorder ${provider.displayName}`}
           title="Drag to reorder"
         >
@@ -459,7 +459,7 @@ function ProviderBox({
         {/* Tap-to-expand main area */}
         <button
           onClick={onToggleExpand}
-          className="touch-target flex items-center gap-2 flex-1 min-w-0 text-left rounded-lg"
+          className="touch-target flex items-center gap-2 flex-1 min-w-0 text-left rounded-xl"
           aria-expanded={expanded}
           aria-label={`${expanded ? "Collapse" : "Expand"} ${provider.displayName}`}
         >
@@ -484,7 +484,7 @@ function ProviderBox({
           <button
             onClick={(e) => { e.stopPropagation(); onMoveUp(); }}
             disabled={isFirst}
-            className="touch-target size-7 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
+            className="touch-target size-7 flex items-center justify-center rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
             title="Move provider up"
             aria-label="Move provider up"
           >
@@ -493,7 +493,7 @@ function ProviderBox({
           <button
             onClick={(e) => { e.stopPropagation(); onMoveDown(); }}
             disabled={isLast}
-            className="touch-target size-7 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
+            className="touch-target size-7 flex items-center justify-center rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
             title="Move provider down"
             aria-label="Move provider down"
           >
@@ -503,7 +503,7 @@ function ProviderBox({
 
         <button
           onClick={openSettings}
-          className="touch-target inline-flex items-center justify-center size-7 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+          className="touch-target inline-flex items-center justify-center size-7 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
           aria-label={`Manage ${provider.displayName} privacy & keys`}
           title={`${provider.manageLabel} \u2197`}
         >
@@ -676,7 +676,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
 
   return (
     <div
-      className="cv-auto flex flex-col w-full text-left rounded-lg px-2 py-1.5 min-h-[36px] max-h-[120px] overflow-hidden transition-colors duration-100"
+      className="cv-auto flex flex-col w-full text-left rounded-xl px-2 py-1.5 min-h-[36px] overflow-hidden transition-colors duration-100"
       data-selected={isSelected ? "true" : undefined}
     >
       {/* ── Single-line row: [check] [name] [dots] [context] ──────────── */}
@@ -685,7 +685,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
           onClick={onSelect}
           data-selected={isSelected ? "true" : undefined}
           aria-pressed={isSelected}
-          className="touch-target flex items-center flex-1 min-w-0 cursor-pointer text-left rounded-lg"
+          className="touch-target flex items-center flex-1 min-w-0 cursor-pointer text-left rounded-xl"
         >
           <span
             className={`flex-shrink-0 flex items-center justify-center rounded-full ${isSelected ? "text-primary-foreground" : "text-transparent"}`}
@@ -1431,7 +1431,7 @@ export function ModelSelectOverlay() {
                       {searchQuery && (
                         <button
                           onClick={() => setSearchQuery("")}
-                          className="touch-target absolute right-1 top-1/2 -translate-y-1/2 inline-flex items-center justify-center size-6 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface3 transition-colors"
+                          className="touch-target absolute right-1 top-1/2 -translate-y-1/2 inline-flex items-center justify-center size-6 rounded-xl text-muted-foreground hover:text-foreground hover:bg-surface3 transition-colors"
                           aria-label="Clear search"
                         >
                           <IcoX />
@@ -1510,7 +1510,7 @@ export function ModelSelectOverlay() {
                   {anyFilterActive && (
                     <button
                       onClick={() => { activeFilters.forEach((f) => toggleFilter(f)); setContextMin(0); }}
-                      className="touch-target shrink-0 text-[10px] leading-none px-2 h-5 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-muted/40 transition-colors ml-auto"
+                      className="touch-target shrink-0 text-[10px] leading-none px-2 h-5 rounded-xl text-muted-foreground/70 hover:text-foreground hover:bg-muted/40 transition-colors ml-auto"
                     >
                       clear
                     </button>

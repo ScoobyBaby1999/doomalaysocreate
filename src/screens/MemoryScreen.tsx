@@ -89,11 +89,11 @@ export function MemoryScreen({ settings }: { settings: Settings }) {
         {/* Goal + Plan */}
         {state && (
           <div className="space-y-2">
-            <div className="rounded-lg border border-border bg-surface/40 p-3">
+            <div className="rounded-xl border border-border bg-surface/40 p-3">
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mb-1">Goal</div>
               <div className="text-sm text-foreground">{state.goal || "(not set)"}</div>
             </div>
-            <div className="rounded-lg border border-border bg-surface/40 p-3">
+            <div className="rounded-xl border border-border bg-surface/40 p-3">
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mb-1">Plan</div>
               <div className="text-sm text-foreground whitespace-pre-wrap">{state.plan || "(not set)"}</div>
             </div>

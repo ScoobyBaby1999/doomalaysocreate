@@ -267,6 +267,13 @@ export interface ChatState {
   disconnectMonitor: () => void;
   cancelJob: (client: AgentClient, jobId: string) => Promise<void>;
   applySuggestion: (id: string) => void;
+
+  // BATCH-2 Task 5.6 — debounced per-chat metadata persist. Called by
+  // every tool setter (setEffort, toggleWebSearch, setMode, etc.) so the
+  // backend stores the current configuration on the active chat session.
+  // Switching chats restores the saved config (see switchSession).
+  _persistChatMeta: () => void;
+  _persistChatMetaTimer: ReturnType<typeof setTimeout> | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +288,14 @@ function genMsgId(): string {
 function genQueueId(): string {
   return `q${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
+
+// BATCH-2 Task 5.6 — module-level ref to the most-recently-used AgentClient.
+// The chatStore actions receive `client` as a parameter (no ref held), but
+// the debounced _persistChatMeta needs to fire AFTER the setter returns,
+// when no client is in scope. We stash the last-seen client here so the
+// debounced persist can use it. Updated by loadSessions / sendMessage /
+// switchSession / etc. whenever they're called with a fresh client.
+const _lastClientRef: { current: AgentClient | null } = { current: null };
 
 /** Convert raw AgentEvents into normalized ChatMessages. Pure function. */
 export function eventsToMessages(events: AgentEvent[]): ChatMessage[] {
@@ -857,16 +872,40 @@ export const useChatStore = create<ChatState>()(
       _monitorController: null,
 
       // -- Simple setters --
+      // BATCH-2 Task 5.6 — every setter that changes a per-chat setting
+      // also fires a debounced persist to the backend so the chat session
+      // "remembers" its configuration when the user switches away + back.
       setInputText: (text) => set({ inputText: text }),
-      setEffort: (effort) => set({ effort }),
-      toggleWebSearch: () => set((s) => ({ webSearch: !s.webSearch })),
-      toggleDeepResearch: () => set((s) => ({ deepResearch: !s.deepResearch })),
-      setMode: (mode) => set({ mode }),
-      setWebTemplate: (t) => set({ webTemplate: t }),
-      setDeepTemplate: (t) => set({ deepTemplate: t }),
-      setJudge: (cfg) => set((s) => ({ judge: { ...s.judge, ...cfg } })),
+      setEffort: (effort) => {
+        set({ effort });
+        get()._persistChatMeta();
+      },
+      toggleWebSearch: () => {
+        set((s) => ({ webSearch: !s.webSearch }));
+        get()._persistChatMeta();
+      },
+      toggleDeepResearch: () => {
+        set((s) => ({ deepResearch: !s.deepResearch }));
+        get()._persistChatMeta();
+      },
+      setMode: (mode) => {
+        set({ mode });
+        get()._persistChatMeta();
+      },
+      setWebTemplate: (t) => {
+        set({ webTemplate: t });
+        get()._persistChatMeta();
+      },
+      setDeepTemplate: (t) => {
+        set({ deepTemplate: t });
+        get()._persistChatMeta();
+      },
+      setJudge: (cfg) => {
+        set((s) => ({ judge: { ...s.judge, ...cfg } }));
+        get()._persistChatMeta();
+      },
       setBusyMode: (m) => set({ busyMode: m }),
-      resetTools: () =>
+      resetTools: () => {
         set({
           effort: "med",
           webSearch: false,
@@ -875,7 +914,9 @@ export const useChatStore = create<ChatState>()(
           deepTemplate: "",
           mode: "auto",
           judge: { count: 3, template: "critique" },
-        }),
+        });
+        get()._persistChatMeta();
+      },
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
       setFileDrawerOpen: (open) => set({ fileDrawerOpen: open }),
       setPanelDrawerOpen: (open) => set({ panelDrawerOpen: open }),
@@ -944,6 +985,7 @@ export const useChatStore = create<ChatState>()(
 
       // -- Load sessions --
       loadSessions: async (client) => {
+        _lastClientRef.current = client; // BATCH-2 Task 5.6
         set({ isLoadingSessions: true, sessionError: null });
         // Always restore activeSessionId from localStorage first — even if the
         // network call fails, the user should keep their active session so
@@ -991,6 +1033,7 @@ export const useChatStore = create<ChatState>()(
 
       // -- Create session --
       createSession: async (client, model) => {
+        _lastClientRef.current = client; // BATCH-2 Task 5.6
         try {
           const cs = await client.createChatSession(
             undefined,
@@ -1036,6 +1079,7 @@ export const useChatStore = create<ChatState>()(
 
       // -- Switch session --
       switchSession: async (client, sessionId) => {
+        _lastClientRef.current = client; // BATCH-2 Task 5.6
         // Abort any in-flight stream first.
         const ctrl = get()._streamController;
         if (ctrl) {
@@ -1076,10 +1120,28 @@ export const useChatStore = create<ChatState>()(
           } catch {
             /* ignore */
           }
-          // If the session has a workspace_id, sync it.
+          // BATCH-2 Task 5.6 — restore per-chat metadata. The backend
+          // stores effort/webSearch/deepResearch/mode/templates/judge per
+          // session. When switching chats, restore those settings so each
+          // chat "remembers" its own configuration. Fall back to defaults
+          // for old sessions that don't have the metadata yet.
           const cs = get().sessions.find((s) => s.id === sessionId);
           if (cs?.workspace_id && cs.workspace_id !== get().workspaceId) {
             get().setWorkspaceId(cs.workspace_id);
+          }
+          if (cs) {
+            set({
+              effort: (cs.effort as ChatState["effort"]) || "med",
+              webSearch: cs.web_search ?? false,
+              deepResearch: cs.deep_research ?? false,
+              mode: (cs.mode as ChatState["mode"]) || "auto",
+              webTemplate: cs.web_template || "",
+              deepTemplate: cs.deep_template || "",
+              judge: {
+                count: cs.judge_count ?? 3,
+                template: cs.judge_template || "critique",
+              },
+            });
           }
         } catch (e) {
           set({
@@ -1157,6 +1219,7 @@ export const useChatStore = create<ChatState>()(
 
       // -- Send message (with queue + stop mode support) --
       sendMessage: async (client, message, model) => {
+        _lastClientRef.current = client; // BATCH-2 Task 5.6
         const text = message.trim();
         if (!text) return;
         const state = get();
@@ -1411,6 +1474,54 @@ export const useChatStore = create<ChatState>()(
         if (!sug) return;
         set({ inputText: sug.text });
       },
+
+      // BATCH-2 Task 5.6 — debounced per-chat metadata persist. Pushes
+      // the current effort / webSearch / deepResearch / mode / templates /
+      // judge config to the backend's /api/chat/sessions/:id/update so the
+      // session "remembers" its settings. Debounced 800ms so rapid toggles
+      // don't spam the backend.
+      _persistChatMeta: () => {
+        // Clear any in-flight timer.
+        if (get()._persistChatMetaTimer) {
+          clearTimeout(get()._persistChatMetaTimer!);
+        }
+        const timer = setTimeout(() => {
+          const sid = get().activeSessionId;
+          if (!sid) return;
+          const s = get();
+          // Fire-and-forget — failures are non-fatal (the backend may not
+          // have rolled out the metadata fields yet; the call still
+          // succeeds, the backend just ignores unknown fields).
+          try {
+            // We can't call client.updateChatSession directly because we
+            // don't have a client ref here. Use the global fetch with the
+            // stored settings. The chatStore doesn't hold a settings ref,
+            // so we read it from the AgentClient that was passed to
+            // loadSessions / sendMessage. As a fallback, skip if no client
+            // is available — the next setter will retry.
+            // NOTE: this works because AgentChat passes the same client
+            // instance to every store action; the store doesn't need to
+            // hold a ref. We use a module-level variable to bridge.
+            if (_lastClientRef.current) {
+              _lastClientRef.current.updateChatSession(sid, {
+                effort: s.effort,
+                web_search: s.webSearch,
+                deep_research: s.deepResearch,
+                mode: s.mode,
+                web_template: s.webTemplate || undefined,
+                deep_template: s.deepTemplate || undefined,
+                judge_count: s.judge.count,
+                judge_template: s.judge.template,
+              }).catch(() => { /* non-fatal */ });
+            }
+          } catch {
+            /* non-fatal */
+          }
+          set({ _persistChatMetaTimer: null });
+        }, 800);
+        set({ _persistChatMetaTimer: timer });
+      },
+      _persistChatMetaTimer: null,
     }),
     {
       name: "doomalaysocreate.chat.store",

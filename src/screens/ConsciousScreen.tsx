@@ -260,7 +260,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
       {/* header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-surface">
         <div className="flex items-center gap-2 min-w-0">
-          <div className="w-8 h-8 rounded-lg bg-accent/20 flex items-center justify-center shrink-0">
+          <div className="w-8 h-8 rounded-xl bg-accent/20 flex items-center justify-center shrink-0">
             <Icon.Brain size={16} color="#a855f7" />
           </div>
           <div className="relative min-w-0">
@@ -293,7 +293,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
           </div>
         </div>
         <button onClick={openOverlay}
-          className="w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
+          className="w-9 h-9 rounded-xl bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
           title="Select model"
           style={{ marginRight: 4 }}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -301,7 +301,7 @@ export function ConsciousScreen({ settings, workspaceId }: {
           </svg>
         </button>
         <button onClick={() => setShowDrawer(true)}
-          className="w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
+          className="w-9 h-9 rounded-xl bg-surface2 flex items-center justify-center text-muted hover:text-text transition-colors relative"
           title="View outputs">
           <Icon.Inbox size={16} />
           {drawer.length > 0 && (
@@ -463,12 +463,12 @@ function AgentSheet({ agent, drawer, onClose, onInvoke, onMerge }: {
               <div className="text-[10px] text-muted">{agent.model} · {agent.tier} · {agent.status}</div>
             </div>
           </div>
-          <button onClick={onClose} className="w-8 h-8 rounded-lg bg-surface2 flex items-center justify-center text-muted"><Icon.X size={16} /></button>
+          <button onClick={onClose} className="w-8 h-8 rounded-xl bg-surface2 flex items-center justify-center text-muted"><Icon.X size={16} /></button>
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {agent.worktreePath && (
-            <div className="text-[10px] text-muted bg-surface2 rounded-lg p-2">
+            <div className="text-[10px] text-muted bg-surface2 rounded-xl p-2">
               <div>branch: <code className="text-text">{agent.branch}</code></div>
               <div>worktree: <span className="text-text/70 truncate">{agent.worktreePath.split("/").slice(-2).join("/")}</span></div>
             </div>
@@ -500,7 +500,7 @@ function AgentSheet({ agent, drawer, onClose, onInvoke, onMerge }: {
             <div className="space-y-2">
               <div className="text-xs font-medium text-text">Outputs ({drawer.length}):</div>
               {drawer.slice().reverse().map((d) => (
-                <div key={d.id} className="rounded-lg bg-surface2 border border-border p-3">
+                <div key={d.id} className="rounded-xl bg-surface2 border border-border p-3">
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-[10px] font-medium text-accent">{d.kind}</span>
                     <span className="text-[10px] px-2 py-0.5 rounded-full"
@@ -546,7 +546,7 @@ function DrawerPanel({ entries, agents, onClose }: {
             <span className="text-sm font-semibold text-text">All Outputs</span>
             <span className="text-[10px] text-muted">({entries.length})</span>
           </div>
-          <button onClick={onClose} className="w-8 h-8 rounded-lg bg-surface2 flex items-center justify-center text-muted"><Icon.X size={16} /></button>
+          <button onClick={onClose} className="w-8 h-8 rounded-xl bg-surface2 flex items-center justify-center text-muted"><Icon.X size={16} /></button>
         </div>
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
           {entries.length === 0 ? (
@@ -556,7 +556,7 @@ function DrawerPanel({ entries, agents, onClose }: {
               const fromAgent = agents.find((a) => a.id === d.fromAgentId);
               const toAgent = agents.find((a) => a.id === d.toAgentId);
               return (
-                <div key={d.id} className="rounded-lg bg-surface2 border border-border p-3">
+                <div key={d.id} className="rounded-xl bg-surface2 border border-border p-3">
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-[10px] text-accent font-medium">{d.kind}</span>
                     <span className="text-[10px] text-muted">{fromAgent?.role || "?"} → {toAgent?.role || "?"}</span>

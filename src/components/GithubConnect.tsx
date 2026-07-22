@@ -126,7 +126,7 @@ export function GithubConnect({ settings, onConnected }: Props) {
   return (
     <button
       onClick={handleConnect}
-      className="text-[11px] px-2 py-1 rounded-lg border border-border hover:border-accent text-accent"
+      className="text-[11px] px-2 py-1 rounded-xl border border-border hover:border-accent text-accent"
     >
       🔗 Connect GitHub
     </button>

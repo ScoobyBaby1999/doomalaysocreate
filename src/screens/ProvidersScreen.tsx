@@ -704,7 +704,7 @@ export function ProvidersScreen({
                   {embedded && stackIdx === 0 && (
                     <button
                       onClick={toggleFlip}
-                      className="touch-target ml-auto inline-flex items-center gap-1 px-2 h-7 rounded-lg border border-border text-[10px] hover:bg-surface2/60 transition-colors"
+                      className="touch-target ml-auto inline-flex items-center gap-1 px-2 h-7 rounded-xl border border-border text-[10px] hover:bg-surface2/60 transition-colors"
                       title="Flip Free / Paid order"
                       aria-label="Flip Free and Paid order"
                       aria-pressed={flipPaidFirst}
@@ -895,7 +895,7 @@ function ProviderCard({
           aria-expanded={expanded}
         >
           <span
-            className="inline-flex items-center justify-center w-7 h-7 rounded-lg shrink-0 font-semibold text-[11px]"
+            className="inline-flex items-center justify-center w-7 h-7 rounded-xl shrink-0 font-semibold text-[11px]"
             style={{ backgroundColor: `${color}1f`, color }}
           >
             {(p.displayName || p.name).slice(0, 1).toUpperCase()}

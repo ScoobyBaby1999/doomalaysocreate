@@ -152,7 +152,7 @@ export function WorkspaceMemoryPanel({ open, workspace, settings, onClose }: Pro
             onClick={fetchMemory}
             disabled={loading || !workspace}
             aria-label="Refresh"
-            className="touch-target w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text disabled:opacity-40"
+            className="touch-target w-9 h-9 rounded-xl bg-surface2 flex items-center justify-center text-muted hover:text-text disabled:opacity-40"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={loading ? "animate-spin" : ""}>
               <polyline points="23 4 23 10 17 10"/>
@@ -163,7 +163,7 @@ export function WorkspaceMemoryPanel({ open, workspace, settings, onClose }: Pro
           <button
             onClick={onClose}
             aria-label="Close"
-            className="touch-target w-9 h-9 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text"
+            className="touch-target w-9 h-9 rounded-xl bg-surface2 flex items-center justify-center text-muted hover:text-text"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -219,14 +219,14 @@ export function WorkspaceMemoryPanel({ open, workspace, settings, onClose }: Pro
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Tasks</div>
               <div className="space-y-1">
                 {state.pending_tasks?.map((t, i) => (
-                  <div key={i} className="flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg border border-border/60 bg-surface/30">
+                  <div key={i} className="flex items-center gap-2 text-xs px-2 py-1.5 rounded-xl border border-border/60 bg-surface/30">
                     <span className="size-1.5 rounded-full bg-amber-400" />
                     <span className="flex-1 truncate">{t.task}</span>
                     <span className="text-[9px] text-muted-foreground">{t.assigned_to}</span>
                   </div>
                 ))}
                 {state.completed_tasks?.slice(-5).map((t, i) => (
-                  <div key={i} className="flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg border border-border/30 opacity-60">
+                  <div key={i} className="flex items-center gap-2 text-xs px-2 py-1.5 rounded-xl border border-border/30 opacity-60">
                     <span className="size-1.5 rounded-full bg-emerald-400" />
                     <span className="flex-1 truncate">{t.task}</span>
                     <span className="text-[9px] text-muted-foreground">{t.agent}</span>
@@ -242,7 +242,7 @@ export function WorkspaceMemoryPanel({ open, workspace, settings, onClose }: Pro
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Blackboard</div>
               <div className="space-y-1">
                 {blackboard.map((entry, i) => (
-                  <div key={i} className="rounded-lg border border-border/60 bg-surface/30 px-2 py-1.5 text-xs">
+                  <div key={i} className="rounded-xl border border-border/60 bg-surface/30 px-2 py-1.5 text-xs">
                     <div className="flex items-center gap-2 mb-0.5">
                       <span className="text-[9px] text-muted-foreground tabular-nums">
                         {new Date(entry.ts * 1000).toLocaleTimeString()}
@@ -261,7 +261,7 @@ export function WorkspaceMemoryPanel({ open, workspace, settings, onClose }: Pro
           {log.length > 0 && (
             <div>
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Recent events</div>
-              <div className="space-y-0.5 max-h-48 overflow-y-auto rounded-lg border border-border/40 bg-surface/20 p-1">
+              <div className="space-y-0.5 max-h-48 overflow-y-auto rounded-xl border border-border/40 bg-surface/20 p-1">
                 {log.map((ev, i) => (
                   <div key={i} className="flex items-center gap-2 text-[11px] px-2 py-0.5 rounded hover:bg-surface/50">
                     <span className="text-[9px] text-muted-foreground tabular-nums">
@@ -287,12 +287,12 @@ export function WorkspaceMemoryPanel({ open, workspace, settings, onClose }: Pro
                 onChange={(e) => setNoteText(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAddNote(); } }}
                 placeholder="e.g. Remember to use Tailwind v4"
-                className="flex-1 bg-surface border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
+                className="flex-1 bg-surface border border-border rounded-xl px-3 py-2 text-sm outline-none focus:border-accent"
               />
               <button
                 onClick={handleAddNote}
                 disabled={writing || !noteText.trim()}
-                className="px-3 h-9 rounded-lg bg-accent text-white text-sm disabled:opacity-40 flex items-center"
+                className="px-3 h-9 rounded-xl bg-accent text-white text-sm disabled:opacity-40 flex items-center"
               >
                 {writing ? "…" : "Add"}
               </button>

@@ -31,7 +31,7 @@ export function WorkspaceMindsPanel({ open, workspace, settings, onBack }: Props
         <button
           onClick={onBack}
           aria-label="Back to workspaces"
-          className="touch-target h-9 px-3 rounded-lg bg-surface2 border border-border text-text hover:border-accent/60 flex items-center gap-1 text-[12px]"
+          className="touch-target h-9 px-3 rounded-xl bg-surface2 border border-border text-text hover:border-accent/60 flex items-center gap-1 text-[12px]"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>

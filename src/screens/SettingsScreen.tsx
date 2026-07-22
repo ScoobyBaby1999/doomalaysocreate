@@ -299,7 +299,7 @@ function GeneralTab({
 
       {status && (
         <div
-          className={`text-sm px-3 py-2 rounded-lg ${
+          className={`text-sm px-3 py-2 rounded-xl ${
             status.startsWith("✗")
               ? "bg-rose-500/10 text-rose-300"
               : "bg-emerald-500/10 text-emerald-300"
@@ -309,13 +309,13 @@ function GeneralTab({
         </div>
       )}
       {frontier && (
-        <div className="text-xs text-muted px-3 py-2 rounded-lg bg-surface/50 border border-border/50">
+        <div className="text-xs text-muted px-3 py-2 rounded-xl bg-surface/50 border border-border/50">
           {frontier}
         </div>
       )}
 
       {draft.githubSessionId && (
-        <div className="px-3 py-2 rounded-lg bg-surface/50 border border-border/50">
+        <div className="px-3 py-2 rounded-xl bg-surface/50 border border-border/50">
           <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">
             GitHub
           </div>
@@ -342,13 +342,13 @@ function GeneralTab({
             <div className="flex gap-2">
               <button
                 onClick={handleLogout}
-                className="flex-1 py-1.5 rounded-lg bg-rose-600 text-white text-sm hover:bg-rose-700 transition-colors"
+                className="flex-1 py-1.5 rounded-xl bg-rose-600 text-white text-sm hover:bg-rose-700 transition-colors"
               >
                 Yes, log out
               </button>
               <button
                 onClick={() => setConfirmLogout(false)}
-                className="flex-1 py-1.5 rounded-lg border border-border text-sm hover:bg-surface/40 transition-colors"
+                className="flex-1 py-1.5 rounded-xl border border-border text-sm hover:bg-surface/40 transition-colors"
               >
                 Cancel
               </button>
@@ -357,7 +357,7 @@ function GeneralTab({
         ) : (
           <button
             onClick={handleLogout}
-            className="w-full py-1.5 rounded-lg border border-rose-500/40 text-rose-300 text-sm hover:bg-rose-500/10 transition-colors"
+            className="w-full py-1.5 rounded-xl border border-rose-500/40 text-rose-300 text-sm hover:bg-rose-500/10 transition-colors"
           >
             Log out &amp; clear credentials
           </button>
@@ -370,7 +370,7 @@ function GeneralTab({
           <h3 className="text-sm font-medium text-muted-foreground mb-2">Developer</h3>
           <button
             onClick={() => onOpenTab("debug")}
-            className="w-full py-1.5 rounded-lg border border-border text-sm hover:border-accent/60 hover:text-accent transition-colors flex items-center justify-center gap-2"
+            className="w-full py-1.5 rounded-xl border border-border text-sm hover:border-accent/60 hover:text-accent transition-colors flex items-center justify-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/>

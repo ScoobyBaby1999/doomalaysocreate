@@ -55,7 +55,7 @@ export function PanelDrawer({
               {invocations.map((inv) => (
                 <div
                   key={inv.invoke_id}
-                  className="rounded-lg border border-border overflow-hidden"
+                  className="rounded-xl border border-border overflow-hidden"
                 >
                   <button
                     onClick={() => toggle(inv.invoke_id)}

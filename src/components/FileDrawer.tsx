@@ -55,7 +55,7 @@ export function FileDrawer({
               {files.map((f) => (
                 <div
                   key={f.path}
-                  className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-surface transition-colors"
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-surface transition-colors"
                 >
                   <span className="text-[11px] text-muted font-mono flex-1 truncate">
                     {f.path}

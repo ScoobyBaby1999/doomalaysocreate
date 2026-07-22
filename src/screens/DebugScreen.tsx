@@ -115,7 +115,7 @@ export function DebugScreen({ settings }: { settings: Settings }) {
         <div className="flex items-center gap-2">
           <button
             onClick={() => setAutoRefresh((v) => !v)}
-            className={`text-[11px] px-2 py-1 rounded-lg ${
+            className={`text-[11px] px-2 py-1 rounded-xl ${
               autoRefresh
                 ? "bg-green-500/20 text-green-400"
                 : "bg-surface2 text-muted"
@@ -125,13 +125,13 @@ export function DebugScreen({ settings }: { settings: Settings }) {
           </button>
           <button
             onClick={fetchLogs}
-            className="text-[11px] px-2 py-1 rounded-lg bg-surface2 text-muted"
+            className="text-[11px] px-2 py-1 rounded-xl bg-surface2 text-muted"
           >
             ↻
           </button>
           <button
             onClick={clearLogs}
-            className="text-[11px] px-2 py-1 rounded-lg bg-rose-500/20 text-rose-300"
+            className="text-[11px] px-2 py-1 rounded-xl bg-rose-500/20 text-rose-300"
           >
             clear
           </button>
@@ -144,7 +144,7 @@ export function DebugScreen({ settings }: { settings: Settings }) {
           <button
             key={c.id}
             onClick={() => setCategory(c.id)}
-            className={`text-[11px] px-2 py-1 rounded-lg whitespace-nowrap ${
+            className={`text-[11px] px-2 py-1 rounded-xl whitespace-nowrap ${
               category === c.id
                 ? "bg-accent text-white"
                 : "bg-surface2 text-muted"
@@ -158,7 +158,7 @@ export function DebugScreen({ settings }: { settings: Settings }) {
           <button
             key={l}
             onClick={() => setLevel(l)}
-            className={`text-[11px] px-2 py-1 rounded-lg whitespace-nowrap ${
+            className={`text-[11px] px-2 py-1 rounded-xl whitespace-nowrap ${
               level === l
                 ? "bg-accent text-white"
                 : "bg-surface2 text-muted"
@@ -199,7 +199,7 @@ function LogRow({ log }: { log: LogEntry }) {
 
   return (
     <div
-      className={`rounded-lg border border-border p-2 ${levelColor}`}
+      className={`rounded-xl border border-border p-2 ${levelColor}`}
       onClick={() => setExpanded((v) => !v)}
     >
       <div className="flex items-center gap-2 text-[11px]">

@@ -155,7 +155,7 @@ export function Popover({
             <button
               onClick={onClose}
               aria-label="Close"
-              className="touch-target -mr-1 -mt-0.5 w-6 h-6 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-white/5 transition-colors flex items-center justify-center"
+              className="touch-target -mr-1 -mt-0.5 w-6 h-6 rounded-xl text-muted-foreground/70 hover:text-foreground hover:bg-white/5 transition-colors flex items-center justify-center"
             >
               <svg
                 width="11"

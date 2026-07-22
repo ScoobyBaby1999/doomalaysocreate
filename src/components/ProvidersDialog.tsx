@@ -48,7 +48,7 @@ function confidenceColor(c: "high" | "medium" | "low"): string {
 function ProviderCard({ provider }: { provider: ProviderGroup }) {
   return (
     <div
-      className="flex flex-col rounded-lg border overflow-hidden"
+      className="flex flex-col rounded-xl border overflow-hidden"
       style={{ borderColor: `${provider.color}30` }}
     >
       <div

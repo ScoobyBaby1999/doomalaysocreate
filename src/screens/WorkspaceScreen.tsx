@@ -584,7 +584,7 @@ function GridHeader({
       <span className="font-medium text-text">Workspaces</span>
       {connected && (
         <>
-          <button onClick={onRefresh} className="ml-auto px-2 py-1 rounded-lg border border-border hover:border-accent/60 text-text" title="Refresh">
+          <button onClick={onRefresh} className="ml-auto px-2 py-1 rounded-xl border border-border hover:border-accent/60 text-text" title="Refresh">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
               <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -593,7 +593,7 @@ function GridHeader({
           {settings.githubSessionId && (
             <button
               onClick={() => onChange({ ...settings, githubSessionId: "", githubUsername: "" })}
-              className="px-2 py-1 rounded-lg border border-rose-500/40 text-rose-300 hover:bg-rose-500/10"
+              className="px-2 py-1 rounded-xl border border-rose-500/40 text-rose-300 hover:bg-rose-500/10"
               title="Clear session"
             >
               clear
@@ -833,7 +833,7 @@ function CardActionBtn({
       onClick={onClick}
       aria-label={label}
       title={label}
-      className={`touch-target w-7 h-7 rounded-lg bg-black/40 backdrop-blur flex items-center justify-center hover:bg-black/60 active:scale-95 ${
+      className={`touch-target w-7 h-7 rounded-xl bg-black/40 backdrop-blur flex items-center justify-center hover:bg-black/60 active:scale-95 ${
         danger ? "text-rose-300 hover:text-rose-200" : "text-white/80 hover:text-white"
       }`}
     >
@@ -872,7 +872,7 @@ function PickerPopover({
           <span className="text-sm font-semibold text-text">
             {target.kind === "gradient" ? "Pick gradient" : "Pick icon"}
           </span>
-          <button onClick={onClose} className="touch-target w-8 h-8 rounded-lg bg-surface2 flex items-center justify-center text-muted hover:text-text">
+          <button onClick={onClose} className="touch-target w-8 h-8 rounded-xl bg-surface2 flex items-center justify-center text-muted hover:text-text">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
@@ -1030,7 +1030,7 @@ function CloneWorkspace({
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-3 h-11 border-b border-border text-[12px] text-muted shrink-0">
-        <button onClick={onCancel} className="touch-target h-9 px-3 rounded-lg bg-surface2 border border-border text-text hover:border-accent/60 flex items-center gap-1">
+        <button onClick={onCancel} className="touch-target h-9 px-3 rounded-xl bg-surface2 border border-border text-text hover:border-accent/60 flex items-center gap-1">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
           </svg>
@@ -1041,7 +1041,7 @@ function CloneWorkspace({
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4 max-w-xl mx-auto w-full">
         {error && (
-          <div className="text-sm text-rose-300 bg-rose-500/10 border border-rose-500/40 rounded-lg px-3 py-2">{error}</div>
+          <div className="text-sm text-rose-300 bg-rose-500/10 border border-rose-500/40 rounded-xl px-3 py-2">{error}</div>
         )}
 
         <label className="block space-y-1">
@@ -1117,7 +1117,7 @@ function CloneWorkspace({
                     <div className="text-[11px] text-muted px-2 py-1">loading…</div>
                   ) : (
                     branches.map((b) => (
-                      <label key={b.name} className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-surface cursor-pointer text-sm">
+                      <label key={b.name} className="flex items-center gap-2 px-2 py-1 rounded-xl hover:bg-surface cursor-pointer text-sm">
                         <input
                           type="checkbox"
                           checked={selectedBranches.has(b.name)}
@@ -1345,7 +1345,7 @@ function WorkspaceDetail({
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-3 h-11 border-b border-border text-[12px] text-muted shrink-0 bg-surface/40">
-        <button onClick={onBack} className="touch-target h-9 px-3 rounded-lg bg-surface2 border border-border text-text hover:border-accent/60 flex items-center gap-1">
+        <button onClick={onBack} className="touch-target h-9 px-3 rounded-xl bg-surface2 border border-border text-text hover:border-accent/60 flex items-center gap-1">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
           </svg>
@@ -1359,7 +1359,7 @@ function WorkspaceDetail({
             setSuccess("Workspace set for chat! Switch to the Chat tab.");
             setTimeout(() => setSuccess(""), 3000);
           }}
-          className="ml-auto px-2 py-1 rounded-lg bg-accent text-white text-[10px] font-medium hover:bg-accent/80"
+          className="ml-auto px-2 py-1 rounded-xl bg-accent text-white text-[10px] font-medium hover:bg-accent/80"
         >
           Use for chat
         </button>
@@ -1381,8 +1381,8 @@ function WorkspaceDetail({
             <div className="text-[11px] text-muted mb-2">Branch: <span className="text-text">{pendingApproval.branch}</span></div>
           )}
           <div className="flex gap-2">
-            <button onClick={() => handleApprovePush(true)} disabled={approving} className="flex-1 py-1.5 rounded-lg bg-green-600 text-white text-sm disabled:opacity-40">{approving ? "…" : "Approve"}</button>
-            <button onClick={() => handleApprovePush(false)} disabled={approving} className="flex-1 py-1.5 rounded-lg border border-rose-500/40 text-rose-300 text-sm hover:bg-rose-500/10 disabled:opacity-40">{approving ? "…" : "Reject"}</button>
+            <button onClick={() => handleApprovePush(true)} disabled={approving} className="flex-1 py-1.5 rounded-xl bg-green-600 text-white text-sm disabled:opacity-40">{approving ? "…" : "Approve"}</button>
+            <button onClick={() => handleApprovePush(false)} disabled={approving} className="flex-1 py-1.5 rounded-xl border border-rose-500/40 text-rose-300 text-sm hover:bg-rose-500/10 disabled:opacity-40">{approving ? "…" : "Reject"}</button>
           </div>
         </div>
       )}
