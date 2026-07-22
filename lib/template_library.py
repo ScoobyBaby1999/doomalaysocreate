@@ -1473,7 +1473,6 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             # `markdown` field is the COMPILED prompt (skeleton + parts
             # substituted); `raw` returns the UNFILLED skeleton + the parts
             # so the user can see how the prompt was assembled.
-            from urllib.parse import parse_qs, urlsplit
             q = parse_qs(urlsplit(path).query)
             view = (q.get("view", [None])[0] or "").strip().lower()
             if view == "raw":
