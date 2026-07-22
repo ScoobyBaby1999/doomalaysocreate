@@ -826,6 +826,33 @@ def delete_template(template_id: str, user_id: str | None) -> bool | None:
     return True
 
 
+def _ensure_published_for_counter(template: dict) -> None:
+    """Ensure ``template`` is in the public HF dataset so its aggregate
+    hearts/downloads counters can be tracked globally.
+
+    System templates are seeded into local SQLite but NOT published to the
+    HF dataset by default (seed_defaults only writes local rows). Without
+    this guard, the first heart/download on a system template would silently
+    no-op in _bump_counter (template not in the dataset → counter not bumped).
+    We publish-on-first-heart/download so the global aggregate is always
+    tracked, regardless of whether the template was explicitly published.
+
+    Best-effort: silent no-op on any failure (network down, no HF_TOKEN,
+    etc.). The local SQLite count still gets bumped by the caller, so the
+    feature degrades gracefully when the dataset is unreachable.
+    """
+    if not template or not template.get("id"):
+        return
+    try:
+        existing_pub = _pub.get_template(template["id"])
+        if existing_pub:
+            return  # already in the dataset — nothing to do
+        _pub.publish_template(template)
+    except Exception as exc:
+        _log("template_ensure_published_failed",
+             template_id=template.get("id"), error=repr(exc)[:200])
+
+
 def heart_template(template_id: str, user_id: str | None) -> tuple[bool, int]:
     """Toggle heart on a template. Returns (hearted, hearts_count).
 
@@ -867,9 +894,13 @@ def heart_template(template_id: str, user_id: str | None) -> tuple[bool, int]:
         count = int(existing.get("hearts") or 0)
     # Bump the GLOBAL aggregate count in the public HF dataset (best-effort).
     # We attempt this regardless of is_public — if the template isn't in
-    # the public dataset, ``_bump_counter`` silently no-ops.
+    # the public dataset yet, we publish it first (publish-on-first-heart)
+    # so the global counter can be tracked. System templates are seeded
+    # locally but NOT published by default, so without this guard their
+    # hearts would never reach the metrics dataset.
     try:
         if hearted:
+            _ensure_published_for_counter(existing)
             _pub.add_heart(template_id)
         else:
             _pub.remove_heart(template_id)
@@ -926,7 +957,11 @@ def download_template(template_id: str, user_id: str | None) -> dict:
             _log("template_local_download_bump_failed",
                  template_id=template_id, error=repr(exc)[:200])
         # Bump the GLOBAL aggregate count in the public HF dataset.
+        # Publish-on-first-download: system templates aren't in the dataset
+        # by default, so we publish them here so their download count is
+        # tracked globally (same pattern as heart_template).
         try:
+            _ensure_published_for_counter(existing)
             _pub.increment_downloads(template_id)
         except Exception as exc:
             _log("template_public_download_failed",
