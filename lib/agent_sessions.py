@@ -1684,6 +1684,19 @@ class AgentSession:
         self.events: list[dict] = []
         self.inbox: queue.Queue = queue.Queue()
         self._stream_queues: list[queue.Queue] = []
+        # Task 7 — smart queue injection. ``_queued_msgs`` holds messages
+        # the user submitted while a turn was already running. They are
+        # injected at natural breakpoints (after a thinking chain ends,
+        # before/after a tool call, on paragraph breaks in assistant text)
+        # so the agent gets the new context without interrupting coherent
+        # thought. ``_last_event_type`` tracks the most recent event type
+        # so we can detect breakpoint transitions.
+        self._queued_msgs: list[str] = []
+        self._queued_msgs_lock = threading.Lock()
+        self._last_event_type: str | None = None
+        self._last_assistant_text: str = ""
+        # Soft-inject cap so a runaway submitter can't OOM the session.
+        self._queued_msgs_max = 16
         self.adapter: BaseAdapter | None = None
         self._interrupting = False
         # Bug 3: auto-title generation. Set to True after we've generated
@@ -1774,6 +1787,50 @@ class AgentSession:
             except Exception:
                 pass  # best-effort — don't block the turn on DB errors
 
+        # Task 7 — smart queue injection at natural breakpoints. Detect:
+        #   - thinking_end: prior event was thinking, new event is NOT
+        #     thinking (reasoning chain ended).
+        #   - tool_use_start: new event is tool_use (about to call a tool).
+        #   - tool_result_end: prior event was tool_result (tool finished).
+        #   - paragraph_break: new assistant text contains a double-newline
+        #     AND we already had some assistant text this turn (mid-thought
+        #     paragraph break, not the start of the message).
+        # We do NOT inject mid-token (only on event boundaries), so the
+        # agent's coherent thought is preserved. The injection is SOFT: the
+        # queued message goes to the inbox for the NEXT turn (the current
+        # turn continues to completion).
+        try:
+            new_type = ev.get("type")
+            if new_type:
+                prev_type = self._last_event_type
+                inject_kind: str | None = None
+                if (prev_type == "thinking"
+                        and new_type not in ("thinking", "thinking_delta")):
+                    inject_kind = "thinking_end"
+                elif new_type == "tool_use":
+                    inject_kind = "tool_use_start"
+                elif prev_type == "tool_result" and new_type != "tool_result":
+                    inject_kind = "tool_result_end"
+                elif new_type == "assistant":
+                    new_text = ev.get("text") or ""
+                    # Paragraph break = a double newline AFTER the first
+                    # paragraph (so we don't inject on the very first
+                    # assistant chunk of a turn).
+                    if (self._last_assistant_text
+                            and "\n\n" in new_text
+                            and "\n\n" not in self._last_assistant_text):
+                        inject_kind = "paragraph_break"
+                    self._last_assistant_text = new_text
+                elif new_type in ("status",) and ev.get("state") in ("idle", "done"):
+                    inject_kind = "status_idle"
+                # Track the new type as the prev for the next emit().
+                if new_type not in ("thinking_delta", "assistant_delta"):
+                    self._last_event_type = new_type
+                if inject_kind:
+                    self._inject_queued_at_breakpoint(inject_kind)
+        except Exception:
+            pass  # never let queue logic break the turn
+
     def register_stream_queue(self, q: queue.Queue) -> None:
         with self.lock:
             self._stream_queues.append(q)
@@ -1847,6 +1904,45 @@ class AgentSession:
         self.status = state
         self.emit({"type": "status", "state": state, **extra})
 
+    def _drain_queued_message(self) -> str | None:
+        """Pop the next queued message (FIFO) if any. Returns None if the
+        queue is empty. Called at natural breakpoints during a turn."""
+        with self._queued_msgs_lock:
+            if not self._queued_msgs:
+                return None
+            return self._queued_msgs.pop(0)
+
+    def _inject_queued_at_breakpoint(self, breakpoint_kind: str) -> bool:
+        """If there's a queued message, inject it as a new user message for
+        the current turn. Returns True iff a message was injected.
+
+        ``breakpoint_kind`` is one of:
+          - 'thinking_end'   — a reasoning chain just ended
+          - 'tool_use_start' — about to execute a tool
+          - 'tool_result_end' — a tool finished
+          - 'paragraph_break' — assistant emitted a double-newline
+          - 'status_idle'    — agent went idle (turn boundary)
+
+        The injection is SOFT: we don't kill the current turn. The message
+        is fed to the adapter as additional context via the inbox; on the
+        next ``_run`` iteration the adapter picks it up as a follow-up
+        user message and continues with the new context.
+        """
+        msg = self._drain_queued_message()
+        if not msg:
+            return False
+        try:
+            self.emit({"type": "injected", "text": msg[:200],
+                       "breakpoint": breakpoint_kind,
+                       "remaining_queued": len(self._queued_msgs)})
+        except Exception:
+            pass
+        # Push to the inbox so the next ``_run`` iteration processes it
+        # as a new turn. The current turn continues to completion; the
+        # injected message is the NEXT turn's input.
+        self.inbox.put(msg)
+        return True
+
     def snapshot(self, since: int = 0) -> dict:
         with self.lock:
             events = self.events[max(0, since):]
@@ -1863,7 +1959,29 @@ class AgentSession:
 
     # -- lifecycle ----------------------------------------------------------
     def submit(self, message: str) -> None:
+        """Submit a message. If a turn is running, the message is added to
+        the smart queue and injected at the next natural breakpoint
+        (Task 7). Otherwise it goes straight to the inbox for the next turn.
+        """
         self.updated = time.time()
+        # If a turn is currently running, queue the message for smart
+        # injection at the next breakpoint. Otherwise push to the inbox
+        # so the next ``_run`` iteration picks it up immediately.
+        if self.status == "running":
+            with self._queued_msgs_lock:
+                if len(self._queued_msgs) < self._queued_msgs_max:
+                    self._queued_msgs.append(message)
+                    # Emit a 'queued' event so the frontend can show
+                    # "message queued, will be sent at the next breakpoint".
+                    try:
+                        self.emit({"type": "queued",
+                                   "text": message[:200],
+                                   "queue_position": len(self._queued_msgs)})
+                    except Exception:
+                        pass
+                    return
+        # Not running (or queue full): push to the inbox for immediate
+        # processing on the next turn.
         self.inbox.put(message)
 
     def interrupt(self) -> bool:
@@ -1924,6 +2042,9 @@ class AgentSession:
             if msg is None:
                 break
             self._interrupting = False
+            # Task 7 — reset the breakpoint tracker for the new turn.
+            self._last_event_type = None
+            self._last_assistant_text = ""
             self._set_status("running")
             self.emit({"type": "user", "text": msg})
             # Phase 2 — cost-ceiling turn-boundary check (§14 hard enforcement).
