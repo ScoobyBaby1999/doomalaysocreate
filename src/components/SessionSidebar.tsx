@@ -403,7 +403,14 @@ function SessionRow({
                   isActive ? "text-accent" : "text-foreground"
                 }`}
               >
-                {session.title || "Untitled Chat"}
+                {/* BATCH-3 Task 6 — never show "New Chat" or empty; fall
+                    back to "Untitled" so the row always has visible text.
+                    The chatStore's createSession now passes a random
+                    "Chat <hex>" name, so this is just a defensive fallback
+                    for sessions created by older clients or the backend. */}
+                {session.title && session.title !== "New Chat"
+                  ? session.title
+                  : "Untitled"}
               </span>
               {isPinned && (
                 <svg
@@ -428,8 +435,16 @@ function SessionRow({
             </div>
             <div className="flex items-center gap-2 mt-0.5">
               <span className="text-[10px] text-muted-foreground">{date}</span>
+              {/* BATCH-3 Task 6 — model name shows next to each session.
+                  Dynamically updated: the chatStore's _persistChatMeta
+                  patches session.model whenever the user changes the model
+                  in that session, so the sidebar always reflects the
+                  current per-chat model. */}
               {session.model && (
-                <span className="text-[10px] text-muted-foreground/60 truncate max-w-[110px]">
+                <span
+                  className="text-[10px] text-muted-foreground/60 truncate max-w-[110px]"
+                  title={session.model}
+                >
                   {session.model.split("/").pop() || session.model}
                 </span>
               )}

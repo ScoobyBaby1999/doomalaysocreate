@@ -226,7 +226,11 @@ export class AgentClient {
   /**
    * Start a new agent session, or continue an existing one if sessionId is given.
    * `model` selects which model/tier drives a NEW session.
-   * `workspaceId` links the agent to a user workspace sandbox.
+   * `workspaceId` links the agent to a user workspace sandbox. OPTIONAL — when
+   * undefined/null/empty, the `workspace_id` field is OMITTED from the request
+   * body entirely (BATCH-3 Task 7) so the backend can run the chat in
+   * ephemeral mode without a workspace. The frontend never blocks a send on
+   * workspace selection — the user can chat without a workspace.
    * `chatSessionId` links to a persistent chat session for history.
    * `opts` carries effort/web_search/deep_research toggles.
    */
@@ -252,7 +256,12 @@ export class AgentClient {
     const body: Record<string, unknown> = { message };
     if (sessionId) body.session_id = sessionId;
     if (model) body.model = model;
-    if (workspaceId) body.workspace_id = workspaceId;
+    // BATCH-3 Task 7 — only include workspace_id when it's a non-empty
+    // string. undefined/null/"" all skip the field so the backend runs
+    // the chat in ephemeral mode (no workspace sandbox).
+    if (workspaceId && typeof workspaceId === "string" && workspaceId.trim().length > 0) {
+      body.workspace_id = workspaceId;
+    }
     if (chatSessionId) body.chat_session_id = chatSessionId;
     if (opts?.effort) body.effort = opts.effort;
     if (opts?.web_search) body.web_search = true;
@@ -417,7 +426,11 @@ export class AgentClient {
   }
 
   createChatSession(title?: string, model?: string, workspaceId?: string) {
-    const body: Record<string, unknown> = { title: title || "New Chat" };
+    // BATCH-3 Task 6 — default to a random "Chat <hex>" name instead of
+    // "New Chat" so each new session is uniquely identifiable in the sidebar
+    // before the backend auto-derives a title from the first message.
+    const randomHex = Math.random().toString(16).slice(2, 6).padEnd(4, "0");
+    const body: Record<string, unknown> = { title: title || `Chat ${randomHex}` };
     if (model) body.model = model;
     if (workspaceId) body.workspace_id = workspaceId;
     return this.req<ChatSession>("/api/chat/sessions", {

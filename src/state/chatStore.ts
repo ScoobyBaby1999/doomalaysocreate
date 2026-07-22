@@ -29,6 +29,12 @@ import {
   type MonitorSuggestion,
 } from "../api/agent";
 import type { Template, TemplateKind } from "../api/templates";
+// BATCH-3 Task 2 — import useModelStore at the top level so we can read the
+// current model synchronously in _persistChatMeta. This creates a one-way
+// dependency (chatStore → model-store); model-store does NOT import chatStore,
+// so there's no circular dep. The previous dynamic import was a workaround
+// for a non-existent circular dep that triggered a Vite warning.
+import { useModelStore } from "../lib/model-store";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -146,7 +152,11 @@ export interface ChatState {
   queue: QueuedMessage[];
 
   // Per-session toggles
-  effort: "low" | "med" | "high" | "max";
+  // BATCH-3 Task 5 — effort is now `string` (not the hardcoded union) so
+  // models with non-standard variants (e.g. "low|mid|ultra|max") can be
+  // represented. The legacy "low|med|high|max" defaults still work — the
+  // store + backend both accept any string.
+  effort: string;
   webSearch: boolean;
   deepResearch: boolean;
   mode: "auto" | "build" | "plan";
@@ -217,7 +227,8 @@ export interface ChatState {
 
   // Actions
   setInputText: (text: string) => void;
-  setEffort: (effort: "low" | "med" | "high" | "max") => void;
+  // BATCH-3 Task 5 — setEffort accepts any string (model-specific variants).
+  setEffort: (effort: string) => void;
   toggleWebSearch: () => void;
   toggleDeepResearch: () => void;
   setMode: (mode: "auto" | "build" | "plan") => void;
@@ -1035,8 +1046,15 @@ export const useChatStore = create<ChatState>()(
       createSession: async (client, model) => {
         _lastClientRef.current = client; // BATCH-2 Task 5.6
         try {
+          // BATCH-3 Task 6 — generate a random 4-char hex name instead of
+          // "New Chat" so each new chat is uniquely identifiable in the
+          // sidebar before the backend auto-derives a title from the first
+          // message. The backend may overwrite this title later via the
+          // "title" event (re-derived from context) — that's expected.
+          const randomHex = Math.random().toString(16).slice(2, 6).padEnd(4, "0");
+          const randomTitle = `Chat ${randomHex}`;
           const cs = await client.createChatSession(
-            undefined,
+            randomTitle,
             model,
             get().workspaceId || undefined,
           );
@@ -1085,6 +1103,15 @@ export const useChatStore = create<ChatState>()(
         if (ctrl) {
           ctrl.abort();
         }
+        // BATCH-3 Task 2 — IMPORTANT: reset ALL per-chat tool state to
+        // defaults BEFORE restoring from the session's saved metadata.
+        // Without this reset, switching from chat A (webSearch=true) to
+        // chat B (webSearch=false) leaves webSearch=true because the
+        // initial set() below only clears messages/status — not the tool
+        // toggles. The previous code only restored metadata AFTER
+        // getChatEvents, leaving a window where the old chat's tools were
+        // still active. Now we reset to defaults here, then overwrite
+        // with the session's saved values once we have them.
         set({
           isLoadingMessages: true,
           activeSessionId: sessionId,
@@ -1107,6 +1134,14 @@ export const useChatStore = create<ChatState>()(
           _agentSessionId: null,
           _streamController: null,
           _lastEventSeq: 0,
+          // Reset tool toggles to defaults — restored from cs below.
+          effort: "med",
+          webSearch: false,
+          deepResearch: false,
+          mode: "auto",
+          webTemplate: "",
+          deepTemplate: "",
+          judge: { count: 3, template: "critique" },
         });
         try {
           const evData = await client.getChatEvents(sessionId);
@@ -1120,28 +1155,78 @@ export const useChatStore = create<ChatState>()(
           } catch {
             /* ignore */
           }
-          // BATCH-2 Task 5.6 — restore per-chat metadata. The backend
-          // stores effort/webSearch/deepResearch/mode/templates/judge per
+          // BATCH-3 Task 2 — restore per-chat metadata. The backend stores
+          // effort/webSearch/deepResearch/mode/templates/judge/model per
           // session. When switching chats, restore those settings so each
           // chat "remembers" its own configuration. Fall back to defaults
-          // for old sessions that don't have the metadata yet.
+          // for old sessions that don't have the metadata yet (the reset
+          // above already set defaults, so this only fires if cs has data).
           const cs = get().sessions.find((s) => s.id === sessionId);
           if (cs?.workspace_id && cs.workspace_id !== get().workspaceId) {
             get().setWorkspaceId(cs.workspace_id);
           }
           if (cs) {
-            set({
-              effort: (cs.effort as ChatState["effort"]) || "med",
-              webSearch: cs.web_search ?? false,
-              deepResearch: cs.deep_research ?? false,
-              mode: (cs.mode as ChatState["mode"]) || "auto",
-              webTemplate: cs.web_template || "",
-              deepTemplate: cs.deep_template || "",
-              judge: {
+            // Only overwrite the defaults if the session has actual data.
+            const restored: Partial<ChatState> = {};
+            if (cs.effort) restored.effort = cs.effort as string;
+            if (typeof cs.web_search === "boolean") restored.webSearch = cs.web_search;
+            if (typeof cs.deep_research === "boolean") restored.deepResearch = cs.deep_research;
+            if (cs.mode) restored.mode = cs.mode as ChatState["mode"];
+            if (cs.web_template) restored.webTemplate = cs.web_template;
+            if (cs.deep_template) restored.deepTemplate = cs.deep_template;
+            if (typeof cs.judge_count === "number" || cs.judge_template) {
+              restored.judge = {
                 count: cs.judge_count ?? 3,
                 template: cs.judge_template || "critique",
-              },
-            });
+              };
+            }
+            if (Object.keys(restored).length > 0) {
+              set(restored);
+            }
+            // BATCH-3 Task 2 — restore the saved model. We update the
+            // model-store so the chat input's model badge + effectiveModelId
+            // reflect the session's model. The backend will resolve the
+            // provider on the next send.
+            if (cs.model) {
+              try {
+                const ms = useModelStore.getState();
+                // Only update if the model differs (avoid loops).
+                if (ms.selectedModelId !== cs.model && ms.selectedSlotId !== cs.model) {
+                  // Try to find the model in the providers list to get the
+                  // slot id + provider name. Fall back to setting just the
+                  // logical id.
+                  let providerName = ms.selectedProviderName;
+                  let slotId = cs.model;
+                  for (const p of ms.providers) {
+                    const m = p.models.find(
+                      (mm) => mm.id === cs.model || mm.slotId === cs.model,
+                    );
+                    if (m) {
+                      providerName = p.name;
+                      slotId = m.slotId || m.id;
+                      break;
+                    }
+                  }
+                  useModelStore.setState({
+                    selectedModelId: cs.model,
+                    selectedProviderName: providerName,
+                    selectedSlotId: slotId,
+                    focusedMode: true,
+                  });
+                  try {
+                    localStorage.setItem("doomalaysocreate.model-store.selectedModelId", JSON.stringify(cs.model));
+                    localStorage.setItem("doomalaysocreate.model-store.selectedSlotId", JSON.stringify(slotId));
+                    if (providerName) {
+                      localStorage.setItem("doomalaysocreate.model-store.selectedProviderName", JSON.stringify(providerName));
+                    }
+                  } catch {
+                    /* ignore */
+                  }
+                }
+              } catch {
+                /* model-store not yet loaded — non-fatal, will pick up on next render */
+              }
+            }
           }
         } catch (e) {
           set({
@@ -1193,6 +1278,19 @@ export const useChatStore = create<ChatState>()(
 
       // -- Rename session --
       renameSession: async (client, sessionId, title) => {
+        // BATCH-3 Task 6 — track that the user manually renamed this
+        // session. The "title" event handler in _runTurn checks this flag
+        // and SKIPS the auto-rename so the user's choice is preserved.
+        // The flag is stored in localStorage (not on the ChatSession —
+        // the backend doesn't need to know) keyed by session id.
+        try {
+          const raw = localStorage.getItem("doomalaysocreate.chat.manually_renamed");
+          const map: Record<string, boolean> = raw ? JSON.parse(raw) : {};
+          map[sessionId] = true;
+          localStorage.setItem("doomalaysocreate.chat.manually_renamed", JSON.stringify(map));
+        } catch {
+          /* ignore */
+        }
         // Optimistic update.
         set((s) => ({
           sessions: s.sessions.map((ses) =>
@@ -1477,9 +1575,11 @@ export const useChatStore = create<ChatState>()(
 
       // BATCH-2 Task 5.6 — debounced per-chat metadata persist. Pushes
       // the current effort / webSearch / deepResearch / mode / templates /
-      // judge config to the backend's /api/chat/sessions/:id/update so the
-      // session "remembers" its settings. Debounced 800ms so rapid toggles
-      // don't spam the backend.
+      // judge config + the current model to the backend's
+      // /api/chat/sessions/:id/update so the session "remembers" its
+      // settings. Debounced 800ms so rapid toggles don't spam the backend.
+      // BATCH-3 Task 2 — also persists the current model (read from
+      // useModelStore) so switching chats restores the per-chat model.
       _persistChatMeta: () => {
         // Clear any in-flight timer.
         if (get()._persistChatMetaTimer) {
@@ -1489,21 +1589,22 @@ export const useChatStore = create<ChatState>()(
           const sid = get().activeSessionId;
           if (!sid) return;
           const s = get();
+          // BATCH-3 Task 2 — read the current model from useModelStore.
+          // chatStore → model-store is a one-way dep (model-store doesn't
+          // import chatStore), so a top-level import is safe.
+          let currentModel: string | undefined;
+          try {
+            const state = useModelStore.getState();
+            currentModel = state.selectedSlotId || state.selectedModelId || undefined;
+          } catch {
+            /* ignore — model store not initialized yet */
+          }
           // Fire-and-forget — failures are non-fatal (the backend may not
           // have rolled out the metadata fields yet; the call still
           // succeeds, the backend just ignores unknown fields).
           try {
-            // We can't call client.updateChatSession directly because we
-            // don't have a client ref here. Use the global fetch with the
-            // stored settings. The chatStore doesn't hold a settings ref,
-            // so we read it from the AgentClient that was passed to
-            // loadSessions / sendMessage. As a fallback, skip if no client
-            // is available — the next setter will retry.
-            // NOTE: this works because AgentChat passes the same client
-            // instance to every store action; the store doesn't need to
-            // hold a ref. We use a module-level variable to bridge.
             if (_lastClientRef.current) {
-              _lastClientRef.current.updateChatSession(sid, {
+              const updates: Record<string, unknown> = {
                 effort: s.effort,
                 web_search: s.webSearch,
                 deep_research: s.deepResearch,
@@ -1512,7 +1613,30 @@ export const useChatStore = create<ChatState>()(
                 deep_template: s.deepTemplate || undefined,
                 judge_count: s.judge.count,
                 judge_template: s.judge.template,
-              }).catch(() => { /* non-fatal */ });
+              };
+              if (currentModel) updates.model = currentModel;
+              _lastClientRef.current.updateChatSession(sid, updates).catch(() => { /* non-fatal */ });
+              // BATCH-3 Task 6 — also optimistically update the local
+              // sessions list so the sidebar shows the new model + title
+              // without waiting for the next listChatSessions refresh.
+              set((st) => ({
+                sessions: st.sessions.map((ses) =>
+                  ses.id === sid
+                    ? {
+                        ...ses,
+                        effort: s.effort,
+                        web_search: s.webSearch,
+                        deep_research: s.deepResearch,
+                        mode: s.mode,
+                        web_template: s.webTemplate || null,
+                        deep_template: s.deepTemplate || null,
+                        judge_count: s.judge.count,
+                        judge_template: s.judge.template,
+                        model: currentModel ?? ses.model,
+                      }
+                    : ses,
+                ),
+              }));
             }
           } catch {
             /* non-fatal */
@@ -1703,14 +1827,28 @@ async function _runTurn(
         // it has auto-generated a chat title from the first user message.
         // We patch the matching session in the sessions list so the sidebar
         // updates without a full refresh.
+        // BATCH-3 Task 6 — SKIP the auto-rename if the user manually renamed
+        // the session. The manually_renamed flag is tracked in localStorage
+        // by renameSession(). Once set, the backend's auto-derived title is
+        // ignored so the user's choice wins.
         if (ev.type === "title") {
           const t = ev as { type: "title"; title: string; session_id: string };
           const targetId = t.session_id || sessionId;
-          set((s) => ({
-            sessions: s.sessions.map((ses) =>
-              ses.id === targetId ? { ...ses, title: t.title } : ses,
-            ),
-          }));
+          let isManuallyRenamed = false;
+          try {
+            const raw = localStorage.getItem("doomalaysocreate.chat.manually_renamed");
+            const map: Record<string, boolean> = raw ? JSON.parse(raw) : {};
+            isManuallyRenamed = !!map[targetId];
+          } catch {
+            /* ignore */
+          }
+          if (!isManuallyRenamed) {
+            set((s) => ({
+              sessions: s.sessions.map((ses) =>
+                ses.id === targetId ? { ...ses, title: t.title } : ses,
+              ),
+            }));
+          }
         }
 
         // Update status from status events.

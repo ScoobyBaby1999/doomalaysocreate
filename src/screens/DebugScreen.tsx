@@ -195,7 +195,27 @@ export function DebugScreen({ settings }: { settings: Settings }) {
 
 function LogRow({ log }: { log: LogEntry }) {
   const [expanded, setExpanded] = useState(false);
+  // BATCH-3 Task 3 — "Copied!" feedback for the copy-to-clipboard icon.
+  const [copied, setCopied] = useState(false);
   const levelColor = LEVEL_COLORS[log.level] || "text-muted bg-surface2";
+
+  // BATCH-3 Task 3 — copy the full log entry (header + message + data) to
+  // the clipboard. The header line mimics the on-screen row so the pasted
+  // text is easy to scan in a bug report.
+  const handleCopy = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const header = `${log.ts} [${log.level}] [${log.cat}] ${log.fn}${log.ms != null ? ` (${log.ms}ms)` : ""}`;
+    const body = log.msg || "";
+    const dataStr = log.data ? `\n${JSON.stringify(log.data, null, 2)}` : "";
+    const text = `${header}\n${body}${dataStr}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked — non-fatal */
+    }
+  }, [log]);
 
   return (
     <div
@@ -208,10 +228,35 @@ function LogRow({ log }: { log: LogEntry }) {
         </span>
         <span className="font-bold shrink-0">{log.level}</span>
         <span className="text-muted shrink-0">[{log.cat}]</span>
-        <span className="font-mono text-muted truncate">{log.fn}</span>
+        <span className="font-mono text-muted truncate flex-1 min-w-0">{log.fn}</span>
         {log.ms != null && (
-          <span className="ml-auto text-muted shrink-0">{log.ms}ms</span>
+          <span className="text-muted shrink-0">{log.ms}ms</span>
         )}
+        {/* BATCH-3 Task 3 — copy icon (clipboard). Stops propagation so the
+            row doesn't expand/collapse when the icon is tapped. Shows a
+            green check + "Copied!" for 1.5s after a successful copy. */}
+        <button
+          onClick={handleCopy}
+          className={`shrink-0 inline-flex items-center gap-1 px-1.5 h-6 rounded-md transition-colors ${
+            copied
+              ? "text-emerald-400 bg-emerald-500/15"
+              : "text-muted-foreground hover:text-foreground hover:bg-surface2"
+          }`}
+          title={copied ? "Copied!" : "Copy log to clipboard"}
+          aria-label={copied ? "Copied" : "Copy log"}
+        >
+          {copied ? (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          ) : (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          )}
+          {copied && <span className="text-[9px]">Copied!</span>}
+        </button>
       </div>
       <div className="text-[12px] mt-1 break-words">{log.msg}</div>
       {expanded && log.data && (

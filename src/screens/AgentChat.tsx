@@ -114,6 +114,11 @@ export function AgentChat({ settings }: { settings: Settings }) {
       );
       if (m) {
         const caps = m.attributes?.capabilities || [];
+        // BATCH-3 Task 5 — read effortLevels from the model attributes.
+        // Both camelCase + snake_case are accepted (the backend may return
+        // either). When missing/empty, the effort button is hidden.
+        const effortLevels =
+          m.attributes?.effortLevels || m.attributes?.effort_levels || [];
         return {
           contextLength: m.contextLength || 128000,
           capabilities: {
@@ -123,6 +128,9 @@ export function AgentChat({ settings }: { settings: Settings }) {
             extendedThinking:
               caps.includes("extendedThinking") || caps.includes("extended_thinking"),
           },
+          // BATCH-3 Task 5 — per-model effort variants (e.g.
+          // ["low","medium","high"] or ["low","mid","ultra","max"]).
+          effortLevels,
           isFree: isFreeModel(m.id) || isFreeModel(m.slotId || ""),
         };
       }
@@ -141,6 +149,13 @@ export function AgentChat({ settings }: { settings: Settings }) {
     deepResearch: true,
     extendedThinking: true,
   };
+  // BATCH-3 Task 5 — empty effortLevels means "unknown"; we still render
+  // the effort button in the fallback case (effortActive = capabilities.effort
+  // && (effortLevels.length > 0)). To preserve the old behavior when the
+  // model info isn't loaded yet, we fall back to the legacy 4-variant tuple
+  // so the button is visible + functional. Once the roster sync completes,
+  // the real per-model effortLevels take over.
+  const modelEffortLevels = selectedModelInfo?.effortLevels ?? ["low", "med", "high", "max"];
   const modelIsFree = selectedModelInfo?.isFree || false;
 
   // The cost of the most-recent assistant message (for PriceGauge current).
@@ -251,6 +266,20 @@ export function AgentChat({ settings }: { settings: Settings }) {
     loadSessions(clientRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // BATCH-3 Task 2 — when the user changes the model (via the ModelSelectOverlay),
+  // persist the new model to the active chat session so switching chats restores
+  // the per-chat model. We subscribe to selectedModelId + selectedSlotId changes
+  // and call _persistChatMeta (debounced 800ms inside the store).
+  const _persistChatMeta = useChatStore((s) => s._persistChatMeta);
+  useEffect(() => {
+    if (!activeSessionId) return;
+    // Only fire if there's an active session — otherwise we'd persist to a
+    // session that doesn't exist yet (the createSession flow handles the
+    // initial model save).
+    _persistChatMeta();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedModelId, selectedSlotId, activeSessionId, _persistChatMeta]);
 
   // Connect the monitor SSE stream on mount + whenever the workspace changes.
   // The backend pushes job_started/job_progress/job_delta/job_complete/
@@ -406,9 +435,16 @@ export function AgentChat({ settings }: { settings: Settings }) {
           {/* Active session title (truncated) — hidden on the smallest
               screens so the model badge has breathing room. */}
           <div className="hidden xs:block text-[12px] font-medium text-foreground truncate max-w-[120px] sm:max-w-[140px]">
+            {/* BATCH-3 Task 6 — never show "New Chat" — fall back to a
+                random "Chat <hex>" name if the session has no title yet.
+                The chatStore's createSession now sets a random name, so
+                this is defensive for older sessions. */}
             {activeSessionId
-              ? sessions.find((s) => s.id === activeSessionId)?.title || "New Chat"
-              : "New Chat"}
+              ? (() => {
+                  const t = sessions.find((s) => s.id === activeSessionId)?.title;
+                  return t && t !== "New Chat" ? t : "Chat";
+                })()
+              : "Chat"}
           </div>
 
           {/* Spacer pushes the right-side cluster (context circle, price,
@@ -867,6 +903,7 @@ export function AgentChat({ settings }: { settings: Settings }) {
             deepTemplate={deepTemplate}
             judge={judge}
             capabilities={modelCapabilities}
+            effortLevels={modelEffortLevels}
             disabled={running}
             setEffort={setEffort}
             toggleWebSearch={toggleWebSearch}

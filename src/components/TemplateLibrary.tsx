@@ -47,12 +47,18 @@ const KIND_LABELS: Record<string, string> = {
   custom: "Custom",
 };
 
+// BATCH-3 Task 4 — KIND_COLORS overhauled so no kind uses the app's purple
+// (#a855f7) for BOTH the text AND the background. Previously websearch +
+// deepresearch were both purple-on-purple (text-color on translucent
+// background-color) which was unreadable on the purple/black theme.
+// Now each kind uses a distinct, high-contrast color, and the badges use
+// WHITE text on a SOLID color background (not color-on-translucent).
 const KIND_COLORS: Record<string, string> = {
-  websearch: "#a855f7",
-  deepresearch: "#a855f7",
-  judge: "#f59e0b",
-  chat: "#22c55e",
-  custom: "#8b95a3",
+  websearch: "#3b82f6",     // blue
+  deepresearch: "#14b8a6",  // teal
+  judge: "#f59e0b",         // amber
+  chat: "#22c55e",          // green
+  custom: "#8b95a3",        // slate
 };
 
 const ALL_KINDS: TemplateKind[] = ["websearch", "deepresearch", "judge", "chat", "custom"];
@@ -397,10 +403,13 @@ export function TemplateLibrary({
                   </div>
                   {kindFilter && (
                     <span
-                      className="text-[9px] px-1.5 py-0.5 rounded-full font-medium shrink-0"
+                      className="text-[9px] px-1.5 py-0.5 rounded-full font-medium shrink-0 text-white"
                       style={{
-                        backgroundColor: `${KIND_COLORS[kindFilter] || "#8b95a3"}20`,
-                        color: KIND_COLORS[kindFilter] || "#8b95a3",
+                        // BATCH-3 Task 4 — solid color background + white
+                        // text so the badge is high-contrast regardless of
+                        // the kind color. Was: translucent bg + same-color
+                        // text (purple-on-purple for websearch/deepresearch).
+                        backgroundColor: KIND_COLORS[kindFilter] || "#8b95a3",
                       }}
                     >
                       {KIND_LABELS[kindFilter] || kindFilter}
@@ -539,10 +548,14 @@ export function TemplateLibrary({
                           {/* BATCH-2 Task 6.4 — "Generate with AI" button.
                               Opens a dialog asking what kind of template
                               the user wants, then sends a message to the
-                              agent to create it. */}
+                              agent to create it.
+                              BATCH-3 Task 4 — changed from text-accent on
+                              hover:bg-accent/10 (purple-on-purple) to a
+                              solid amber gradient with white text so the
+                              button stands out on the purple/black theme. */}
                           <button
                             onClick={() => setAiDialogOpen(true)}
-                            className="text-[11px] px-2 py-1.5 rounded-xl border border-accent/40 text-accent hover:bg-accent/10 transition-colors shrink-0 flex items-center gap-1"
+                            className="text-[11px] px-2 py-1.5 rounded-xl bg-gradient-to-br from-amber-500 to-orange-500 text-white hover:from-amber-400 hover:to-orange-400 transition-colors shrink-0 flex items-center gap-1 font-medium"
                             title="Generate a template with AI"
                           >
                             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -815,10 +828,10 @@ function TemplateCard({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 flex-wrap">
             <span
-              className="text-[9px] px-1.5 py-0.5 rounded-full font-medium shrink-0"
+              className="text-[9px] px-1.5 py-0.5 rounded-full font-medium shrink-0 text-white"
               style={{
-                backgroundColor: `${KIND_COLORS[t.kind] || "#8b95a3"}20`,
-                color: KIND_COLORS[t.kind] || "#8b95a3",
+                // BATCH-3 Task 4 — solid color + white text for high contrast.
+                backgroundColor: KIND_COLORS[t.kind] || "#8b95a3",
               }}
             >
               {KIND_LABELS[t.kind] || t.kind}
@@ -1000,10 +1013,10 @@ function TemplatePreview({
       <div className="px-3 py-2 border-b border-border shrink-0">
         <div className="flex items-center gap-1.5 flex-wrap">
           <span
-            className="text-[9px] px-1.5 py-0.5 rounded-full font-medium shrink-0"
+            className="text-[9px] px-1.5 py-0.5 rounded-full font-medium shrink-0 text-white"
             style={{
-              backgroundColor: `${KIND_COLORS[t.kind] || "#8b95a3"}20`,
-              color: KIND_COLORS[t.kind] || "#8b95a3",
+              // BATCH-3 Task 4 — solid color + white text for high contrast.
+              backgroundColor: KIND_COLORS[t.kind] || "#8b95a3",
             }}
           >
             {KIND_LABELS[t.kind] || t.kind}

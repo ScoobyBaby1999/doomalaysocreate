@@ -25,7 +25,11 @@ type PopoverKind = "effort" | "web" | "deep" | "judge" | null;
 
 export interface ToolIconsProps {
   // Selection state
-  effort: "low" | "med" | "high" | "max";
+  // BATCH-3 Task 5 — effort is now `string` (not the hardcoded union) so
+  // models with non-standard variants (e.g. "low|mid|ultra|max") can be
+  // represented. The legacy "low|med|high|max" defaults still work — the
+  // store + backend both accept any string.
+  effort: string;
   webSearch: boolean;
   deepResearch: boolean;
   /** Accepts legacy IDs ("breadth" | "deepdive" | "compare" | "factcheck") OR
@@ -44,11 +48,18 @@ export interface ToolIconsProps {
     extendedThinking: boolean;
   };
 
+  // BATCH-3 Task 5 — per-model effort level variants returned by the
+  // roster endpoint. When empty/missing, the effort button is HIDDEN
+  // entirely (the model doesn't support effort). When non-empty, the
+  // popover shows ONLY these variants (e.g. ["low","mid","ultra","max"]
+  // for some models, ["low","medium","high"] for others).
+  effortLevels?: string[];
+
   // Disabled while a turn is running (popovers still open but values can't change).
   disabled?: boolean;
 
   // Setters
-  setEffort: (e: "low" | "med" | "high" | "max") => void;
+  setEffort: (e: string) => void;
   toggleWebSearch: () => void;
   toggleDeepResearch: () => void;
   setWebTemplate: (t: string) => void;
@@ -65,11 +76,18 @@ export interface ToolIconsProps {
 
 /** Effort level descriptions — kept in sync with the backend's effort budget
  *  table (lib/research_templates.py EFFORT_BUDGETS). NO judge counts here —
- *  those moved to the Judge popover. */
-const EFFORT_DESCRIPTIONS: Record<"low" | "med" | "high" | "max", string> = {
+ *  those moved to the Judge popover.
+ *
+ *  BATCH-3 Task 5 — keyed by string so non-standard variants (e.g. "mid",
+ *  "ultra") also get descriptions. Unknown variants fall back to a generic
+ *  description derived from their name. */
+const EFFORT_DESCRIPTIONS: Record<string, string> = {
   low: "Quick answer, light reasoning. Minimal thinking budget.",
   med: "Balanced — the default. Moderate reasoning.",
+  medium: "Balanced — the default. Moderate reasoning.",
+  mid: "Balanced — the default. Moderate reasoning.",
   high: "Deep reasoning, longer answer. More thinking steps.",
+  ultra: "Deeper than high — extended thinking budget.",
   max: "Maximum reasoning budget. Slowest, most thorough.",
 };
 
@@ -97,6 +115,7 @@ export function ToolIcons({
   deepTemplate,
   judge,
   capabilities,
+  effortLevels,
   disabled,
   setEffort,
   toggleWebSearch,
@@ -135,7 +154,12 @@ export function ToolIcons({
     return () => window.removeEventListener("keydown", onKey);
   }, [active]);
 
-  const effortActive = capabilities.effort;
+  // BATCH-3 Task 5 — the effort button is ONLY rendered if the model has
+  // `effortLevels` (returned by the roster endpoint) AND the model's
+  // capabilities include "effort". When effortLevels is empty/missing OR
+  // the capability is missing, the button is removed entirely (not just
+  // dimmed) because there's nothing to select.
+  const effortActive = capabilities.effort && (effortLevels?.length ?? 0) > 0;
   const webActive = capabilities.webSearch;
   const deepActive = capabilities.deepResearch || capabilities.extendedThinking;
 
@@ -155,52 +179,56 @@ export function ToolIcons({
   return (
     <div className="flex items-center gap-0.5 shrink-0 mb-0.5">
       {/* ─── Effort ─────────────────────────────────────────── */}
-      <div className="relative">
-        <button
-          ref={effortBtnRef}
-          onClick={() => !disabled && setActive(active === "effort" ? null : "effort")}
-          className={`${btn("effort")} ${!effortActive ? "opacity-40" : ""}`}
-          title={`Effort: ${effort}${!effortActive ? " (not supported by this model)" : ""}`}
-          aria-label={`Effort: ${effort}${!effortActive ? " (not supported)" : ""}`}
-          disabled={disabled && active !== "effort"}
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-          </svg>
-        </button>
-        <PopoverPortal
-          open={active === "effort"}
-          onClose={() => setActive(null)}
-          anchorRef={effortBtnRef}
-          align="left"
-          direction="up"
-          width={240}
-          title="Effort Level"
-        >
-          {(["low", "med", "high", "max"] as const).map((e) => (
-            <button
-              key={e}
-              onClick={() => { setEffort(e); setActive(null); }}
-              className={`touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors ${
-                effort === e ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="capitalize">{e}</span>
-                {effort === e && <span className="text-[10px] text-accent">●</span>}
-              </div>
-              <div className="text-[10px] opacity-70 mt-0.5 leading-snug">
-                {EFFORT_DESCRIPTIONS[e]}
-              </div>
-            </button>
-          ))}
-          {!effortActive && (
-            <div className="text-[9px] text-amber-400/70 px-2 py-1 mt-1 border-t border-white/5">
-              This model may not honor effort settings
-            </div>
-          )}
-        </PopoverPortal>
-      </div>
+      {/* BATCH-3 Task 5 — only render the effort button if the model has
+          effortLevels (returned by the roster endpoint) AND the capability.
+          When the model doesn't support effort, the button is removed
+          entirely (not just dimmed) because there's nothing to select. */}
+      {effortActive && (
+        <div className="relative">
+          <button
+            ref={effortBtnRef}
+            onClick={() => !disabled && setActive(active === "effort" ? null : "effort")}
+            className={`${btn("effort")}`}
+            title={`Effort: ${effort}`}
+            aria-label={`Effort: ${effort}`}
+            disabled={disabled && active !== "effort"}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+            </svg>
+          </button>
+          <PopoverPortal
+            open={active === "effort"}
+            onClose={() => setActive(null)}
+            anchorRef={effortBtnRef}
+            align="left"
+            direction="up"
+            width={240}
+            title="Effort Level"
+          >
+            {/* BATCH-3 Task 5 — render ONLY the variants in `effortLevels`.
+                The popover's button list is now driven by the prop instead
+                of the hardcoded ["low","med","high","max"] tuple. */}
+            {(effortLevels?.length ? effortLevels : ["low", "med", "high", "max"]).map((e) => (
+              <button
+                key={e}
+                onClick={() => { setEffort(e); setActive(null); }}
+                className={`touch-target w-full text-left px-3 py-2 min-h-[40px] rounded-xl text-[12px] transition-colors ${
+                  effort === e ? "bg-accent/15 text-accent font-medium" : "text-muted-foreground hover:bg-surface2"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="capitalize">{e}</span>
+                  {effort === e && <span className="text-[10px] text-accent">●</span>}
+                </div>
+                <div className="text-[10px] opacity-70 mt-0.5 leading-snug">
+                  {EFFORT_DESCRIPTIONS[e] || `${e} effort level`}
+                </div>
+              </button>
+            ))}
+          </PopoverPortal>
+        </div>
+      )}
 
       {/* ─── Web Search ─────────────────────────────────────── */}
       <div className="relative">
