@@ -104,7 +104,84 @@ def _migrate(db: sqlite3.Connection) -> None:
             (new_base,))
     except sqlite3.OperationalError:
         pass
+    # Phase 4 — provider_keys table: encrypted-at-rest per-user provider API
+    # keys (NVIDIA_API_KEY, CF_API_TOKEN, OPENROUTER_API_KEY, etc.). Each row
+    # stores the key encrypted with AES-256-GCM (see crypto.encrypt_secret).
+    # The Space secret mirror (set via huggingface_hub.HfApi.add_space_secret)
+    # is the runtime source-of-truth (so the key is available as an env var
+    # to the backend); this DB row is the durable backup + index for listing
+    # which providers the user has configured.
+    try:
+        db.executescript("""
+            CREATE TABLE IF NOT EXISTS provider_keys (
+                user_id     TEXT NOT NULL,
+                provider    TEXT NOT NULL,
+                env_var     TEXT NOT NULL,
+                key_enc     TEXT NOT NULL,
+                extra       TEXT,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, provider)
+            );
+            CREATE INDEX IF NOT EXISTS idx_provider_keys_user
+                ON provider_keys(user_id);
+        """)
+    except sqlite3.OperationalError:
+        pass
+    # REDTEAM: migrate any plaintext values in users.github_token_encrypted /
+    # users.hf_token_encrypted to AES-256-GCM. The legacy Fernet values still
+    # decrypt transparently (decrypt_secret tries Fernet as a fallback), so
+    # this is a soft migration — only plaintext values get re-encrypted.
+    # Silently skips columns that don't exist or are already encrypted.
+    try:
+        _migrate_plaintext_user_tokens(db)
+    except Exception:
+        pass
     db.commit()
+
+
+def _migrate_plaintext_user_tokens(db: sqlite3.Connection) -> None:
+    """One-time migration: any users.github_token_encrypted or
+    users.hf_token_encrypted value that is NOT already an encrypted blob
+    (Fernet or v2: AES-GCM) gets encrypted in-place with AES-256-GCM.
+
+    Idempotent: skips values that are already encrypted (``v2:`` prefix or
+    Fernet ``gAAAA`` prefix). Silently skips if the columns don't exist.
+
+    This is the REDTEAM fix for "keys currently plain text unencrypted" —
+    a very old DB may have plaintext tokens in these columns (from before
+    the Fernet helpers existed). This pass re-encrypts them. The new
+    decrypt_secret() helper transparently handles Fernet and v2: formats,
+    so callers don't notice the migration.
+    """
+    try:
+        import crypto
+    except ImportError:
+        return
+    with _write_lock:
+        rows = db.execute(
+            "SELECT id, github_token_encrypted, hf_token_encrypted, "
+            "hf_refresh_token_encrypted FROM users"
+        ).fetchall()
+        for r in rows:
+            uid = r["id"]
+            for col in ("github_token_encrypted", "hf_token_encrypted",
+                        "hf_refresh_token_encrypted"):
+                val = r[col]
+                if not val:
+                    continue
+                if crypto.is_encrypted(val):
+                    continue
+                # Plaintext (or unrecognised) — re-encrypt with AES-GCM.
+                try:
+                    enc = crypto.encrypt_secret(val)
+                    db.execute(
+                        f"UPDATE users SET {col} = ?, updated_at = ? WHERE id = ?",
+                        (enc, _iso_now(), uid))
+                except Exception:
+                    # Best-effort — don't block startup on one bad row.
+                    pass
+        db.commit()
 
 
 SCHEMA = """
@@ -720,3 +797,205 @@ def get_chat_events(session_id: str) -> list[dict]:
         "SELECT content FROM chat_events WHERE session_id = ? ORDER BY seq ASC",
         (session_id,)).fetchall()
     return [json.loads(r["content"]) for r in rows]
+
+
+
+# ---------------------------------------------------------------------------
+# Provider API keys (encrypted at rest with AES-256-GCM)
+# ---------------------------------------------------------------------------
+# Each row stores a per-user provider API key (NVIDIA_API_KEY, CF_API_TOKEN,
+# OPENROUTER_API_KEY, etc.). The key is encrypted with crypto.encrypt_secret
+# before being written, and decrypted on read with crypto.decrypt_secret.
+#
+# The runtime source-of-truth for the BACKEND is the Space secret mirror
+# (set via huggingface_hub.HfApi.add_space_secret so the key shows up as an
+# env var when the backend boots). This DB row is the durable backup +
+# the per-user index (so we can list which providers a user has configured
+# without leaking the key values themselves).
+#
+# All functions are no-ops (return None / False / []) if the user_id is
+# anonymous, and silently skip if the crypto module is unavailable.
+
+# Allowlist of env vars a user may set via /api/keys. This is the SECURITY
+# boundary: a user CANNOT set arbitrary env vars on their Space (which
+# would let them overwrite JWT_SECRET, ENCRYPTION_KEY, etc.). The names
+# here are the canonical env vars the providers_catalog.json reads.
+PROVIDER_KEY_ALLOWLIST: dict[str, str] = {
+    # provider_name -> env_var (the canonical env var the backend reads)
+    "nvidia":         "NVIDIA_API_KEY",
+    "cloudflare":     "CF_API_TOKEN",
+    "openrouter":     "OPENROUTER_API_KEY",
+    "github-models":  "GITHUB_TOKEN",
+    "opencode-zen":   "OPENCODE_ZEN_API_KEY",
+    "opencode-go":    "OPENCODE_GO_API_KEY",
+    "privatemodeai":  "PRIVATEMODEAI_API_KEY",
+    "anthropic":      "ANTHROPIC_API_KEY",
+    "tavily":         "TAVILY_API_KEY",
+    # cloudflare also needs CF_ACCOUNT_ID (set as `extra` on the cloudflare
+    # provider row; not a separate provider entry).
+}
+
+# Reverse lookup: env_var -> provider_name (1:1, except GITHUB_TOKEN which
+# also accepts GH_TOKEN — handled in resolve_provider).
+_ENV_VAR_TO_PROVIDER: dict[str, str] = {v: k for k, v in PROVIDER_KEY_ALLOWLIST.items()}
+
+
+def resolve_provider(provider: str) -> str | None:
+    """Normalise a provider name (case-insensitive, accepts aliases like
+    'github' for 'github-models'). Returns the canonical provider name
+    from PROVIDER_KEY_ALLOWLIST, or None if not recognised."""
+    if not provider:
+        return None
+    p = provider.strip().lower()
+    aliases = {
+        "github": "github-models",
+        "github_models": "github-models",
+        "gh": "github-models",
+        "cf": "cloudflare",
+        "workersai": "cloudflare",
+        "workers-ai": "cloudflare",
+        "or": "openrouter",
+        "opencode": "opencode-zen",
+        "zen": "opencode-zen",
+        "pmai": "privatemodeai",
+        "privatemode": "privatemodeai",
+    }
+    p = aliases.get(p, p)
+    if p in PROVIDER_KEY_ALLOWLIST:
+        return p
+    return None
+
+
+def env_var_for_provider(provider: str) -> str | None:
+    """Return the canonical env var for a provider, or None."""
+    p = resolve_provider(provider)
+    if not p:
+        return None
+    return PROVIDER_KEY_ALLOWLIST[p]
+
+
+def set_provider_key(*, user_id: str, provider: str, key: str,
+                     extra: dict | None = None) -> dict | None:
+    """Encrypt + store a provider API key for a user.
+
+    ``provider`` is the canonical provider name (nvidia, cloudflare, ...).
+    ``key`` is the plaintext API key (encrypted before storage).
+    ``extra`` is an optional dict of extra env vars to set alongside the
+    key (e.g. cloudflare needs CF_ACCOUNT_ID). The dict's KEYS must be in
+    the allowlist below; values are stored encrypted.
+
+    Returns the stored row (without the key value) or None on bad input.
+    """
+    if not user_id or not key:
+        return None
+    p = resolve_provider(provider)
+    if not p:
+        return None
+    env_var = PROVIDER_KEY_ALLOWLIST[p]
+    try:
+        import crypto
+        key_enc = crypto.encrypt_secret(key)
+    except Exception:
+        return None
+    # `extra` allowlist: only env vars we recognise as safe sidecars for
+    # this provider. Currently only CF_ACCOUNT_ID is allowed (for cloudflare).
+    extra_safe: dict[str, str] = {}
+    if extra and isinstance(extra, dict):
+        for k, v in extra.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                continue
+            if k in ("CF_ACCOUNT_ID",) and v.strip():
+                try:
+                    import crypto
+                    extra_safe[k] = crypto.encrypt_secret(v.strip())
+                except Exception:
+                    pass
+    import json as _json
+    extra_json = _json.dumps(extra_safe) if extra_safe else None
+    db = _db()
+    now = _iso_now()
+    with _write_lock:
+        db.execute(
+            "INSERT OR REPLACE INTO provider_keys "
+            "(user_id, provider, env_var, key_enc, extra, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, p, env_var, key_enc, extra_json, now, now))
+        db.commit()
+    return {"user_id": user_id, "provider": p, "env_var": env_var,
+            "has_key": True, "has_extra": bool(extra_json),
+            "updated_at": now}
+
+
+def get_provider_key(user_id: str, provider: str) -> dict | None:
+    """Fetch + decrypt a provider API key for a user. Returns
+    {provider, env_var, key, extra} or None if not set.
+
+    SECURITY: this is the ONLY function that returns the decrypted key
+    value. The list_provider_keys() helper returns only ``has_key`` flags
+    so we never leak key values in bulk listings."""
+    if not user_id:
+        return None
+    p = resolve_provider(provider)
+    if not p:
+        return None
+    row = _db().execute(
+        "SELECT * FROM provider_keys WHERE user_id = ? AND provider = ?",
+        (user_id, p)).fetchone()
+    if not row:
+        return None
+    try:
+        import crypto
+        key = crypto.decrypt_secret(row["key_enc"])
+    except Exception:
+        return None
+    extra: dict[str, str] = {}
+    if row["extra"]:
+        try:
+            import json as _json
+            raw = _json.loads(row["extra"])
+            for k, v in raw.items():
+                try:
+                    extra[k] = crypto.decrypt_secret(v)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return {"provider": p, "env_var": row["env_var"], "key": key,
+            "extra": extra, "updated_at": row["updated_at"]}
+
+
+def list_provider_keys(user_id: str) -> dict[str, dict]:
+    """List which providers a user has keys for. Returns
+    {provider_name: {env_var, has_key, has_extra, updated_at}} — NEVER
+    includes the decrypted key value (security: the frontend only needs
+    to know IF a key is set, not what it is)."""
+    if not user_id:
+        return {}
+    rows = _db().execute(
+        "SELECT * FROM provider_keys WHERE user_id = ? ORDER BY provider",
+        (user_id,)).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        out[r["provider"]] = {
+            "env_var": r["env_var"],
+            "has_key": True,
+            "has_extra": bool(r["extra"]),
+            "updated_at": r["updated_at"],
+        }
+    return out
+
+
+def delete_provider_key(user_id: str, provider: str) -> bool:
+    """Delete a provider API key. Returns True if a row was deleted."""
+    if not user_id:
+        return False
+    p = resolve_provider(provider)
+    if not p:
+        return False
+    with _write_lock:
+        cur = _db().execute(
+            "DELETE FROM provider_keys WHERE user_id = ? AND provider = ?",
+            (user_id, p))
+        _db().commit()
+        return cur.rowcount > 0
+

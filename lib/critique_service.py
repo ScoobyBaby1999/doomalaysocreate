@@ -1172,6 +1172,11 @@ class Handler(BaseHTTPRequestHandler):
             import chat_jobs
             chat_jobs.handle_request("GET", self.path, {}, self)
             return
+        # --- Provider API keys (GET /api/keys) — bearer-gated; identity via X-JWT
+        if route == "/api/keys":
+            import keys_routes
+            keys_routes.handle_request("GET", self.path, {}, self)
+            return
         # --- Pricing (GET /api/pricing) — bearer-gated, 10-min cached --------
         if route == "/api/pricing":
             if not self._auth_ok():
@@ -3766,6 +3771,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             chat_jobs.handle_request("POST", self.path, payload, self)
             return
+        # --- Provider API keys (POST /api/keys) — bearer-gated; identity via X-JWT
+        if route == "/api/keys":
+            import keys_routes
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            keys_routes.handle_request("POST", self.path, payload, self)
+            return
         # --- In-chat judge (POST /api/chat/judge) — bearer-gated --------------
         if route == "/api/chat/judge":
             payload = self._auth_and_body()
@@ -3872,6 +3885,11 @@ class Handler(BaseHTTPRequestHandler):
     def _do_DELETE(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
+        # --- Provider API keys (DELETE /api/keys/<provider>) — bearer-gated
+        if route == "/api/keys" or route.startswith("/api/keys/"):
+            import keys_routes
+            keys_routes.handle_request("DELETE", self.path, {}, self)
+            return
         # --- Chat session routes (bearer-gated; identity via X-JWT) ---
         if route.startswith("/api/chat/sessions/"):
             import chat_routes
