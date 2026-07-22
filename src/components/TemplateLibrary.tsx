@@ -172,8 +172,18 @@ export function TemplateLibrary({
   }, [open, onClose, editing, creating]);
 
   // -- Actions --------------------------------------------------------------
+  // BATCH-2 Task 6.1 — heart/download now track loading state per-template
+  //  so the UI can show a spinner on the button while the request is in
+  //  flight. Errors revert the optimistic update (heart) or surface a
+  //  transient error message (download).
+  const [heartingId, setHeartingId] = useState<string | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const handleHeart = useCallback(
     async (tpl: Template) => {
+      if (heartingId) return; // one at a time
+      setHeartingId(tpl.id);
       // Optimistic: toggle the heart + bump the count locally.
       const newHearted = !tpl.hearted;
       const newHearts = newHearted ? tpl.hearts + 1 : Math.max(0, tpl.hearts - 1);
@@ -197,8 +207,8 @@ export function TemplateLibrary({
         setSelected((s) =>
           s && s.id === tpl.id ? { ...s, hearted: r.hearted, hearts: r.hearts } : s,
         );
-      } catch {
-        // Revert on failure.
+      } catch (e) {
+        // Revert on failure + show error.
         const revert = (arr: Template[]) =>
           arr.map((t) =>
             t.id === tpl.id ? { ...t, hearted: tpl.hearted, hearts: tpl.hearts } : t,
@@ -208,13 +218,19 @@ export function TemplateLibrary({
         setSelected((s) =>
           s && s.id === tpl.id ? { ...s, hearted: tpl.hearted, hearts: tpl.hearts } : s,
         );
+        setActionError(e instanceof Error ? `Heart failed: ${e.message}` : "Heart failed — please retry");
+        setTimeout(() => setActionError(null), 3000);
+      } finally {
+        setHeartingId(null);
       }
     },
-    [client],
+    [client, heartingId],
   );
 
   const handleDownload = useCallback(
     async (tpl: Template) => {
+      if (downloadingId) return; // one at a time
+      setDownloadingId(tpl.id);
       try {
         const r = await client.download(tpl.id);
         // After download, the template becomes "mine" — refresh the mine list.
@@ -234,11 +250,15 @@ export function TemplateLibrary({
         setTab("mine");
         // Select the newly-downloaded local copy so the user can preview it.
         setSelected(r.template);
-      } catch {
-        /* non-fatal */
+      } catch (e) {
+        // BATCH-2 Task 6.1 — surface the error instead of silently swallowing.
+        setActionError(e instanceof Error ? `Download failed: ${e.message}` : "Download failed — please retry");
+        setTimeout(() => setActionError(null), 3000);
+      } finally {
+        setDownloadingId(null);
       }
     },
-    [client, loadMine],
+    [client, loadMine, downloadingId],
   );
 
   const handlePublish = useCallback(
@@ -689,6 +709,23 @@ export function TemplateLibrary({
                   setAiDialogOpen(false);
                 }}
               />
+
+              {/* BATCH-2 Task 6.1 — transient error toast for heart/download
+                  failures. Auto-dismisses after 3s (see setActionError). */}
+              <AnimatePresence>
+                {actionError && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    transition={{ duration: 0.15 }}
+                    className="absolute bottom-3 left-1/2 -translate-x-1/2 z-[80] px-3 py-2 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-200 text-[11.5px] shadow-xl backdrop-blur max-w-[90%] text-center"
+                    role="alert"
+                  >
+                    {actionError}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           </motion.div>
         </>

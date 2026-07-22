@@ -438,18 +438,24 @@ function ProviderBox({
       }`}
       style={{ borderColor: isDragTarget ? undefined : `${provider.color}30` }}
     >
-      {/* Header — drag handle (left) + tap-to-expand (middle) + gear + chevron. */}
+      {/* Header — drag handle (left, desktop only) + tap-to-expand (middle)
+          + gear (right). BATCH-2 Task 5.11 — cleaned up the header so the
+          rows don't overlap on mobile:
+            • Drag handle hidden on mobile (DnD is desktop-only; touch users
+              use the arrow buttons inside the expanded view).
+            • Up/Down arrow buttons moved OUT of the header into the expanded
+              body (less clutter, more room for the provider name).
+            • Provider name uses a smaller font on mobile so it fits. */}
       <div
         className="flex items-center gap-1 px-2 shrink-0 min-h-[44px]"
         style={{ backgroundColor: `${provider.color}0d`, borderBottom: expanded ? `1px solid ${provider.color}1f` : "none" }}
       >
-        {/* Drag handle — only visible on hover; HTML5 DnD works on desktop.
-            Touch users use the arrow buttons (rendered further right) as a
-            fallback per the spec. */}
+        {/* Drag handle — desktop only. HTML5 DnD doesn't work on touch;
+            touch users get the arrow buttons inside the expanded view. */}
         <button
           {...(dragHandleProps || {})}
           onClick={(e) => e.stopPropagation()}
-          className="touch-target inline-flex items-center justify-center size-7 rounded-xl text-muted-foreground/40 hover:text-muted-foreground hover:bg-surface2/40 transition-colors shrink-0 cursor-grab active:cursor-grabbing"
+          className="touch-target hidden sm:inline-flex items-center justify-center size-7 rounded-xl text-muted-foreground/40 hover:text-muted-foreground hover:bg-surface2/40 transition-colors shrink-0 cursor-grab active:cursor-grabbing"
           aria-label={`Drag to reorder ${provider.displayName}`}
           title="Drag to reorder"
         >
@@ -470,37 +476,16 @@ function ProviderBox({
             <polyline points="9 18 15 12 9 6" />
           </svg>
           <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: provider.color }} />
-          <span className="text-[12px] font-semibold text-foreground leading-none truncate flex-1">{provider.displayName}</span>
+          <span className="text-[11.5px] sm:text-[12px] font-semibold text-foreground leading-none truncate flex-1">{provider.displayName}</span>
           <span
             className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
             style={{ backgroundColor: provider.syncedLive ? "#22c55e" : "#f59e0b" }}
             title={provider.syncedLive ? "synced live from provider API" : "config-sourced (no public live API)"}
           />
-          <span className="text-[11px] text-muted-foreground leading-none tabular-nums shrink-0">{provider.models.length}</span>
+          <span className="text-[10.5px] text-muted-foreground leading-none tabular-nums shrink-0">{provider.models.length}</span>
         </button>
 
-        {/* Touch-friendly move buttons (fallback for DnD on touch). */}
-        <div className="flex gap-px shrink-0">
-          <button
-            onClick={(e) => { e.stopPropagation(); onMoveUp(); }}
-            disabled={isFirst}
-            className="touch-target size-7 flex items-center justify-center rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
-            title="Move provider up"
-            aria-label="Move provider up"
-          >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); onMoveDown(); }}
-            disabled={isLast}
-            className="touch-target size-7 flex items-center justify-center rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
-            title="Move provider down"
-            aria-label="Move provider down"
-          >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
-          </button>
-        </div>
-
+        {/* Settings gear — opens the ProvidersDialog. */}
         <button
           onClick={openSettings}
           className="touch-target inline-flex items-center justify-center size-7 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
@@ -510,6 +495,35 @@ function ProviderBox({
           <IcoSettings />
         </button>
       </div>
+
+      {/* BATCH-2 Task 5.11 — touch-friendly up/down reorder buttons, now
+          inside the expanded view (out of the cramped header). Desktop
+          users can still drag the handle in the header. */}
+      {expanded && (
+        <div className="flex items-center gap-1 px-2 py-1 border-b border-border/30 bg-surface/20 shrink-0">
+          <span className="text-[9.5px] text-muted-foreground/60 uppercase tracking-wide shrink-0">Reorder</span>
+          <div className="flex gap-px ml-auto shrink-0">
+            <button
+              onClick={(e) => { e.stopPropagation(); onMoveUp(); }}
+              disabled={isFirst}
+              className="touch-target size-7 flex items-center justify-center rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
+              title="Move provider up"
+              aria-label="Move provider up"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onMoveDown(); }}
+              disabled={isLast}
+              className="touch-target size-7 flex items-center justify-center rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
+              title="Move provider down"
+              aria-label="Move provider down"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Privacy notice — still tappable to open settings. */}
       {expanded && (
@@ -694,7 +708,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
             {isSelected && <IcoCheck />}
           </span>
           <span
-            className={`text-[12px] leading-tight truncate flex-1 font-medium ${isSelected ? "text-white" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
+            className={`text-[11px] leading-tight truncate flex-1 font-medium ${isSelected ? "text-white" : dimmed ? "text-muted-foreground/60" : "text-foreground"}`}
             title={model.logical}
           >
             {model.displayName}
