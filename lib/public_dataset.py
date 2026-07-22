@@ -54,9 +54,13 @@ from typing import Any
 # This is a SEPARATE dataset from the per-user private dataset
 # ({hf_user}/doomalaysocreate-priv-{suffix}) used by dataset_persistence.py
 # and from the metrics dataset (METRICS_PUBLIC_HF_REPO).
+# Task 5: the public metrics + templates dataset. Stores BOTH:
+#   - templates/templates.jsonl  — the public template library
+#   - (future) aggregate hearts/downloads counters
+# Override via the PUBLIC_DATASET_REPO env var.
 DATASET_REPO = os.environ.get(
     "PUBLIC_DATASET_REPO",
-    "ScoobyBaby1999/doomalaysocreate-templates",
+    "ScoobyBaby1999/doomalaysocreate-metrics-public",
 ).strip()
 HF_TOKEN = (os.environ.get("HF_TOKEN", "")
             or os.environ.get("HUGGINGFACE_TOKEN", "")).strip()
@@ -246,7 +250,7 @@ def _find(items: list, template_id: str):
 # ---------------------------------------------------------------------------
 
 def list_public_templates(sort="hearts", query=None, kind=None,
-                          limit=50, offset=0):
+                          role=None, limit=50, offset=0):
     """Read public templates from the HF dataset JSONL file.
 
     Returns (templates, total). ``total`` is the count BEFORE pagination.
@@ -271,6 +275,9 @@ def list_public_templates(sort="hearts", query=None, kind=None,
     # Filter by kind.
     if kind:
         items = [it for it in items if it.get("kind") == kind]
+    # Filter by role (Task 4 role-based template system).
+    if role:
+        items = [it for it in items if it.get("role") == role]
     # Filter by text query.
     has_query = bool(query and query.strip())
     if has_query:
@@ -354,6 +361,13 @@ def publish_template(template_dict: dict) -> bool:
             "is_public": bool(template_dict.get("is_public", True)),
             "created_at": template_dict.get("created_at") or now,
             "updated_at": template_dict.get("updated_at") or now,
+            # Role-based template parts (Task 4).
+            "role": template_dict.get("role"),
+            "instructions": template_dict.get("instructions") or "",
+            "output_rules": template_dict.get("output_rules") or "",
+            "inputs": template_dict.get("inputs") or "",
+            "template": template_dict.get("template") or "",
+            "required_schema": template_dict.get("required_schema") or "",
         }
         if existing and existing.get("published_at"):
             record["published_at"] = existing["published_at"]

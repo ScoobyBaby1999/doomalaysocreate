@@ -78,6 +78,101 @@ VALID_KINDS = ("websearch", "deepresearch", "judge", "chat", "custom")
 VALID_SORTS = ("hearts", "recent", "relevant")
 VALID_FILTERS = ("favorites",)  # additive filter values for list endpoints
 
+# ---------------------------------------------------------------------------
+# Role-based template system (Task 4)
+# ---------------------------------------------------------------------------
+# A template is now a {role, instructions, output_rules, inputs, template,
+# required_schema} object that gets filled into the role's skeleton via
+# content.roles.make_role(). The legacy `markdown` field is the COMPILED
+# prompt (the role skeleton with the parts substituted in) so existing
+# consumers keep working.
+#
+# The legacy `kind` field (websearch/deepresearch/judge/chat/custom) is kept
+# for backward compat with existing rows + the frontend's old filter UI, but
+# the NEW primary axis is `role` (planner/generator/critiquer/verifier/
+# transformer/parser/assembler/reviewer/extractor).
+import sqlite3 as _sqlite3  # noqa: E402  (used by migrations above)
+try:
+    from content.roles import Roles as _Roles, make_role as _make_role
+    VALID_ROLES = tuple(r.value for r in _Roles)
+except Exception:  # pragma: no cover — roles.py is always present in this repo
+    VALID_ROLES = ("planner", "parser", "critiquer", "verifier", "generator",
+                   "transformer", "assembler", "reviewer", "extractor")
+    _make_role = None
+
+
+def _normalize_role(role: str | None) -> str | None:
+    """Normalise + validate a role name. Returns the canonical role string
+    (lowercase, in VALID_ROLES) or None if not recognised."""
+    if not role:
+        return None
+    r = str(role).strip().lower()
+    if r in VALID_ROLES:
+        return r
+    # Accept a few common aliases.
+    aliases = {
+        "review": "reviewer",
+        "extract": "extractor",
+        "transform": "transformer",
+        "verify": "verifier",
+        "critic": "critiquer",
+        "critique": "critiquer",
+        "plan": "planner",
+        "parse": "parser",
+        "assemble": "assembler",
+        "generate": "generator",
+    }
+    return aliases.get(r)
+
+
+def compile_template_markdown(*, role: str, instructions: str = "",
+                              output_rules: str = "", inputs: str = "",
+                              template: str = "", required_schema: str = "") -> str:
+    """Compile a role-based template into its final prompt markdown.
+
+    Calls content.roles.make_role(...) to substitute the parts into the
+    role's skeleton (content/prompts/<role>.md). Falls back to a plain
+    concatenation if the roles module is unavailable (defensive).
+    """
+    r = _normalize_role(role)
+    if not r:
+        # No role -> just return the instructions as-is (legacy plain-text
+        # template). This preserves backward compat with old rows.
+        return (instructions or "").strip()
+    if _make_role is not None:
+        try:
+            return _make_role(r, instructions=instructions or "",
+                              output_rules=output_rules or "",
+                              inputs=inputs or "",
+                              template=template or "",
+                              required_schema=required_schema or "")
+        except Exception:
+            pass
+    # Defensive fallback: plain concatenation.
+    parts = [f"# {r.title()}",
+             instructions or "",
+             output_rules or "",
+             inputs or "",
+             template or "",
+             required_schema or ""]
+    return "\n\n".join(p for p in parts if p and p.strip())
+
+
+def _role_skeleton(role: str) -> str:
+    """Return the raw role skeleton markdown (content/prompts/<role>.md)
+    so the frontend can render a 'raw' view with syntax highlighting.
+    Returns '' if the role is unknown or the file is missing."""
+    r = _normalize_role(role)
+    if not r:
+        return ""
+    try:
+        # get_role expects a Roles enum; we have a string. Use get_prompt
+        # directly (it takes a bare name like "planner" / "critiquer").
+        from content.roles import get_prompt
+        return get_prompt(r)
+    except Exception:
+        return ""
+
 
 # ---------------------------------------------------------------------------
 # Schema (idempotent — safe to call on every request)
@@ -124,6 +219,25 @@ CREATE INDEX IF NOT EXISTS idx_template_downloads_user ON template_downloads(use
 def _ensure_schema() -> None:
     db = _dbmod._db()
     db.executescript(SCHEMA)
+    # Role-based template system migration (Task 4): add columns for the
+    # roles.py-based template structure. Each template now has a `role`
+    # (planner|generator|critiquer|verifier|transformer|parser|assembler|
+    # reviewer|extractor) plus the parts that fill the role's skeleton
+    # (instructions, output_rules, inputs, template, required_schema).
+    # The legacy `markdown` column is kept and populated with the COMPILED
+    # prompt (make_role(...)) so existing consumers keep working.
+    for col, decl in (
+        ("role",            "TEXT"),
+        ("instructions",    "TEXT"),
+        ("output_rules",    "TEXT"),
+        ("inputs",          "TEXT"),
+        ("template_part",   "TEXT"),  # `template` is a SQL keyword — use template_part
+        ("required_schema", "TEXT"),
+    ):
+        try:
+            db.execute(f"ALTER TABLE templates ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     db.commit()
 
 
@@ -211,6 +325,29 @@ def _row_to_dict(row: sqlite3.Row | dict | None) -> dict | None:
         d["tags"] = []
     # Booleans (SQLite stores as 0/1)
     d["is_public"] = bool(d.get("is_public", 0))
+    # Role-based system (Task 4): surface the role + parts under their
+    # canonical names. The DB column is `template_part` (because `template`
+    # is a SQL keyword) but the API exposes it as `template` for clarity.
+    if "template_part" in d:
+        d["template"] = d.pop("template_part")
+    # Default missing role fields to None (legacy rows have them as NULL).
+    for k in ("role", "instructions", "output_rules", "inputs",
+              "template", "required_schema"):
+        d.setdefault(k, None)
+    # If the template has a role but no compiled markdown (e.g. an old row
+    # migrated to role-based), compile it on the fly so the frontend always
+    # has a markdown preview.
+    if d.get("role") and not (d.get("markdown") or "").strip():
+        try:
+            d["markdown"] = compile_template_markdown(
+                role=d["role"],
+                instructions=d.get("instructions") or "",
+                output_rules=d.get("output_rules") or "",
+                inputs=d.get("inputs") or "",
+                template=d.get("template") or "",
+                required_schema=d.get("required_schema") or "")
+        except Exception:
+            pass
     return d
 
 
@@ -241,19 +378,52 @@ def _normalize_tags(tags: Any) -> str:
 # ---------------------------------------------------------------------------
 
 def create_template(*, user_id: str | None, name: str,
-                    markdown: str, kind: str,
+                    markdown: str | None = None, kind: str = "custom",
                     description: str | None = None,
                     tags: Any = None,
                     is_public: bool = False,
-                    author_name: str | None = None) -> dict:
-    """Create a new template. Returns the template dict."""
+                    author_name: str | None = None,
+                    role: str | None = None,
+                    instructions: str | None = None,
+                    output_rules: str | None = None,
+                    inputs: str | None = None,
+                    template: str | None = None,
+                    required_schema: str | None = None) -> dict:
+    """Create a new template. Returns the template dict.
+
+    Role-based system (Task 4): if ``role`` is provided, the template is
+    compiled from the role + parts via :func:`compile_template_markdown`.
+    The compiled prompt is stored in the ``markdown`` column (for backward
+    compat with consumers that read markdown directly) AND the parts are
+    stored in their own columns (so the frontend can show a 'raw' view
+    with the role skeleton + parts separately).
+
+    Legacy mode: if ``role`` is NOT provided, ``markdown`` must be a
+    non-empty string (the old plain-text template format).
+    """
     _ensure_schema_once()
     if not name or not name.strip():
         raise ValueError("'name' is required")
-    if not markdown or not markdown.strip():
-        raise ValueError("'markdown' is required")
+    norm_role = _normalize_role(role)
+    if norm_role:
+        # Role-based: compile the markdown from parts.
+        compiled = compile_template_markdown(
+            role=norm_role,
+            instructions=instructions or "",
+            output_rules=output_rules or "",
+            inputs=inputs or "",
+            template=template or "",
+            required_schema=required_schema or "")
+        if not compiled or not compiled.strip():
+            raise ValueError("could not compile template from role + parts")
+        markdown = compiled
+    else:
+        # Legacy plain-text: markdown is required.
+        if not markdown or not markdown.strip():
+            raise ValueError("'markdown' (or 'role' + parts) is required")
     if kind not in VALID_KINDS:
-        raise ValueError(f"'kind' must be one of {VALID_KINDS}")
+        # Default to 'custom' for role-based templates that don't fit a kind.
+        kind = "custom"
     db = _dbmod._db()
     tid = _gen_id()
     now = _iso_now()
@@ -262,12 +432,21 @@ def create_template(*, user_id: str | None, name: str,
     with _write_lock:
         db.execute(
             "INSERT INTO templates (id, author_id, author_name, name, description, "
-            "markdown, kind, tags, is_public, hearts, downloads, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)",
+            "markdown, kind, tags, is_public, hearts, downloads, "
+            "role, instructions, output_rules, inputs, template_part, required_schema, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
             (tid, author_id, author, name.strip(),
              (description or "").strip() or None,
              markdown, kind, _normalize_tags(tags),
-             1 if is_public else 0, now, now))
+             1 if is_public else 0,
+             norm_role,
+             (instructions or "").strip() or None,
+             (output_rules or "").strip() or None,
+             (inputs or "").strip() or None,
+             (template or "").strip() or None,
+             (required_schema or "").strip() or None,
+             now, now))
         db.commit()
     row = db.execute("SELECT * FROM templates WHERE id = ?", (tid,)).fetchone()
     return _row_to_dict(row) or {}
@@ -328,7 +507,7 @@ def list_my_templates(user_id: str | None, *, limit: int = 200,
 
 
 def list_public_templates(*, sort: str = "hearts", query: str | None = None,
-                          kind: str | None = None,
+                          kind: str | None = None, role: str | None = None,
                           limit: int = 50, offset: int = 0,
                           user_id: str | None = None,
                           filter: str | None = None) -> tuple[list[dict], int]:
@@ -359,7 +538,7 @@ def list_public_templates(*, sort: str = "hearts", query: str | None = None,
     total = 0
     try:
         pub_items, pub_total = _pub.list_public_templates(
-            sort=sort, query=query, kind=kind,
+            sort=sort, query=query, kind=kind, role=role,
             limit=page_limit, offset=page_offset)
     except Exception as exc:
         _log("template_public_list_failed", error=repr(exc)[:200])
@@ -392,6 +571,12 @@ def list_public_templates(*, sort: str = "hearts", query: str | None = None,
     if kind and kind in VALID_KINDS:
         where += " AND kind = ?"
         params.append(kind)
+    # Role filter (Task 4 role-based system).
+    if role:
+        norm_role = _normalize_role(role)
+        if norm_role:
+            where += " AND role = ?"
+            params.append(norm_role)
     # Text search: LIKE on name + description + markdown + tags.
     has_query = bool(query and query.strip())
     if has_query:
@@ -490,9 +675,22 @@ def get_template(template_id: str) -> dict | None:
 def update_template(template_id: str, user_id: str | None, *,
                     name: str | None = None, description: str | None = None,
                     markdown: str | None = None, kind: str | None = None,
-                    tags: Any = None, is_public: bool | None = None) -> dict | None:
+                    tags: Any = None, is_public: bool | None = None,
+                    role: str | None = None,
+                    instructions: str | None = None,
+                    output_rules: str | None = None,
+                    inputs: str | None = None,
+                    template: str | None = None,
+                    required_schema: str | None = None) -> dict | None:
     """Update a template (owner only). Returns the updated template or None
-    if not found / not owned by caller."""
+    if not found / not owned by caller.
+
+    Role-based system (Task 4): updating any of the role parts (role,
+    instructions, output_rules, inputs, template, required_schema)
+    triggers a re-compile of the ``markdown`` column so it stays in sync
+    with the parts. The caller can still override markdown directly (for
+    legacy plain-text templates).
+    """
     _ensure_schema_once()
     db = _dbmod._db()
     existing = get_template(template_id)
@@ -520,8 +718,63 @@ def update_template(template_id: str, user_id: str | None, *,
     if is_public is not None:
         fields.append("is_public = ?")
         params.append(1 if is_public else 0)
+    # Role-based parts. We update each column individually if the caller
+    # supplied it, then (if any role part changed) re-compile the markdown.
+    norm_role = _normalize_role(role) if role is not None else None
+    if role is not None:
+        fields.append("role = ?")
+        params.append(norm_role)
+    if instructions is not None:
+        fields.append("instructions = ?")
+        params.append(instructions.strip() or None)
+    if output_rules is not None:
+        fields.append("output_rules = ?")
+        params.append(output_rules.strip() or None)
+    if inputs is not None:
+        fields.append("inputs = ?")
+        params.append(inputs.strip() or None)
+    if template is not None:
+        fields.append("template_part = ?")
+        params.append(template.strip() or None)
+    if required_schema is not None:
+        fields.append("required_schema = ?")
+        params.append(required_schema.strip() or None)
     if not fields:
         return existing
+    # Re-compile markdown if any role part changed. We read the current
+    # parts from `existing` and override with the new values.
+    role_keys = ("role", "instructions", "output_rules", "inputs",
+                 "template", "required_schema")
+    if any(k in {f.split(" = ")[0].strip() for f in fields} for k in
+           ("role", "instructions", "output_rules", "inputs",
+            "template_part", "required_schema")):
+        merged = {k: existing.get(k) for k in role_keys}
+        if norm_role is not None:
+            merged["role"] = norm_role
+        if instructions is not None:
+            merged["instructions"] = instructions
+        if output_rules is not None:
+            merged["output_rules"] = output_rules
+        if inputs is not None:
+            merged["inputs"] = inputs
+        if template is not None:
+            merged["template"] = template
+        if required_schema is not None:
+            merged["required_schema"] = required_schema
+        if merged.get("role"):
+            try:
+                compiled = compile_template_markdown(
+                    role=merged["role"],
+                    instructions=merged.get("instructions") or "",
+                    output_rules=merged.get("output_rules") or "",
+                    inputs=merged.get("inputs") or "",
+                    template=merged.get("template") or "",
+                    required_schema=merged.get("required_schema") or "")
+                if compiled and compiled.strip():
+                    fields.append("markdown = ?")
+                    params.append(compiled)
+            except Exception:
+                pass
     fields.append("updated_at = ?")
     params.append(_iso_now())
     params.append(template_id)
@@ -770,260 +1023,278 @@ def _author_label_for(user_id: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 DEFAULT_TEMPLATES: list[dict] = [
-    # --- websearch ---
+    # --- planner ---
     {
-        "name": "Breadth Search",
-        "description": "Decompose a question into 4-6 sub-topics, search each in "
-                       "parallel via sub-agents, then synthesize a comprehensive "
-                       "answer with citations.",
-        "markdown": (
-            "# Breadth Search\n\n"
-            "Decompose the user's question into 4-6 independent sub-topics. "
-            "For each sub-topic, run a parallel web search via a sub-agent. "
-            "Collect the top sources from each sub-search. Synthesize a "
-            "comprehensive answer that integrates all sub-topic findings, "
-            "citing sources inline. Surface areas of consensus and areas "
-            "where sources disagree.\n\n"
-            "## Steps\n"
-            "1. Decompose: break the question into 4-6 sub-topics.\n"
-            "2. Search: for each sub-topic, run a web search and collect "
-            "the top 5 results.\n"
-            "3. Read: fetch the full content of the top 2 results per "
-            "sub-topic.\n"
-            "4. Synthesize: write a comprehensive answer integrating all "
-            "findings, with inline citations.\n"
-            "5. Surface gaps: note any sub-topics where evidence was thin "
-            "or contradictory.\n"
+        "name": "Research Planner",
+        "description": "Decompose a research question into a multi-stage plan with small, focused stages.",
+        "role": "planner",
+        "instructions": (
+            "Plan a research paper that answers the user's question. "
+            "Break the work into 4-7 small stages, each with a clear "
+            "role + bounded scope. Use the non-destructive stitch pattern "
+            "(small connective generator stages + one assembler) — never "
+            "ask a transformer to combine N sections."
         ),
-        "kind": "websearch",
-        "tags": ["breadth", "parallel", "synthesis", "citations"],
+        "output_rules": (
+            "Emit ONLY the JSON object. No prose, no markdown fences.\n"
+            "Prefer 4-7 stages with small scopes over 1-2 sweeping ones.\n"
+            "Use fanout ONLY when iterating over a context key a prior stage "
+            "explicitly produces as a list."
+        ),
+        "inputs": "",
+        "template": (
+            "Reference task type: research_paper.\n"
+            "Suggested stages: intro, section_drafts (fanout over sub_topics), "
+            "conclusion, references, uncertainties_synthesis, assembler."
+        ),
+        "required_schema": "",
+        "kind": "custom",
+        "tags": ["planner", "research", "decompose", "plan"],
     },
     {
-        "name": "Deep Dive",
-        "description": "Drill into one thread, follow citations up to 3 hops, "
-                       "then summarize with evidence.",
-        "markdown": (
-            "# Deep Dive\n\n"
-            "Pick the single most authoritative source for the question. "
-            "Read it fully, extract its key citations, and follow each "
-            "citation up to 3 hops deep. At each hop, evaluate whether the "
-            "cited source supports the original claim. Summarize the chain "
-            "of evidence with confidence ratings.\n\n"
-            "## Steps\n"
-            "1. Seed: find the most authoritative source for the question.\n"
-            "2. Read: fetch + read the full source.\n"
-            "3. Follow citations: extract up to 5 key citations and fetch "
-            "each (hop 1). For each hop-1 source, extract + fetch up to 3 "
-            "citations (hop 2). Continue to hop 3 for the most central "
-            "claims.\n"
-            "4. Evaluate: at each hop, rate whether the cited source "
-            "supports the original claim (SUPPORTS / REFUTES / MIXED / "
-            "UNVERIFIED).\n"
-            "5. Summarize: write a deep summary with the chain of evidence "
-            "and confidence ratings.\n"
+        "name": "Code Spec Planner",
+        "description": "Plan a code spec: modules, interfaces, dependencies, test plan.",
+        "role": "planner",
+        "instructions": (
+            "Plan a code spec for the requested feature. List the modules, "
+            "their public interfaces, the dependencies between them, and a "
+            "test plan. Use generator stages for each module's interface doc "
+            "and an assembler to stitch them into the final spec."
         ),
-        "kind": "websearch",
-        "tags": ["depth", "citations", "evidence", "chain"],
+        "output_rules": (
+            "Emit ONLY the JSON object.\n"
+            "Each module's interface doc should fit in <500 words.\n"
+            "The test plan stage must list concrete test cases, not vague categories."
+        ),
+        "template": "Reference task type: code_spec.",
+        "kind": "custom",
+        "tags": ["planner", "code", "spec", "architecture"],
+    },
+    # --- generator ---
+    {
+        "name": "Section Draft Generator",
+        "description": "Draft one section of a longer document, grounded in fetched sources.",
+        "role": "generator",
+        "instructions": (
+            "Draft the requested section in full. Use [N] footnote markers "
+            "for citations (never [Title](URL) inline links). If "
+            "fetched_sources is empty, write without citations."
+        ),
+        "output_rules": (
+            "500-1500 words.\n"
+            "Lead with the section's main claim, then the evidence.\n"
+            "Do not invent URLs, citations, dates, or numbers."
+        ),
+        "inputs": "{{fetched_sources}}",
+        "kind": "custom",
+        "tags": ["generator", "draft", "section", "citations"],
     },
     {
-        "name": "Compare & Contrast",
-        "description": "Find multiple perspectives on a question, contrast "
-                       "them, surface consensus and disagreement.",
-        "markdown": (
-            "# Compare & Contrast\n\n"
-            "Find 3-5 distinct perspectives on the question (different "
-            "sources, different viewpoints, different methodologies). For "
-            "each perspective, summarize the core claim + supporting "
-            "evidence. Then build a comparison matrix and surface (a) areas "
-            "of consensus and (b) areas of disagreement with the reasons.\n\n"
-            "## Steps\n"
-            "1. Survey: find 3-5 sources representing distinct perspectives.\n"
-            "2. Extract: for each source, extract the core claim + 2-3 "
-            "supporting evidence points.\n"
-            "3. Matrix: build a comparison table (perspective x claim x "
-            "evidence).\n"
-            "4. Consensus: identify claims where most sources agree.\n"
-            "5. Disagreement: identify claims where sources disagree, and "
-            "explain WHY they disagree (different data, different "
-            "assumptions, different values).\n"
-            "6. Synthesize: write a balanced summary that presents the "
-            "consensus + the disagreement.\n"
+        "name": "Creative Writer",
+        "description": "Generate a creative piece (story, poem, script) following the user's prompt.",
+        "role": "generator",
+        "instructions": (
+            "Write the creative piece the user requested. Lead with the "
+            "strongest opening line. Maintain a consistent voice. End at a "
+            "natural stopping point — do not pad."
         ),
-        "kind": "websearch",
-        "tags": ["compare", "contrast", "perspectives", "consensus"],
+        "output_rules": (
+            "Match the requested length (default: 500-1000 words).\n"
+            "No meta-commentary, no 'Here is your story:' preamble.\n"
+            "Begin with the content itself."
+        ),
+        "kind": "custom",
+        "tags": ["generator", "creative", "story", "writing"],
+    },
+    # --- critiquer ---
+    {
+        "name": "Draft Critiquer",
+        "description": "Bulleted critique of a draft: one specific issue + one specific fix per bullet.",
+        "role": "critiquer",
+        "instructions": (
+            "Critique the draft for factual errors, logical gaps, missing "
+            "context, and concrete improvements. Do NOT rewrite the content."
+        ),
+        "output_rules": (
+            "Each bullet: ONE specific issue + ONE specific suggested fix.\n"
+            "Prioritise high-leverage problems; do not pad with nitpicks.\n"
+            "If the draft is genuinely strong, still surface its 1-3 weakest points."
+        ),
+        "inputs": "{{body}}",
+        "kind": "custom",
+        "tags": ["critiquer", "review", "issues", "feedback"],
     },
     {
-        "name": "Fact Check",
-        "description": "Extract claims, verify each against independent "
-                       "sources, rate confidence TRUE/FALSE/MIXED/UNVERIFIED.",
-        "markdown": (
-            "# Fact Check\n\n"
-            "Extract every factual claim from the input. For each claim, "
-            "find 2-3 INDEPENDENT sources (not citing each other) and "
-            "verify. Rate each claim TRUE / FALSE / MIXED / UNVERIFIED "
-            "with a confidence score (0-100%) and the evidence.\n\n"
-            "## Steps\n"
-            "1. Extract claims: parse the input into a list of discrete "
-            "factual claims.\n"
-            "2. For each claim, search for 2-3 independent sources.\n"
-            "3. For each source, evaluate whether it supports or refutes "
-            "the claim.\n"
-            "4. Rate: TRUE (all sources support), FALSE (all sources "
-            "refute), MIXED (sources disagree), UNVERIFIED (no reliable "
-            "sources found).\n"
-            "5. Confidence: 0-100% based on source quality + agreement.\n"
-            "6. Report: a table of claim x verdict x confidence x evidence.\n"
+        "name": "Schematic Critiquer",
+        "description": "Critique a doomalaysocreate schematic JSON for dangling inputs, role misuse, ordering.",
+        "role": "critiquer",
+        "instructions": (
+            "Critique the schematic. Look for: dangling inputs (a stage's "
+            "inputs reference a context path no prior stage produces), "
+            "invalid fanout, destructive stitch (transformer used to combine "
+            "sections instead of assembler), role misuse, vague instructions."
         ),
-        "kind": "websearch",
-        "tags": ["fact-check", "verify", "claims", "confidence"],
+        "output_rules": (
+            "Bulleted list only. No prose paragraphs.\n"
+            "Each bullet: ONE issue + ONE concrete fix.\n"
+            "Do NOT rewrite the schematic."
+        ),
+        "inputs": "{{schematic}}",
+        "kind": "custom",
+        "tags": ["critiquer", "schematic", "orchestrator", "plan-review"],
     },
-    # --- deepresearch ---
+    # --- verifier ---
     {
-        "name": "Default Deep Research",
-        "description": "Multi-step search -> read -> synthesize with citations.",
-        "markdown": (
-            "# Default Deep Research\n\n"
-            "A multi-step research workflow: search broadly, read the top "
-            "results, generate follow-up questions, search again to fill "
-            "gaps, then synthesize a comprehensive report with citations.\n\n"
-            "## Steps\n"
-            "1. Initial search: 3-5 broad queries covering the question.\n"
-            "2. Read: fetch + read the top 5 results across all queries.\n"
-            "3. Follow-ups: generate 3-5 follow-up questions based on gaps "
-            "in the initial reading.\n"
-            "4. Second search: run the follow-up queries, read top results.\n"
-            "5. Synthesize: write a comprehensive research report with "
-            "inline citations + a sources list.\n"
+        "name": "Fact Verifier",
+        "description": "Yes/no judgment on a single factual claim with one-sentence reason.",
+        "role": "verifier",
+        "instructions": (
+            "Verify whether the claim is supported by the provided sources. "
+            "Be strict: if uncertain, answer false with reason "
+            "'uncertain - <what you would need to verify>'."
         ),
-        "kind": "deepresearch",
-        "tags": ["research", "multi-step", "synthesize", "citations"],
+        "output_rules": (
+            "EXACTLY one JSON object: {\"pass\": true|false, \"reason\": \"<one sentence>\"}.\n"
+            "The reason must reference SPECIFIC content from the input.\n"
+            "No prose, no markdown fences."
+        ),
+        "inputs": "{{claim}}\n{{sources}}",
+        "required_schema": "{\"pass\": boolean, \"reason\": string}",
+        "kind": "custom",
+        "tags": ["verifier", "fact-check", "judge", "yes-no"],
     },
     {
-        "name": "ReAct Loop",
-        "description": "Reason -> Act -> Observe cycle until the question is "
-                       "answered.",
-        "markdown": (
-            "# ReAct Loop\n\n"
-            "Run the Reason -> Act -> Observe loop until the question is "
-            "fully answered or the step budget is exhausted. At each step: "
-            "REASON about what to do next, ACT (call a tool: web_search, "
-            "web_fetch, calculator, etc.), OBSERVE the result, and decide "
-            "whether another step is needed.\n\n"
-            "## Steps\n"
-            "1. Reason: given the question + prior observations, what's the "
-            "next best action?\n"
-            "2. Act: call the chosen tool with the right arguments.\n"
-            "3. Observe: capture the tool's output.\n"
-            "4. Loop: repeat until the question is answered OR the step "
-            "budget (e.g., 10 steps) is hit.\n"
-            "5. Final answer: synthesize the answer from the observations.\n"
+        "name": "Spec Conformance Verifier",
+        "description": "Check whether a piece of code conforms to a spec (yes/no + reason).",
+        "role": "verifier",
+        "instructions": (
+            "Verify whether the code conforms to the spec. Check: function "
+            "signatures match, edge cases handled, no extra/missing public "
+            "APIs, tests cover the spec's cases."
         ),
-        "kind": "deepresearch",
-        "tags": ["react", "loop", "agent", "tools"],
+        "output_rules": (
+            "EXACTLY one JSON object: {\"pass\": boolean, \"reason\": \"<one sentence>\"}.\n"
+            "Reference the SPECIFIC spec clause + code line."
+        ),
+        "inputs": "{{spec}}\n{{code}}",
+        "kind": "custom",
+        "tags": ["verifier", "spec", "conformance", "code-review"],
+    },
+    # --- transformer ---
+    {
+        "name": "Improve Flow Transformer",
+        "description": "Rewrite a draft for smoother transitions and clearer logic (full revised content).",
+        "role": "transformer",
+        "instructions": (
+            "Rewrite the content to improve flow: smoother transitions, "
+            "clearer logic, no abrupt topic shifts. Preserve every claim "
+            "and citation. Do NOT invent new content."
+        ),
+        "output_rules": (
+            "Output the FULL transformed content. No diffs, no commentary.\n"
+            "Begin with the content itself — no 'Here is the revised version:' preamble.\n"
+            "If applying the directive would require inventing facts, DROP the affected content."
+        ),
+        "inputs": "{{body}}",
+        "kind": "custom",
+        "tags": ["transformer", "rewrite", "flow", "revision"],
     },
     {
-        "name": "Extended Thinking",
-        "description": "Single long-form reasoning pass with maximum thinking "
-                       "budget.",
-        "markdown": (
-            "# Extended Thinking\n\n"
-            "A single long-form reasoning pass with the maximum thinking "
-            "budget the model supports. No tool calls, no multi-step "
-            "searches — just deep, careful reasoning about the question. "
-            "Best for math, logic, design, and analysis questions where "
-            "the answer can be derived from the question itself.\n\n"
-            "## Steps\n"
-            "1. Engage maximum reasoning/thinking budget.\n"
-            "2. Think step-by-step about the question, exploring multiple "
-            "approaches.\n"
-            "3. Consider edge cases + counterexamples.\n"
-            "4. Arrive at a final answer with a clear justification.\n"
+        "name": "Tone Adjuster",
+        "description": "Adjust the tone of a piece (formal/casual/technical) without changing the meaning.",
+        "role": "transformer",
+        "instructions": (
+            "Adjust the tone to match the requested target tone (formal, "
+            "casual, technical, etc.). Preserve the meaning, claims, and "
+            "citations. Do NOT add or remove content."
         ),
-        "kind": "deepresearch",
-        "tags": ["thinking", "reasoning", "long-form", "max-budget"],
+        "output_rules": (
+            "Output the FULL transformed content.\n"
+            "Preserve every [N] citation marker.\n"
+            "No meta-commentary."
+        ),
+        "inputs": "{{body}}\nTarget tone: {{tone}}",
+        "kind": "custom",
+        "tags": ["transformer", "tone", "rewrite", "style"],
     },
-    # --- judge ---
+    # --- parser ---
     {
-        "name": "Critique Panel",
-        "description": "N judges independently critique the answer for "
-                       "issues, risks, and improvements.",
-        "markdown": (
-            "# Critique Panel\n\n"
-            "Fan the answer out to N independent judges (different model "
-            "families for diversity). Each judge critiques the answer for: "
-            "(a) factual errors, (b) logical gaps, (c) missing context, "
-            "(d) risks/downsides, (e) concrete improvements. Merge the "
-            "critiques (dedupe overlapping points) into a single review.\n\n"
-            "## Steps\n"
-            "1. Pick N diverse judges from the roster (different providers "
-            "+ model families).\n"
-            "2. Each judge independently critiques the answer using the "
-            "critiquer role.\n"
-            "3. Merge critiques with dedupe (overlapping points are "
-            "combined).\n"
-            "4. Return the merged critique.\n"
+        "name": "Citation Extractor",
+        "description": "Extract citations from text into a structured JSON array.",
+        "role": "parser",
+        "instructions": (
+            "Extract every citation from the source text. For each citation, "
+            "capture: the [N] marker, the cited author/title (if present), "
+            "and the surrounding claim."
         ),
-        "kind": "judge",
-        "tags": ["critique", "panel", "review", "issues"],
+        "output_rules": (
+            "Emit ONLY the JSON array. No prose, no fences.\n"
+            "If no citations are present, emit [].\n"
+            "Preserve original casing and punctuation in string values."
+        ),
+        "inputs": "{{body}}",
+        "required_schema": "Array<{\"n\": number, \"author\": string|null, \"title\": string|null, \"claim\": string}>",
+        "kind": "custom",
+        "tags": ["parser", "extract", "citations", "json"],
     },
     {
-        "name": "Verify Panel",
-        "description": "N judges vote PASS/FAIL with reasons.",
-        "markdown": (
-            "# Verify Panel\n\n"
-            "Fan the answer out to N independent judges. Each judge votes "
-            "PASS or FAIL with a one-paragraph reason. Tally the votes; "
-            "the verdict is PASS only if a majority vote PASS. Surface the "
-            "dissenting opinions.\n\n"
-            "## Steps\n"
-            "1. Pick N diverse judges.\n"
-            "2. Each judge votes PASS/FAIL with a reason.\n"
-            "3. Tally: majority rules.\n"
-            "4. Return verdict + vote tally + reasons (including "
-            "dissenting).\n"
+        "name": "Action Items Parser",
+        "description": "Extract action items (owner + action + due) from meeting notes.",
+        "role": "parser",
+        "instructions": (
+            "Extract every action item from the meeting notes. For each, "
+            "capture: the owner (if named), the action (concrete verb + object), "
+            "and the due date (if mentioned)."
         ),
-        "kind": "judge",
-        "tags": ["verify", "panel", "vote", "pass-fail"],
+        "output_rules": (
+            "Emit ONLY the JSON array.\n"
+            "If no action items, emit [].\n"
+            "Do not infer owners/dates that are not literally present in the text."
+        ),
+        "inputs": "{{notes}}",
+        "required_schema": "Array<{\"owner\": string|null, \"action\": string, \"due\": string|null}>",
+        "kind": "custom",
+        "tags": ["parser", "extract", "action-items", "meetings"],
     },
+    # --- reviewer ---
     {
-        "name": "Improve Panel",
-        "description": "N judges propose concrete improvements.",
-        "markdown": (
-            "# Improve Panel\n\n"
-            "Fan the answer out to N independent judges. Each judge "
-            "proposes 2-3 concrete, actionable improvements (not vague "
-            "suggestions — specific edits, additions, or rewrites). Merge "
-            "the proposals (dedupe overlapping ones) into a single "
-            "improvement list.\n\n"
-            "## Steps\n"
-            "1. Pick N diverse judges.\n"
-            "2. Each judge proposes 2-3 concrete improvements.\n"
-            "3. Merge with dedupe.\n"
-            "4. Return the prioritized improvement list.\n"
+        "name": "Final Pass Reviewer",
+        "description": "Holistic final review: does this piece accomplish its stated goal?",
+        "role": "reviewer",
+        "instructions": (
+            "Review the piece holistically. Does it accomplish its stated "
+            "goal? Surface the top 3 strengths and the top 3 weaknesses. "
+            "End with a one-sentence verdict: ship / revise / reject."
         ),
-        "kind": "judge",
-        "tags": ["improve", "panel", "transform", "actionable"],
+        "output_rules": (
+            "3 strengths + 3 weaknesses + 1 verdict.\n"
+            "Each strength/weakness: one specific sentence.\n"
+            "Verdict: 'ship' | 'revise' | 'reject' + one-sentence reason."
+        ),
+        "inputs": "{{body}}\nStated goal: {{goal}}",
+        "kind": "custom",
+        "tags": ["reviewer", "final", "holistic", "verdict"],
     },
+    # --- extractor ---
     {
-        "name": "Debate Panel",
-        "description": "N judges argue opposing sides, then converge.",
-        "markdown": (
-            "# Debate Panel\n\n"
-            "Split N judges into two camps: pro and con. Each camp argues "
-            "its side with evidence + reasoning. After the opening "
-            "arguments, each camp rebuts the other. Finally, the judges "
-            "converge on a synthesis that acknowledges the strongest "
-            "points from both sides.\n\n"
-            "## Steps\n"
-            "1. Split N judges into pro + con camps.\n"
-            "2. Opening arguments: each camp presents its case.\n"
-            "3. Rebuttals: each camp rebuts the other's case.\n"
-            "4. Convergence: the judges synthesize a balanced view that "
-            "acknowledges the strongest points from both sides.\n"
-            "5. Return the debate transcript + the synthesis.\n"
+        "name": "Key Claims Extractor",
+        "description": "Extract the key factual claims from a piece (for downstream fact-checking).",
+        "role": "extractor",
+        "instructions": (
+            "Extract every distinct factual claim from the source. A "
+            "factual claim is a statement that could be true or false "
+            "(numbers, dates, named-thing-X-does-Y assertions). Drop "
+            "opinions and value judgments."
         ),
-        "kind": "judge",
-        "tags": ["debate", "panel", "pro-con", "synthesis"],
+        "output_rules": (
+            "Emit ONLY the JSON array.\n"
+            "Each claim: one short sentence.\n"
+            "Preserve the original wording as closely as possible."
+        ),
+        "inputs": "{{body}}",
+        "required_schema": "Array<{\"claim\": string, \"location\": string}>",
+        "kind": "custom",
+        "tags": ["extractor", "claims", "facts", "fact-check"],
     },
 ]
 
@@ -1050,13 +1321,35 @@ def seed_defaults() -> int:
             if existing:
                 continue
             tid = _gen_id()
+            # Compile the markdown from role + parts (Task 4 role-based
+            # system). Legacy templates with a hardcoded `markdown` field
+            # bypass compilation and use the literal markdown.
+            norm_role = _normalize_role(tpl.get("role"))
+            if norm_role:
+                markdown = compile_template_markdown(
+                    role=norm_role,
+                    instructions=tpl.get("instructions") or "",
+                    output_rules=tpl.get("output_rules") or "",
+                    inputs=tpl.get("inputs") or "",
+                    template=tpl.get("template") or "",
+                    required_schema=tpl.get("required_schema") or "")
+            else:
+                markdown = tpl.get("markdown", "")
             db.execute(
                 "INSERT INTO templates (id, author_id, author_name, name, description, "
-                "markdown, kind, tags, is_public, hearts, downloads, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?)",
+                "markdown, kind, tags, is_public, hearts, downloads, "
+                "role, instructions, output_rules, inputs, template_part, required_schema, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (tid, "system", "doomalaysocreate", tpl["name"],
-                 tpl.get("description"), tpl["markdown"], tpl["kind"],
+                 tpl.get("description"), markdown, tpl.get("kind", "custom"),
                  _normalize_tags(tpl.get("tags")),
+                 norm_role,
+                 (tpl.get("instructions") or "").strip() or None,
+                 (tpl.get("output_rules") or "").strip() or None,
+                 (tpl.get("inputs") or "").strip() or None,
+                 (tpl.get("template") or "").strip() or None,
+                 (tpl.get("required_schema") or "").strip() or None,
                  now, now))
             inserted += 1
         db.commit()
@@ -1146,6 +1439,7 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             sort = (q.get("sort", ["hearts"])[0] or "hearts").strip().lower()
             query = (q.get("query", [None])[0] or "").strip() or None
             kind = (q.get("kind", [None])[0] or "").strip() or None
+            role = (q.get("role", [None])[0] or "").strip().lower() or None
             filter = (q.get("filter", [None])[0] or "").strip().lower() or None
             try:
                 limit = int(q.get("limit", ["50"])[0])
@@ -1157,7 +1451,7 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
                 offset = 0
             tpls, total = list_public_templates(
                 sort=sort, query=query, kind=kind, limit=limit, offset=offset,
-                user_id=user_id, filter=filter)
+                user_id=user_id, filter=filter, role=role)
             _json(handler, 200, {"templates": tpls, "total": total})
             return True
         if route == "/api/templates/<id>":
@@ -1173,6 +1467,30 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             # frontend can render the correct button state when a user opens
             # a template detail view directly via URL.
             _annotate_user_flags([tpl], user_id)
+            # Role-based raw view (Task 4): ?view=raw returns the role
+            # skeleton + the parts separately so the frontend can render a
+            # color-coded "raw" view with syntax highlighting. The
+            # `markdown` field is the COMPILED prompt (skeleton + parts
+            # substituted); `raw` returns the UNFILLED skeleton + the parts
+            # so the user can see how the prompt was assembled.
+            from urllib.parse import parse_qs, urlsplit
+            q = parse_qs(urlsplit(path).query)
+            view = (q.get("view", [None])[0] or "").strip().lower()
+            if view == "raw":
+                skeleton = _role_skeleton(tpl.get("role") or "")
+                _json(handler, 200, {
+                    "template": tpl,
+                    "raw": {
+                        "role": tpl.get("role"),
+                        "skeleton": skeleton,
+                        "instructions": tpl.get("instructions") or "",
+                        "output_rules": tpl.get("output_rules") or "",
+                        "inputs": tpl.get("inputs") or "",
+                        "template": tpl.get("template") or "",
+                        "required_schema": tpl.get("required_schema") or "",
+                    },
+                })
+                return True
             _json(handler, 200, {"template": tpl})
             return True
         _json(handler, 404, {"error": "unknown GET route"})
@@ -1187,10 +1505,22 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             if not name:
                 _json(handler, 400, {"error": "'name' (non-empty string) is required"})
                 return True
+            # Role-based system (Task 4): accept role + parts as an
+            # alternative to the legacy plain-text markdown. If `role` is
+            # provided, the markdown is compiled from the parts.
+            role = body.get("role")
+            instructions = body.get("instructions")
+            output_rules = body.get("output_rules")
+            inputs = body.get("inputs")
+            template = body.get("template")
+            required_schema = body.get("required_schema")
             markdown = body.get("markdown")
-            if not isinstance(markdown, str) or not markdown.strip():
-                _json(handler, 400, {"error": "'markdown' (non-empty string) is required"})
-                return True
+            norm_role = _normalize_role(role) if role else None
+            if not norm_role:
+                # Legacy plain-text mode: markdown is required.
+                if not isinstance(markdown, str) or not markdown.strip():
+                    _json(handler, 400, {"error": "'markdown' (or 'role' + parts) is required"})
+                    return True
             kind = str(body.get("kind", "custom")).strip().lower()
             if kind not in VALID_KINDS:
                 _json(handler, 400, {"error": f"'kind' must be one of {VALID_KINDS}"})
@@ -1204,7 +1534,10 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
             try:
                 tpl = create_template(
                     user_id=user_id, name=name, description=description,
-                    markdown=markdown, kind=kind, tags=tags, is_public=is_public)
+                    markdown=markdown, kind=kind, tags=tags, is_public=is_public,
+                    role=norm_role, instructions=instructions,
+                    output_rules=output_rules, inputs=inputs,
+                    template=template, required_schema=required_schema)
             except ValueError as e:
                 _json(handler, 400, {"error": str(e)})
                 return True
