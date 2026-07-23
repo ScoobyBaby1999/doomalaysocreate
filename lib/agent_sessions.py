@@ -283,6 +283,25 @@ def _resolve_open_model(user_model: str) -> tuple[str, str | None, str | None, s
     for env, label, model, base, extra, pname in models:
         if model.split("/")[-1] == user_last:
             return (model, base, env, pname or label, extra)
+    # Pass 4: FALLBACK — if _build_open_models() returned empty (sync cache
+    # not populated yet), construct the entry manually from known providers.
+    _FALLBACK_RESOLVE = {
+        "glm-5.2": [
+            ("NVIDIA_API_KEY", "openai/z-ai/glm-5.2", "https://integrate.api.nvidia.com/v1", "nvidia"),
+            ("OPENROUTER_API_KEY", "openai/z-ai/glm-5.2:free", "https://openrouter.ai/api/v1", "openrouter"),
+        ],
+        "glm-5.1": [
+            ("NVIDIA_API_KEY", "openai/z-ai/glm-5.1", "https://integrate.api.nvidia.com/v1", "nvidia"),
+        ],
+        "kimi-k2.6": [
+            ("NVIDIA_API_KEY", "openai/moonshotai/kimi-k2.6", "https://integrate.api.nvidia.com/v1", "nvidia"),
+        ],
+    }
+    for _fkey, _fentries in _FALLBACK_RESOLVE.items():
+        if _fkey == user_last or _fkey in user_model:
+            for _fenv, _fmodel, _fbase, _fpname in _fentries:
+                if os.environ.get(_fenv, "").strip():
+                    return (_fmodel, _fbase, _fenv, _fpname, None)
     return None
 
 
