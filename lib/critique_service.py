@@ -1181,7 +1181,7 @@ class Handler(BaseHTTPRequestHandler):
         # No sensitive data (no keys, no tokens, no user data).
         if route == "/api/debug/public":
             import debug_log as _dl
-            logs = _dl.get_recent_logs(tail=50, min_level="WARN")
+            logs = _dl.get_recent_logs(tail=50)
             active_sessions = 0
             try:
                 import agent_sessions as _as
