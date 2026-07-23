@@ -1176,6 +1176,81 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
+        # --- PUBLIC diagnostic endpoint (no auth) for live monitoring ---
+        # Returns recent ERROR/WARN logs + agent session count + provider status.
+        # No sensitive data (no keys, no tokens, no user data).
+        if route == "/api/debug/public":
+            import debug_log as _dl
+            logs = _dl.get_recent_logs(tail=50, min_level="WARN")
+            active_sessions = 0
+            try:
+                import agent_sessions as _as
+                with _as._sessions_lock:
+                    active_sessions = len(_as._sessions)
+            except Exception:
+                pass
+            providers_status = {}
+            try:
+                for name in ("NVIDIA_API_KEY", "CF_API_TOKEN", "CF_ACCOUNT_ID",
+                             "OPENROUTER_API_KEY", "GITHUB_TOKEN",
+                             "PRIVATEMODEAI_API_KEY", "OPENCODE_ZEN_API_KEY",
+                             "ANTHROPIC_API_KEY"):
+                    providers_status[name] = bool(os.environ.get(name, "").strip())
+            except Exception:
+                pass
+            self._send_json(200, {
+                "logs": logs,
+                "active_sessions": active_sessions,
+                "providers": providers_status,
+                "agent_tier": agent_sessions.agent_tier(),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
+            return
+        # --- PUBLIC test endpoint (no auth) — send a test message, return the response ---
+        if route == "/api/debug/test-chat":
+            import agent_sessions as _as
+            import time as _time
+            try:
+                # Create a mock session and send "Hi"
+                sess = _as.get_or_create(None, model=None, chat_session_id=None)
+                # Subscribe to events BEFORE submitting (no race)
+                q = sess.subscribe(0)
+                sess.submit("Hi")
+                # Collect events for up to 15s
+                events = []
+                deadline = _time.time() + 15
+                while _time.time() < deadline:
+                    try:
+                        ev = q.get(timeout=0.5)
+                        events.append(ev)
+                        if ev.get("type") in ("assistant", "error") or ev.get("state") in ("idle", "error"):
+                            # Wait a bit more for any trailing events
+                            _time.sleep(0.5)
+                            while not q.empty():
+                                events.append(q.get_nowait())
+                            break
+                    except Exception:
+                        pass
+                try:
+                    sess.unsubscribe(q)
+                except Exception:
+                    pass
+                self._send_json(200, {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "tier": sess.tier,
+                    "model": sess.model,
+                    "events": events[:30],
+                    "event_count": len(events),
+                    "all_session_events": sess.events[:30],
+                })
+            except Exception as exc:
+                self._send_json(500, {
+                    "ok": False,
+                    "error": str(exc)[:300],
+                    "error_type": type(exc).__name__,
+                })
+            return
         # --- Chat session routes (bearer-gated; identity via X-JWT) ---
         if route == "/api/chat/sessions" or route.startswith("/api/chat/sessions/"):
             import chat_routes
