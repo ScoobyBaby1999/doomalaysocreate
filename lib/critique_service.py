@@ -1206,6 +1206,72 @@ class Handler(BaseHTTPRequestHandler):
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             })
             return
+        # --- PUBLIC Strands import test ---
+        if route == "/api/debug/test-strands":
+            import json as _json
+            import traceback as _tb
+            results = {}
+            # Test 1: Can we import strands?
+            try:
+                from strands import Agent
+                from strands.models.litellm import LiteLLMModel
+                results["strands_import"] = "OK"
+            except Exception as e:
+                results["strands_import"] = f"FAIL: {e}"
+                self._send_json(200, {"ok": False, "results": results, "traceback": _tb.format_exc()[:500]})
+                return
+            # Test 2: Can we create a LiteLLMModel?
+            try:
+                import agent_sessions as _as
+                picked = _as._pick_open_llm()
+                if picked is None:
+                    results["pick_llm"] = "FAIL: no LLM available"
+                    self._send_json(200, {"ok": False, "results": results})
+                    return
+                key_env, model, base_url = picked
+                results["picked_model"] = model
+                results["picked_key_env"] = key_env
+                results["picked_base_url"] = base_url
+                api_key = os.environ.get(key_env, "")
+                client_args = {"api_key": api_key}
+                if base_url:
+                    client_args["api_base"] = base_url
+                llm = LiteLLMModel(client_args=client_args, model_id=model, stream=False)
+                results["litellm_create"] = "OK"
+            except Exception as e:
+                results["litellm_create"] = f"FAIL: {e}"
+                self._send_json(200, {"ok": False, "results": results, "traceback": _tb.format_exc()[:500]})
+                return
+            # Test 3: Can we create an Agent?
+            try:
+                agent = Agent(model=llm, system_prompt="You are a helpful assistant.")
+                results["agent_create"] = "OK"
+            except Exception as e:
+                results["agent_create"] = f"FAIL: {e}"
+                self._send_json(200, {"ok": False, "results": results, "traceback": _tb.format_exc()[:500]})
+                return
+            # Test 4: Can we call the agent with a 10s timeout?
+            import threading as _threading
+            import time as _time
+            _result = {"done": False, "error": None, "response": None}
+            def _call():
+                try:
+                    resp = agent("Say hello in one word.")
+                    _result["done"] = True
+                    _result["response"] = str(resp)[:200]
+                except Exception as e:
+                    _result["error"] = str(e)[:200]
+            t = _threading.Thread(target=_call, daemon=True)
+            t.start()
+            t.join(timeout=15)
+            if t.is_alive():
+                results["agent_call"] = "TIMEOUT (15s)"
+            elif _result["error"]:
+                results["agent_call"] = f"FAIL: {_result['error']}"
+            else:
+                results["agent_call"] = f"OK: {_result['response']}"
+            self._send_json(200, {"ok": True, "results": results})
+            return
         # --- PUBLIC direct LLM test (no Strands, just litellm) ---
         if route == "/api/debug/test-llm":
             import json as _json
