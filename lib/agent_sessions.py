@@ -1255,10 +1255,6 @@ class StrandsAdapter(BaseAdapter):
             tools=tools,
             system_prompt=self.system_prompt,
             callback_handler=None,
-            # Limit the number of tool-call rounds so the agent doesn't
-            # loop forever on a simple "Hi" message. 10 rounds is generous
-            # for real tasks but prevents infinite hangs.
-            max_turns=10,
         )
         if conv_manager:
             agent_kwargs["conversation_manager"] = conv_manager
