@@ -976,9 +976,8 @@ class StrandsAdapter(BaseAdapter):
         # provider. 60s is generous for reasoning models but bounded.
         client_args["timeout"] = 60
         # Retry on 429 (rate limit) and 5xx errors — LitellM handles this
-        # natively via retries. 3 retries with exponential backoff.
+        # natively via num_retries with exponential backoff.
         client_args["num_retries"] = 3
-        client_args["retry_after"] = 5  # seconds between retries
         llm_kwargs = dict(client_args=client_args, model_id=model, stream=True)
         if extra_body:
             # Strands LiteLLMModel forwards additional_request_params as
