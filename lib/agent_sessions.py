@@ -124,6 +124,8 @@ def _build_open_models() -> list[tuple[str, str, str, str | None, dict | None, s
     # Re-probe if the cache is empty — the panel sync may not have completed
     # on the first call (cache poisoning fix). A non-empty cache is still
     # trusted (the catalog + synced models don't change at runtime).
+    # DON'T cache an empty result — the sync may complete later and we want
+    # to pick it up on the next call.
     if _open_models_cache is not None and len(_open_models_cache) > 0:
         return _open_models_cache
 
@@ -308,8 +310,6 @@ def _pick_open_llm() -> tuple[str, str, str | None] | None:
     for env_key, _label, model, base_url, _extra, _pname in _build_open_models():
         if os.environ.get(env_key, "").strip():
             available.append((env_key, model, base_url))
-    if not available:
-        return None
     # Preference order: known-good, fast, reliable models first
     _PREFERRED = [
         "glm-5.2", "glm-5.1", "kimi-k2.6", "deepseek-v4-flash",
@@ -321,7 +321,22 @@ def _pick_open_llm() -> tuple[str, str, str | None] | None:
             if pref in model.lower():
                 return (env_key, model, base_url)
     # Fall back to the first available
-    return available[0]
+    if available:
+        return available[0]
+    # LAST RESORT: the sync cache hasn't populated yet. Use a hardcoded
+    # known-good model from the first provider that has a key set. This
+    # prevents "no open LLM available" on fresh boots before sync completes.
+    _FALLBACK_MODELS = [
+        ("NVIDIA_API_KEY", "z-ai/glm-5.2", "https://integrate.api.nvidia.com/v1"),
+        ("OPENROUTER_API_KEY", "z-ai/glm-5.2:free", "https://openrouter.ai/api/v1"),
+        ("CF_API_TOKEN", "@cf/z-ai/glm-5.2", None),
+        ("PRIVATEMODEAI_API_KEY", "glm-5.2", None),
+        ("OPENCODE_ZEN_API_KEY", "glm-5.2", None),
+    ]
+    for env, mdl, base in _FALLBACK_MODELS:
+        if os.environ.get(env, "").strip():
+            return (env, mdl, base)
+    return None
 
 
 def _open_sdk_installed() -> bool:
