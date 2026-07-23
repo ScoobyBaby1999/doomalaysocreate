@@ -1250,7 +1250,7 @@ class Handler(BaseHTTPRequestHandler):
                 results["agent_create"] = f"FAIL: {e}"
                 self._send_json(200, {"ok": False, "results": results, "traceback": _tb.format_exc()[:500]})
                 return
-            # Test 4: Can we call the agent with a 10s timeout?
+            # Test 4: Can we call the agent with a 15s timeout?
             import threading as _threading
             import time as _time
             _result = {"done": False, "error": None, "response": None}
@@ -1260,7 +1260,7 @@ class Handler(BaseHTTPRequestHandler):
                     _result["done"] = True
                     _result["response"] = str(resp)[:200]
                 except Exception as e:
-                    _result["error"] = str(e)[:200]
+                    _result["error"] = str(e)[:300]
             t = _threading.Thread(target=_call, daemon=True)
             t.start()
             t.join(timeout=15)
@@ -1270,6 +1270,40 @@ class Handler(BaseHTTPRequestHandler):
                 results["agent_call"] = f"FAIL: {_result['error']}"
             else:
                 results["agent_call"] = f"OK: {_result['response']}"
+
+            # Test 5: Test with the FULL StrandsAdapter (with tools + memory)
+            try:
+                from pathlib import Path as _P
+                import tempfile as _tf
+                tmpdir = _P(_tf.mkdtemp())
+                adapter = _as.StrandsAdapter(tmpdir, model=None,
+                                             workspace_id=None,
+                                             system_prompt="You are a helpful assistant.")
+                adapter.open()
+                results["adapter_open"] = f"OK (resolved_model={adapter.resolved_model})"
+                # Try a turn with a 30s timeout
+                _adapter_events = []
+                _adapter_done = {"done": False, "error": None}
+                def _adapter_call():
+                    try:
+                        adapter.turn("Say hello", lambda ev: _adapter_events.append(ev))
+                        _adapter_done["done"] = True
+                    except Exception as e:
+                        _adapter_done["error"] = str(e)[:300]
+                t2 = _threading.Thread(target=_adapter_call, daemon=True)
+                t2.start()
+                t2.join(timeout=30)
+                if t2.is_alive():
+                    results["adapter_turn"] = f"TIMEOUT (30s) — events so far: {len(_adapter_events)}"
+                elif _adapter_done["error"]:
+                    results["adapter_turn"] = f"FAIL: {_adapter_done['error']}"
+                else:
+                    asst_ev = [e for e in _adapter_events if e.get("type") == "assistant"]
+                    results["adapter_turn"] = f"OK — {len(_adapter_events)} events, assistant: {asst_ev[0].get('text','')[:60] if asst_ev else 'NONE'}"
+            except Exception as e:
+                results["adapter_turn"] = f"FAIL: {e}"
+                results["adapter_traceback"] = _tb.format_exc()[:400]
+
             self._send_json(200, {"ok": True, "results": results})
             return
         # --- PUBLIC direct LLM test (no Strands, just litellm) ---
