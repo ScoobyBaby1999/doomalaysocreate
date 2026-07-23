@@ -1206,6 +1206,94 @@ class Handler(BaseHTTPRequestHandler):
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             })
             return
+        # --- PUBLIC direct LLM test (no Strands, just litellm) ---
+        if route == "/api/debug/test-llm":
+            import json as _json
+            import time as _time
+            from urllib.parse import parse_qs, urlsplit
+            qs = parse_qs(urlsplit(self.path).query)
+            model_param = (qs.get("model", [None])[0] or "").strip()
+            try:
+                import agent_sessions as _as
+                # Pick a model
+                if model_param:
+                    pair = _as._resolve_open_model(model_param)
+                    if pair:
+                        model, base_url, key_env, provider_label, extra_headers = pair
+                    else:
+                        self._send_json(500, {"error": f"cannot resolve model {model_param}"})
+                        return
+                else:
+                    picked = _as._pick_open_llm()
+                    if picked is None:
+                        self._send_json(500, {"error": "no open LLM available"})
+                        return
+                    key_env, model, base_url = picked
+                api_key = os.environ.get(key_env, "")
+                if not api_key:
+                    self._send_json(500, {"error": f"no API key for {key_env}"})
+                    return
+                # Direct HTTP call (no Strands/litellm)
+                import urllib.request
+                url = (base_url or "https://integrate.api.nvidia.com/v1") + "/chat/completions"
+                if not base_url:
+                    # NVIDIA base_url in catalog already includes /chat/completions
+                    url = "https://integrate.api.nvidia.com/v1/chat/completions"
+                elif base_url.endswith("/chat/completions"):
+                    url = base_url
+                else:
+                    url = base_url.rstrip("/") + "/chat/completions"
+                body = _json.dumps({
+                    "model": model.replace("openai/", ""),
+                    "messages": [{"role": "user", "content": "Say hello in one word."}],
+                    "max_tokens": 50,
+                    "stream": False,
+                }).encode()
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                }
+                if extra_headers:
+                    headers.update(extra_headers)
+                t0 = _time.time()
+                req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        result = _json.loads(resp.read().decode())
+                    elapsed = _time.time() - t0
+                    self._send_json(200, {
+                        "ok": True,
+                        "model": model,
+                        "provider": provider_label if model_param else key_env,
+                        "url": url,
+                        "elapsed_ms": round(elapsed * 1000),
+                        "response": result.get("choices", [{}])[0].get("message", {}).get("content", ""),
+                        "usage": result.get("usage", {}),
+                    })
+                except urllib.error.HTTPError as e:
+                    body_text = e.read().decode()[:300]
+                    self._send_json(200, {
+                        "ok": False,
+                        "model": model,
+                        "url": url,
+                        "error": f"HTTP {e.code}: {body_text}",
+                        "elapsed_ms": round((_time.time() - t0) * 1000),
+                    })
+                except Exception as e:
+                    self._send_json(200, {
+                        "ok": False,
+                        "model": model,
+                        "url": url,
+                        "error": f"{type(e).__name__}: {str(e)[:200]}",
+                        "elapsed_ms": round((_time.time() - t0) * 1000),
+                    })
+            except Exception as exc:
+                import traceback as _tb
+                self._send_json(500, {
+                    "error": str(exc)[:300],
+                    "traceback": _tb.format_exc()[:500],
+                })
+            return
         # --- PUBLIC test endpoint (no auth) — send a test message, return the response ---
         if route == "/api/debug/test-chat":
             import agent_sessions as _as
