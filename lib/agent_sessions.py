@@ -2064,6 +2064,7 @@ class AgentSession:
         self.inbox.put(None)
 
     def _run(self) -> None:
+        log_event("agent_run_start", session_id=self.id, tier=self.tier, model=self.model)
         if self.web_search or self.deep_research:
             # Research mode: bypass the Claude/Strands SDKs and drive
             # research_templates directly from the panel's slots.
@@ -2083,7 +2084,9 @@ class AgentSession:
         # conscious tool registry on the owning session (conscious_id/agent_id).
         adapter._session = self
         try:
+            log_event("agent_adapter_open_start", session_id=self.id)
             adapter.open()
+            log_event("agent_adapter_open_done", session_id=self.id)
         except Exception as exc:
             # Bug 2 (fresh-session no-response): emit BOTH a status="error"
             # event AND a typed "error" event so the frontend definitely
@@ -2138,7 +2141,9 @@ class AgentSession:
             assistant_emitted = False
             pre_count = len(self.events)
             try:
+                log_event("agent_turn_start", session_id=self.id, msg_preview=msg[:50])
                 adapter.turn(msg, self.emit)
+                log_event("agent_turn_done", session_id=self.id)
                 if self._interrupting:
                     self._set_status("idle", detail="interrupted")
                 else:
