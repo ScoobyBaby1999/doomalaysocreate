@@ -1459,15 +1459,18 @@ class Handler(BaseHTTPRequestHandler):
                             adapter.turn("Say hello in one word.", _emit)
                             _done["done"] = True
                         except Exception as e:
-                            _done["error"] = str(e)[:200]
+                            import traceback as _tb
+                            _done["error"] = str(e)[:300]
+                            _done["traceback"] = _tb.format_exc()[:500]
                     _t = _th.Thread(target=_turn, daemon=True)
                     _t.start()
                     _t.join(timeout=30)
                     elapsed = _time.time() - t0
-                    if not _done["done"]:
+                    if not _done["done"] and not _done["error"]:
                         events.append({"type": "error", "error": f"turn timed out (30s), elapsed={elapsed:.1f}s"})
                     elif _done["error"]:
-                        events.append({"type": "error", "error": _done["error"]})
+                        events.append({"type": "error", "error": _done["error"],
+                                       "traceback": _done.get("traceback", "")})
                     else:
                         events.append({"type": "status", "state": "turn_done", "elapsed_s": round(elapsed, 1)})
                 except Exception as e:
