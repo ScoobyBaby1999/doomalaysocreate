@@ -1229,6 +1229,8 @@ class Handler(BaseHTTPRequestHandler):
                         self._send_json(500, {"error": "no open LLM available"})
                         return
                     key_env, model, base_url = picked
+                    extra_headers = None
+                    provider_label = key_env
                 api_key = os.environ.get(key_env, "")
                 if not api_key:
                     self._send_json(500, {"error": f"no API key for {key_env}"})
