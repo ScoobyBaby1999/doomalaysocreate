@@ -1216,16 +1216,16 @@ class Handler(BaseHTTPRequestHandler):
                 # Subscribe to events BEFORE submitting (no race)
                 q = sess.subscribe(0)
                 sess.submit("Hi")
-                # Collect events for up to 15s
+                # Collect events for up to 30s (give the LLM time to respond)
                 events = []
-                deadline = _time.time() + 15
+                deadline = _time.time() + 30
                 while _time.time() < deadline:
                     try:
-                        ev = q.get(timeout=0.5)
+                        ev = q.get(timeout=1)
                         events.append(ev)
                         if ev.get("type") in ("assistant", "error") or ev.get("state") in ("idle", "error"):
-                            # Wait a bit more for any trailing events
-                            _time.sleep(0.5)
+                            # Wait a bit more for trailing events
+                            _time.sleep(1)
                             while not q.empty():
                                 events.append(q.get_nowait())
                             break
@@ -1235,20 +1235,37 @@ class Handler(BaseHTTPRequestHandler):
                     sess.unsubscribe(q)
                 except Exception:
                     pass
+                # Check adapter status
+                adapter_info = {}
+                try:
+                    a = getattr(sess, "adapter", None)
+                    if a:
+                        adapter_info = {
+                            "type": type(a).__name__,
+                            "resolved_model": getattr(a, "resolved_model", None),
+                            "resolved_provider": getattr(a, "resolved_provider", None),
+                            "model": getattr(a, "model", None),
+                        }
+                except Exception as e:
+                    adapter_info = {"error": str(e)}
                 self._send_json(200, {
                     "ok": True,
                     "session_id": sess.id,
                     "tier": sess.tier,
                     "model": sess.model,
-                    "events": events[:30],
+                    "status": sess.status,
+                    "adapter": adapter_info,
+                    "events": events[:50],
                     "event_count": len(events),
-                    "all_session_events": sess.events[:30],
+                    "all_session_events": sess.events[:50],
                 })
             except Exception as exc:
+                import traceback as _tb
                 self._send_json(500, {
                     "ok": False,
                     "error": str(exc)[:300],
                     "error_type": type(exc).__name__,
+                    "traceback": _tb.format_exc()[:500],
                 })
             return
         # --- Chat session routes (bearer-gated; identity via X-JWT) ---
