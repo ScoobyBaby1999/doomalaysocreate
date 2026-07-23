@@ -1401,8 +1401,9 @@ class Handler(BaseHTTPRequestHandler):
             import agent_sessions as _as
             import time as _time
             try:
-                # Create a mock session and send "Hi"
-                sess = _as.get_or_create(None, model=None, chat_session_id=None)
+                # Create a session with a specific model to avoid pick issues
+                sess = _as.get_or_create(None, model="openai/z-ai/glm-5.2",
+                                         chat_session_id=None)
                 # Subscribe to events BEFORE submitting (no race)
                 q = sess.subscribe(0)
                 sess.submit("Hi")
