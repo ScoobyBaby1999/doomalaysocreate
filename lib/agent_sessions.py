@@ -292,6 +292,12 @@ def _installed(module: str) -> bool:
         return False
 
 
+def _reset_open_models_cache():
+    """Reset the open models cache so the next call re-probes."""
+    global _open_models_cache
+    _open_models_cache = None
+
+
 def _pick_open_llm() -> tuple[str, str, str | None] | None:
     """(env_key, model, base_url) for the default open model, or None if no key set.
 
@@ -326,12 +332,14 @@ def _pick_open_llm() -> tuple[str, str, str | None] | None:
     # LAST RESORT: the sync cache hasn't populated yet. Use a hardcoded
     # known-good model from the first provider that has a key set. This
     # prevents "no open LLM available" on fresh boots before sync completes.
+    # IMPORTANT: model must use the "openai/" prefix so LiteLLM routes it
+    # through the OpenAI-compatible endpoint (not its native provider router).
     _FALLBACK_MODELS = [
-        ("NVIDIA_API_KEY", "z-ai/glm-5.2", "https://integrate.api.nvidia.com/v1"),
-        ("OPENROUTER_API_KEY", "z-ai/glm-5.2:free", "https://openrouter.ai/api/v1"),
-        ("CF_API_TOKEN", "@cf/z-ai/glm-5.2", None),
-        ("PRIVATEMODEAI_API_KEY", "glm-5.2", None),
-        ("OPENCODE_ZEN_API_KEY", "glm-5.2", None),
+        ("NVIDIA_API_KEY", "openai/z-ai/glm-5.2", "https://integrate.api.nvidia.com/v1"),
+        ("OPENROUTER_API_KEY", "openai/z-ai/glm-5.2:free", "https://openrouter.ai/api/v1"),
+        ("CF_API_TOKEN", "openai/@cf/z-ai/glm-5.2", None),
+        ("PRIVATEMODEAI_API_KEY", "openai/glm-5.2", None),
+        ("OPENCODE_ZEN_API_KEY", "openai/glm-5.2", None),
     ]
     for env, mdl, base in _FALLBACK_MODELS:
         if os.environ.get(env, "").strip():
