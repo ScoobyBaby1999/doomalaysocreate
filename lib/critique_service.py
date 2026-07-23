@@ -1440,7 +1440,7 @@ class Handler(BaseHTTPRequestHandler):
                 tmpdir = _P(_tf.mkdtemp())
                 adapter = _as.StrandsAdapter(tmpdir, model=None,
                                              workspace_id=None,
-                                             system_prompt="You are a helpful assistant. Reply concisely.")
+                                             system_prompt=_as.AGENT_SYSTEM_PROMPT)
                 events = []
                 def _emit(ev):
                     events.append(ev)
