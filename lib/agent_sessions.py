@@ -291,18 +291,37 @@ def _installed(module: str) -> bool:
 
 
 def _pick_open_llm() -> tuple[str, str, str | None] | None:
-    """(env_key, model, base_url) for the default open model, or None if no key set."""
+    """(env_key, model, base_url) for the default open model, or None if no key set.
+
+    Prefers known-good, fast, reliable models when multiple providers are
+    available. The previous version picked the FIRST model in catalog order
+    (often an obscure NVIDIA model like dracarys-llama that times out),
+    which caused the "first message gets no response" bug.
+    """
     key_env = os.environ.get("AGENT_OPEN_KEY_ENV", "").strip()
     if key_env and os.environ.get(key_env, "").strip():
         return (key_env,
                 os.environ.get("AGENT_OPEN_MODEL", "groq/llama-3.3-70b-versatile"),
                 os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or None)
+    # Build the list of AVAILABLE models (key set)
+    available = []
     for env_key, _label, model, base_url, _extra, _pname in _build_open_models():
         if os.environ.get(env_key, "").strip():
-            model = os.environ.get("AGENT_OPEN_MODEL", "").strip() or model
-            base_url = os.environ.get("AGENT_OPEN_BASE_URL", "").strip() or base_url
-            return (env_key, model, base_url)
-    return None
+            available.append((env_key, model, base_url))
+    if not available:
+        return None
+    # Preference order: known-good, fast, reliable models first
+    _PREFERRED = [
+        "glm-5.2", "glm-5.1", "kimi-k2.6", "deepseek-v4-flash",
+        "llama-3.3-70b-versatile", "qwen-3-235b", "nemotron-3-ultra",
+        "gemma-4-31b", "llama-3.3-70b", "phi-4-reasoning",
+    ]
+    for pref in _PREFERRED:
+        for env_key, model, base_url in available:
+            if pref in model.lower():
+                return (env_key, model, base_url)
+    # Fall back to the first available
+    return available[0]
 
 
 def _open_sdk_installed() -> bool:
@@ -1247,10 +1266,32 @@ class StrandsAdapter(BaseAdapter):
             self.agent.callback_handler = _stream_callback
         except Exception:
             pass
-        try:
-            self.agent(user_msg)
-        finally:
-            pass
+        # Run the agent call with a timeout so a hanging LLM (e.g. an
+        # unavailable model that accepts the connection but never responds)
+        # doesn't block the turn forever. 120s is generous for reasoning
+        # models but still bounded.
+        import threading as _threading
+        _agent_error: list = []
+        def _run_agent():
+            try:
+                self.agent(user_msg)
+            except Exception as e:
+                _agent_error.append(e)
+        _t = _threading.Thread(target=_run_agent, daemon=True)
+        _t.start()
+        _t.join(timeout=120)
+        if _t.is_alive():
+            # Timed out — the LLM call is still running in the background
+            # thread. Emit an error so the user sees feedback.
+            emit({"type": "error", "error": "model timed out (120s) — try a different model or provider"})
+            try:
+                canceler = getattr(self.agent, "cancel", None)
+                if callable(canceler):
+                    canceler()
+            except Exception:
+                pass
+        if _agent_error:
+            raise _agent_error[0]
         # Walk newly-appended messages for tool results and final assistant text
         msgs = getattr(self.agent, "messages", []) or []
         for m in msgs[self._msg_cursor:]:
