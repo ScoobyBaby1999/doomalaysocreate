@@ -1368,11 +1368,16 @@ class StrandsAdapter(BaseAdapter):
             try:
                 log_event("agent_call_start", session_id=getattr(self._session, 'id', '?'),
                           model=self.resolved_model)
+                # Check what tools are loaded
+                _tools = getattr(self.agent, 'tools', {})
+                _tool_names = list(_tools.keys()) if isinstance(_tools, dict) else [getattr(t, 'tool_name', '?') for t in (_tools if isinstance(_tools, list) else [])]
+                log_event("agent_tools", count=len(_tool_names), names=_tool_names[:10])
                 resp = self.agent(user_msg)
                 _agent_done["done"] = True
-                log_event("agent_call_done", session_id=getattr(self._session, 'id', '?'))
+                log_event("agent_call_done", session_id=getattr(self._session, 'id', '?'),
+                          resp_type=type(resp).__name__)
             except Exception as e:
-                log_event("agent_call_error", error=str(e)[:200])
+                log_event("agent_call_error", error=str(e)[:300], error_type=type(e).__name__)
                 _agent_error.append(e)
 
         _t = _threading.Thread(target=_run_agent, daemon=True)
