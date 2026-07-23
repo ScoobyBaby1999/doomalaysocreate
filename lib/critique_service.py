@@ -1176,6 +1176,39 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self) -> None:
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
+        # --- POST /api/models/resync — force re-fetch + re-cache models ---
+        if route == "/api/models/resync":
+            if not self._auth_ok():
+                self._send_json(401, {"error": "missing or invalid bearer token"})
+                return
+            try:
+                import agent_sessions as _as
+                _as._reset_open_models_cache()
+                # Also reset the provider sync cache
+                try:
+                    import provider_sync
+                    provider_sync._sync_cache = None
+                except Exception:
+                    pass
+                # Trigger a fresh sync
+                try:
+                    from providers import make_provider_registry
+                    reg = make_provider_registry()
+                    provider_map = {p.name: p for p in reg if hasattr(p, "name")}
+                    results = provider_sync.sync_all_providers(provider_map)
+                    provider_sync._sync_cache = results
+                except Exception as e:
+                    log_event("resync_error", error=str(e)[:200])
+                # Rebuild the open models cache
+                models = _as._build_open_models()
+                self._send_json(200, {
+                    "ok": True,
+                    "model_count": len(models),
+                    "models": [{"model": m[2], "provider": m[5] or m[1]} for m in models[:20]],
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)[:200]})
+            return
         # --- PUBLIC diagnostic endpoint (no auth) for live monitoring ---
         # Returns recent ERROR/WARN logs + agent session count + provider status.
         # No sensitive data (no keys, no tokens, no user data).

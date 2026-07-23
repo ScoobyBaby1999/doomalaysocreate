@@ -284,24 +284,38 @@ def _resolve_open_model(user_model: str) -> tuple[str, str | None, str | None, s
         if model.split("/")[-1] == user_last:
             return (model, base, env, pname or label, extra)
     # Pass 4: FALLBACK — if _build_open_models() returned empty (sync cache
-    # not populated yet), construct the entry manually from known providers.
-    _FALLBACK_RESOLVE = {
-        "glm-5.2": [
-            ("NVIDIA_API_KEY", "openai/z-ai/glm-5.2", "https://integrate.api.nvidia.com/v1", "nvidia"),
-            ("OPENROUTER_API_KEY", "openai/z-ai/glm-5.2:free", "https://openrouter.ai/api/v1", "openrouter"),
-        ],
-        "glm-5.1": [
-            ("NVIDIA_API_KEY", "openai/z-ai/glm-5.1", "https://integrate.api.nvidia.com/v1", "nvidia"),
-        ],
-        "kimi-k2.6": [
-            ("NVIDIA_API_KEY", "openai/moonshotai/kimi-k2.6", "https://integrate.api.nvidia.com/v1", "nvidia"),
-        ],
-    }
-    for _fkey, _fentries in _FALLBACK_RESOLVE.items():
-        if _fkey == user_last or _fkey in user_model:
-            for _fenv, _fmodel, _fbase, _fpname in _fentries:
-                if os.environ.get(_fenv, "").strip():
-                    return (_fmodel, _fbase, _fenv, _fpname, None)
+    # not populated yet), do a LIVE fetch from the provider APIs to find the
+    # model. This is fully dynamic — no hardcoded model names.
+    _user_last_clean = user_last.replace(":free", "").replace("openai/", "")
+    _PROVIDER_FETCH = [
+        ("NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1/models", "nvidia",
+         "https://integrate.api.nvidia.com/v1"),
+        ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/models", "openrouter",
+         "https://openrouter.ai/api/v1"),
+    ]
+    for env, url, pname, base in _PROVIDER_FETCH:
+        if not os.environ.get(env, "").strip():
+            continue
+        try:
+            import urllib.request as _ur
+            req = _ur.Request(url, headers={
+                "Authorization": f"Bearer {os.environ[env]}",
+                "User-Agent": "doomalaysocreate/1.0",
+            })
+            with _ur.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            for m in data.get("data", []):
+                mid = m.get("id", "")
+                mid_last = mid.split("/")[-1]
+                if (mid_last == _user_last_clean or
+                    _user_last_clean in mid or
+                    mid in user_model):
+                    litellm_model = f"openai/{mid}"
+                    log_event("resolve_open_model_live_fetch",
+                              provider=pname, model=litellm_model, requested=user_model)
+                    return (litellm_model, base, env, pname, None)
+        except Exception as e:
+            log_event("resolve_open_model_fetch_error", provider=pname, error=str(e)[:200])
     return None
 
 
@@ -350,21 +364,48 @@ def _pick_open_llm() -> tuple[str, str, str | None] | None:
     # Fall back to the first available
     if available:
         return available[0]
-    # LAST RESORT: the sync cache hasn't populated yet. Use a hardcoded
-    # known-good model from the first provider that has a key set. This
-    # prevents "no open LLM available" on fresh boots before sync completes.
-    # IMPORTANT: model must use the "openai/" prefix so LiteLLM routes it
-    # through the OpenAI-compatible endpoint (not its native provider router).
-    _FALLBACK_MODELS = [
-        ("NVIDIA_API_KEY", "openai/z-ai/glm-5.2", "https://integrate.api.nvidia.com/v1"),
-        ("OPENROUTER_API_KEY", "openai/z-ai/glm-5.2:free", "https://openrouter.ai/api/v1"),
-        ("CF_API_TOKEN", "openai/@cf/z-ai/glm-5.2", None),
-        ("PRIVATEMODEAI_API_KEY", "openai/glm-5.2", None),
-        ("OPENCODE_ZEN_API_KEY", "openai/glm-5.2", None),
+    # LAST RESORT: the sync cache hasn't populated yet. Do a LIVE fetch
+    # from the first provider that has a key set. This is dynamic — no
+    # hardcoded model names. We fetch the provider's model list and pick
+    # the first one (or a preferred one if available).
+    _PROVIDER_FETCH = [
+        ("NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1/models", "nvidia",
+         "https://integrate.api.nvidia.com/v1"),
+        ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/models", "openrouter",
+         "https://openrouter.ai/api/v1"),
     ]
-    for env, mdl, base in _FALLBACK_MODELS:
+    for env, url, pname, base in _PROVIDER_FETCH:
         if os.environ.get(env, "").strip():
-            return (env, mdl, base)
+            try:
+                import urllib.request as _ur
+                req = _ur.Request(url, headers={
+                    "Authorization": f"Bearer {os.environ[env]}",
+                    "User-Agent": "doomalaysocreate/1.0",
+                })
+                with _ur.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode())
+                models = data.get("data", [])
+                if models:
+                    # Pick the first model (or a preferred one if available)
+                    _PREFERRED = ["glm-5.2", "kimi-k2.6", "deepseek-v4-flash", "llama-3.3-70b"]
+                    chosen = None
+                    for pref in _PREFERRED:
+                        for m in models:
+                            mid = m.get("id", "")
+                            if pref in mid.lower():
+                                chosen = mid
+                                break
+                        if chosen:
+                            break
+                    if not chosen:
+                        chosen = models[0].get("id", "")
+                    if chosen:
+                        # Add openai/ prefix for LiteLLM routing
+                        litellm_model = f"openai/{chosen}"
+                        log_event("pick_open_llm_live_fetch", provider=pname, model=litellm_model)
+                        return (env, litellm_model, base)
+            except Exception as e:
+                log_event("pick_open_llm_fetch_error", provider=pname, error=str(e)[:200])
     return None
 
 
@@ -875,10 +916,10 @@ class StrandsAdapter(BaseAdapter):
             client_args["api_base"] = base_url
         if extra_headers:
             client_args["extra_headers"] = extra_headers
-        # stream=False: use non-streaming mode. Some providers (OpenRouter free,
-        # NVIDIA) don't return toolUseId in streaming tool_use deltas → KeyError
-        # in Strands' event loop. Non-streaming mode processes the full response
-        # at once and _process_tool_calls generates UUIDs for missing IDs.
+        # stream=True: streaming mode releases the GIL between token chunks,
+        # which allows the thread timeout to fire if the LLM hangs. Also gives
+        # the user real-time token-by-token feedback. Modern Strands handles
+        # streaming tool_use correctly (generates UUIDs for missing toolUseIds).
         #
         # PROGRAMMATIC SKILL INVOCATION (PROVIDER-SKILLS task):
         # resolve the per-(provider, model) reasoning body from
@@ -925,7 +966,7 @@ class StrandsAdapter(BaseAdapter):
         # Add a timeout so LiteLLM doesn't hang forever on an unresponsive
         # provider. 60s is generous for reasoning models but bounded.
         client_args["timeout"] = 60
-        llm_kwargs = dict(client_args=client_args, model_id=model, stream=False)
+        llm_kwargs = dict(client_args=client_args, model_id=model, stream=True)
         if extra_body:
             # Strands LiteLLMModel forwards additional_request_params as
             # **kwargs to litellm.completion(), which forwards extra_body
@@ -1313,36 +1354,39 @@ class StrandsAdapter(BaseAdapter):
             self.agent.callback_handler = _stream_callback
         except Exception:
             pass
-        # Run the agent call with a timeout so a hanging LLM (e.g. an
-        # unavailable model that accepts the connection but never responds)
-        # doesn't block the turn forever. 120s is generous for reasoning
-        # models but still bounded.
+        # Run the agent call with a thread + timeout. The GIL means we can't
+        # hard-kill a blocking C extension call, but we CAN set a timeout and
+        # process whatever messages were produced so far (best-effort).
+        # After the timeout, we emit an error and move on — the daemon thread
+        # continues in the background but doesn't block the user.
         import threading as _threading
         _agent_error: list = []
+        _agent_done = {"done": False}
+        _TIMEOUT_S = 90
+
         def _run_agent():
             try:
                 log_event("agent_call_start", session_id=getattr(self._session, 'id', '?'),
                           model=self.resolved_model)
                 resp = self.agent(user_msg)
+                _agent_done["done"] = True
                 log_event("agent_call_done", session_id=getattr(self._session, 'id', '?'))
             except Exception as e:
                 log_event("agent_call_error", error=str(e)[:200])
                 _agent_error.append(e)
+
         _t = _threading.Thread(target=_run_agent, daemon=True)
         _t.start()
-        _t.join(timeout=45)
-        if _t.is_alive():
-            # Timed out — the LLM call is still running in the background
-            # thread. Emit an error so the user sees feedback.
-            emit({"type": "error", "error": "model timed out (45s) — try a different model or provider"})
-            try:
-                canceler = getattr(self.agent, "cancel", None)
-                if callable(canceler):
-                    canceler()
-            except Exception:
-                pass
+        _t.join(timeout=_TIMEOUT_S)
+        if not _agent_done["done"]:
+            log_event("agent_call_timeout", session_id=getattr(self._session, 'id', '?'),
+                      timeout_s=_TIMEOUT_S)
+            emit({"type": "error",
+                  "error": f"model timed out ({_TIMEOUT_S}s) — try a different model"})
+            # Process whatever messages were produced so far (best-effort)
         if _agent_error:
-            raise _agent_error[0]
+            # Don't raise — emit the error and continue processing messages
+            emit({"type": "error", "error": str(_agent_error[0])[:200]})
         # Walk newly-appended messages for tool results and final assistant text
         msgs = getattr(self.agent, "messages", []) or []
         for m in msgs[self._msg_cursor:]:
