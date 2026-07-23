@@ -1378,10 +1378,15 @@ class Handler(BaseHTTPRequestHandler):
             # === T8: Template system ===
             def t8():
                 import template_library
-                tpls = template_library.list_my_templates(user_id=None)
-                if tpls:
-                    return f"Templates available: {len(tpls)} (e.g. {tpls[0].get('name','?')[:30]})"
-                raise Exception("No templates found")
+                # Check both user templates and public/default templates
+                my_tpls = template_library.list_my_templates(user_id=None)
+                pub_tpls, total = template_library.list_public_templates(
+                    sort="hearts", limit=5, offset=0, user_id=None)
+                all_tpls = my_tpls + pub_tpls
+                if all_tpls:
+                    names = [t.get("name","?")[:20] for t in all_tpls[:5]]
+                    return f"Templates: {len(my_tpls)} mine + {total} public. Examples: {names}"
+                raise Exception("No templates found (neither mine nor public)")
             _test("T8: Template system", t8)
 
             # === T9: Model roster (dynamic fetch) ===
