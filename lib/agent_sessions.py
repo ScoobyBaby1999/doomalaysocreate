@@ -28,6 +28,8 @@ import asyncio
 import importlib.util
 import json
 import os
+
+from oplog import log_event
 import queue
 import shutil
 import threading
