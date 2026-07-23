@@ -1601,7 +1601,18 @@ class Handler(BaseHTTPRequestHandler):
         # No sensitive data (no keys, no tokens, no user data).
         if route == "/api/debug/public":
             import debug_log as _dl
-            logs = _dl.get_recent_logs(tail=200)
+            logs_raw = _dl.get_recent_logs(tail=200)
+            # Normalize log format: oplog.log_entry stores in 'data'+'msg',
+            # debug_log.log_event stores in 'fields'. Merge both.
+            logs = []
+            for r in logs_raw:
+                logs.append({
+                    "ts": r.get("ts", ""),
+                    "cat": r.get("cat", r.get("kind", "")),
+                    "level": r.get("level", "INFO"),
+                    "msg": r.get("msg", ""),
+                    "fields": r.get("fields", r.get("data", {})),
+                })
             active_sessions = 0
             try:
                 import agent_sessions as _as
