@@ -1323,11 +1323,11 @@ class StrandsAdapter(BaseAdapter):
                 _agent_error.append(e)
         _t = _threading.Thread(target=_run_agent, daemon=True)
         _t.start()
-        _t.join(timeout=120)
+        _t.join(timeout=45)
         if _t.is_alive():
             # Timed out — the LLM call is still running in the background
             # thread. Emit an error so the user sees feedback.
-            emit({"type": "error", "error": "model timed out (120s) — try a different model or provider"})
+            emit({"type": "error", "error": "model timed out (45s) — try a different model or provider"})
             try:
                 canceler = getattr(self.agent, "cancel", None)
                 if callable(canceler):
