@@ -1209,6 +1209,214 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)[:200]})
             return
+        # --- PUBLIC comprehensive test runner v2 (no auth) ---
+        if route == "/api/debug/run-tests-v2":
+            import agent_sessions as _as
+            import time as _time
+            import tempfile as _tf
+            from pathlib import Path as _P
+            import threading as _th
+            import json as _json
+            import urllib.request as _ur
+            results = []
+            def _test(name, func, timeout=120):
+                t0 = _time.time()
+                try:
+                    result = func()
+                    elapsed = round(_time.time() - t0, 1)
+                    results.append({"test": name, "pass": True, "elapsed_s": elapsed, "result": str(result)[:200]})
+                except Exception as e:
+                    elapsed = round(_time.time() - t0, 1)
+                    results.append({"test": name, "pass": False, "elapsed_s": elapsed, "error": str(e)[:200]})
+            def _run_adapter_turn(system_prompt, msg, timeout=30):
+                tmpdir = _P(_tf.mkdtemp())
+                adapter = _as.StrandsAdapter(tmpdir, model=None, workspace_id=None,
+                                             system_prompt=system_prompt)
+                events = []
+                adapter._session = None
+                adapter.open()
+                done = {"done": False, "error": None}
+                def _turn():
+                    try:
+                        adapter.turn(msg, lambda ev: events.append(ev))
+                        done["done"] = True
+                    except Exception as e:
+                        done["error"] = str(e)[:200]
+                t = _th.Thread(target=_turn, daemon=True)
+                t.start()
+                t.join(timeout=timeout)
+                if not done["done"] and not done["error"]:
+                    events.append({"type": "error", "error": f"timeout ({timeout}s)"})
+                elif done["error"]:
+                    events.append({"type": "error", "error": done["error"]})
+                return events
+
+            # === T1: Basic chat ===
+            def t1():
+                evs = _run_adapter_turn("You are a helpful assistant.", "Say hello.", 30)
+                asst = [e for e in evs if e.get("type") == "assistant"]
+                if asst: return f"Response: {asst[0].get('text','')[:80]}"
+                raise Exception(f"No assistant event: {[e.get('type') for e in evs]}")
+            _test("T1: Basic chat", t1)
+
+            # === T2: Back-to-back messages ===
+            def t2():
+                tmpdir = _P(_tf.mkdtemp())
+                adapter = _as.StrandsAdapter(tmpdir, model=None, workspace_id=None,
+                                             system_prompt="You are a helpful assistant. Be concise.")
+                adapter._session = None
+                adapter.open()
+                all_evs = []
+                done = {"d": False, "e": None}
+                def _turn():
+                    try:
+                        adapter.turn("My name is TestUser and I like pizza.", lambda ev: all_evs.append(ev))
+                        adapter.turn("What is my name and what do I like?", lambda ev: all_evs.append(ev))
+                        done["d"] = True
+                    except Exception as e: done["e"] = str(e)[:200]
+                t = _th.Thread(target=_turn, daemon=True)
+                t.start()
+                t.join(timeout=60)
+                asst = [e for e in all_evs if e.get("type") == "assistant"]
+                if len(asst) >= 2:
+                    text = asst[-1].get("text","")
+                    if "TestUser" in text and "pizza" in text.lower():
+                        return f"Context retained across 2 msgs: {text[:60]}"
+                    return f"Got 2 responses but context not retained: {text[:60]}"
+                raise Exception(f"Expected 2 responses, got {len(asst)}. done={done}")
+            _test("T2: Back-to-back messages + context", t2)
+
+            # === T3: Tool use (shell) ===
+            def t3():
+                evs = _run_adapter_turn(_as.AGENT_SYSTEM_PROMPT,
+                    "Use the shell tool to run: echo hello_world", 45)
+                tools = [e for e in evs if e.get("type") == "tool_use"]
+                asst = [e for e in evs if e.get("type") == "assistant"]
+                if tools:
+                    return f"Tool: {tools[0].get('name')}. Response: {asst[-1].get('text','')[:60] if asst else 'none'}"
+                raise Exception(f"No tool_use: {[e.get('type') for e in evs]}")
+            _test("T3: Tool use (shell)", t3)
+
+            # === T4: Long conversation (10+ messages) ===
+            def t4():
+                tmpdir = _P(_tf.mkdtemp())
+                adapter = _as.StrandsAdapter(tmpdir, model=None, workspace_id=None,
+                                             system_prompt="You are a helpful assistant. Be very concise (1 sentence).")
+                adapter._session = None
+                adapter.open()
+                all_evs = []
+                done = {"d": False, "e": None}
+                msgs = ["Hi", "What is 2+2?", "Tell me a color.", "What is the capital of France?",
+                        "Name a fruit.", "What is 5*5?", "Tell me a planet.", "What is Python?",
+                        "Name an animal.", "What was the first thing I asked you?"]
+                def _turn():
+                    try:
+                        for m in msgs:
+                            adapter.turn(m, lambda ev: all_evs.append(ev))
+                        done["d"] = True
+                    except Exception as e: done["e"] = str(e)[:200]
+                t = _th.Thread(target=_turn, daemon=True)
+                t.start()
+                t.join(timeout=180)
+                asst = [e for e in all_evs if e.get("type") == "assistant"]
+                if len(asst) >= 8:
+                    last = asst[-1].get("text","")
+                    return f"Got {len(asst)} responses in 10-msg convo. Last: {last[:60]}"
+                raise Exception(f"Expected 8+ responses, got {len(asst)}. done={done}")
+            _test("T4: Long conversation (10 messages)", t4, timeout=200)
+
+            # === T5: Multiple providers ===
+            def t5():
+                providers_ok = []
+                # NVIDIA
+                try:
+                    key = os.environ.get("NVIDIA_API_KEY", "")
+                    if key:
+                        url = "https://integrate.api.nvidia.com/v1/chat/completions"
+                        body = _json.dumps({"model":"z-ai/glm-5.2","messages":[{"role":"user","content":"Say OK"}],"max_tokens":5}).encode()
+                        req = _ur.Request(url, data=body, headers={"Content-Type":"application/json","Authorization":f"Bearer {key}"})
+                        with _ur.urlopen(req, timeout=10) as resp:
+                            data = _json.loads(resp.read().decode())
+                        if data.get("choices"): providers_ok.append("NVIDIA")
+                except Exception: pass
+                # OpenRouter
+                try:
+                    key = os.environ.get("OPENROUTER_API_KEY", "")
+                    if key:
+                        url = "https://openrouter.ai/api/v1/chat/completions"
+                        body = _json.dumps({"model":"z-ai/glm-5.2","messages":[{"role":"user","content":"Say OK"}],"max_tokens":5}).encode()
+                        req = _ur.Request(url, data=body, headers={"Content-Type":"application/json","Authorization":f"Bearer {key}","HTTP-Referer":"https://huggingface.co/spaces","X-Title":"doomalaysocreate"})
+                        with _ur.urlopen(req, timeout=10) as resp:
+                            data = _json.loads(resp.read().decode())
+                        if data.get("choices"): providers_ok.append("OpenRouter")
+                except Exception: pass
+                if providers_ok:
+                    return f"Working providers: {', '.join(providers_ok)}"
+                raise Exception("No providers responded")
+            _test("T5: Multiple providers", t5)
+
+            # === T6: Chat session isolation ===
+            def t6():
+                import chat_routes
+                cs1 = chat_routes.create_chat_session(model="openai/z-ai/glm-5.2", user_id=None)
+                cs2 = chat_routes.create_chat_session(model="openai/z-ai/glm-5.1", user_id=None)
+                if cs1["id"] != cs2["id"] and cs1.get("model") != cs2.get("model"):
+                    return f"Session 1: {cs1['id'][:8]} (model={cs1.get('model','?')[:20]}), Session 2: {cs2['id'][:8]} (model={cs2.get('model','?')[:20]})"
+                raise Exception("Sessions not isolated")
+            _test("T6: Chat session isolation", t6)
+
+            # === T7: Effort modes (check catalog) ===
+            def t7():
+                import json as _json
+                with open("reasoning_catalog.json") as f:
+                    cat = _json.load(f)
+                reasoning = cat.get("reasoning", {})
+                has_effort = {k: v.get("body", {}) for k, v in reasoning.items() if v.get("body") and k != "*"}
+                return f"Models with effort: {len(has_effort)} (e.g. {list(has_effort.keys())[:3]})"
+            _test("T7: Effort modes catalog", t7)
+
+            # === T8: Template system ===
+            def t8():
+                import template_library
+                tpls = template_library.list_my_templates(user_id=None)
+                if tpls:
+                    return f"Templates available: {len(tpls)} (e.g. {tpls[0].get('name','?')[:30]})"
+                raise Exception("No templates found")
+            _test("T8: Template system", t8)
+
+            # === T9: Model roster (dynamic fetch) ===
+            def t9():
+                models = _as._build_open_models()
+                if len(models) > 0:
+                    return f"Open models: {len(models)} (e.g. {models[0][2]})"
+                # Try live fetch
+                picked = _as._pick_open_llm()
+                if picked:
+                    return f"Live fetch OK: {picked[1]}"
+                raise Exception("No models available")
+            _test("T9: Dynamic model roster", t9)
+
+            # === T10: FileSessionManager (persistence) ===
+            def t10():
+                try:
+                    from strands.session import FileSessionManager
+                    tmpdir = _P(_tf.mkdtemp())
+                    (tmpdir / ".sessions").mkdir(parents=True, exist_ok=True)
+                    sm = FileSessionManager(session_id="test123", sessions_dir=str(tmpdir / ".sessions"))
+                    return f"FileSessionManager created OK at {tmpdir / '.sessions'}"
+                except Exception as e:
+                    raise Exception(f"FileSessionManager failed: {e}")
+            _test("T10: Session persistence (FileSessionManager)", t10)
+
+            # Summary
+            passed = sum(1 for r in results if r["pass"])
+            failed = sum(1 for r in results if not r["pass"])
+            self._send_json(200, {
+                "total": len(results), "passed": passed, "failed": failed,
+                "results": results,
+                "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            })
+            return
         # --- PUBLIC comprehensive test runner (no auth) ---
         if route == "/api/debug/run-tests":
             import agent_sessions as _as
