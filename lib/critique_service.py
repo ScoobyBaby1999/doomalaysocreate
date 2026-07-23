@@ -1433,6 +1433,67 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/debug/test-chat":
             import agent_sessions as _as
             import time as _time
+            from pathlib import Path as _P
+            import tempfile as _tf
+            try:
+                # Test the adapter DIRECTLY (no AgentSession overhead)
+                tmpdir = _P(_tf.mkdtemp())
+                adapter = _as.StrandsAdapter(tmpdir, model=None,
+                                             workspace_id=None,
+                                             system_prompt="You are a helpful assistant. Reply concisely.")
+                events = []
+                def _emit(ev):
+                    events.append(ev)
+                # Subscribe is not needed — adapter.turn calls emit directly
+                t0 = _time.time()
+                try:
+                    adapter.open()
+                    events.append({"type": "status", "state": "adapter_opened",
+                                   "resolved_model": adapter.resolved_model,
+                                   "resolved_provider": adapter.resolved_provider})
+                    # Run turn with a 30s timeout
+                    import threading as _th
+                    _done = {"done": False, "error": None}
+                    def _turn():
+                        try:
+                            adapter.turn("Say hello in one word.", _emit)
+                            _done["done"] = True
+                        except Exception as e:
+                            _done["error"] = str(e)[:200]
+                    _t = _th.Thread(target=_turn, daemon=True)
+                    _t.start()
+                    _t.join(timeout=30)
+                    elapsed = _time.time() - t0
+                    if not _done["done"]:
+                        events.append({"type": "error", "error": f"turn timed out (30s), elapsed={elapsed:.1f}s"})
+                    elif _done["error"]:
+                        events.append({"type": "error", "error": _done["error"]})
+                    else:
+                        events.append({"type": "status", "state": "turn_done", "elapsed_s": round(elapsed, 1)})
+                except Exception as e:
+                    events.append({"type": "error", "error": f"adapter.open failed: {e}"})
+                self._send_json(200, {
+                    "ok": True,
+                    "adapter": {
+                        "type": type(adapter).__name__,
+                        "resolved_model": adapter.resolved_model,
+                        "resolved_provider": adapter.resolved_provider,
+                    },
+                    "events": events[:30],
+                    "event_count": len(events),
+                    "elapsed_s": round(_time.time() - t0, 1),
+                })
+            except Exception as exc:
+                import traceback as _tb
+                self._send_json(500, {
+                    "ok": False,
+                    "error": str(exc)[:300],
+                    "traceback": _tb.format_exc()[:500],
+                })
+            return
+        if route == "/api/debug/test-chat-full":
+            import agent_sessions as _as
+            import time as _time
             try:
                 # Create a session with a specific model to avoid pick issues
                 sess = _as.get_or_create(None, model="openai/z-ai/glm-5.2",
