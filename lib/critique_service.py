@@ -1406,9 +1406,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Subscribe to events BEFORE submitting (no race)
                 q = sess.subscribe(0)
                 sess.submit("Hi")
-                # Collect events for up to 30s (give the LLM time to respond)
+                # Collect events for up to 60s (give the LLM time to respond)
                 events = []
-                deadline = _time.time() + 30
+                deadline = _time.time() + 60
                 while _time.time() < deadline:
                     try:
                         ev = q.get(timeout=1)
