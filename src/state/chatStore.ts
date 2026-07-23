@@ -322,6 +322,22 @@ export function eventsToMessages(events: AgentEvent[]): ChatMessage[] {
 
     switch (ev.type) {
       case "user": {
+        // ISSUE-3 (RESPONSIVE-FIX): dedup user events when loading from the
+        // DB. If the previous message is ALSO a user message with the same
+        // content (within a 5-second window), skip this event — it's a
+        // duplicate emit. This catches persisted events that were accidentally
+        // double-stored (e.g. backend emit + frontend persistEvents both
+        // wrote the same event with different seqs).
+        const evText = (ev.text || "").trim();
+        if (evText && messages.length > 0) {
+          const last = messages[messages.length - 1];
+          if (last.role === "user" &&
+              last.content.trim() === evText &&
+              Math.abs(last.timestamp - ts) < 5000) {
+            // Skip — duplicate user event.
+            break;
+          }
+        }
         messages.push({
           id: genMsgId(),
           role: "user",
@@ -334,6 +350,33 @@ export function eventsToMessages(events: AgentEvent[]): ChatMessage[] {
         break;
       }
       case "assistant": {
+        // ISSUE-2/ISSUE-3 (RESPONSIVE-FIX): If there's a streaming assistant
+        // message (from assistant_delta events), finalize it with this
+        // content instead of pushing a new message. This handles the case
+        // where the backend emitted BOTH deltas AND a final assistant event
+        // (e.g. old persisted events before the streaming fix). The streaming
+        // bubble's content is replaced with the final text.
+        if (streamingAssistantIdx !== -1) {
+          const cur = messages[streamingAssistantIdx];
+          messages[streamingAssistantIdx] = {
+            ...cur,
+            content: ev.text || cur.content,
+            isStreaming: false,
+            seq,
+          };
+          streamingAssistantIdx = -1;
+          streamingThinkingIdx = -1;
+          break;
+        }
+        // ISSUE-3: dedup — if the previous message is an assistant message
+        // with the exact same content, skip (duplicate emit).
+        const aText = (ev.text || "").trim();
+        if (aText && messages.length > 0) {
+          const last = messages[messages.length - 1];
+          if (last.role === "assistant" && last.content.trim() === aText) {
+            break;
+          }
+        }
         messages.push({
           id: genMsgId(),
           role: "assistant",
@@ -574,23 +617,40 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
       // Backend echoes user messages. If we already have a pending user
       // message with the same content (the optimistic one we added locally),
       // mark it ack'd instead of duplicating.
-      const idx = out.findIndex(
-        (m) => m.role === "user" && m.pending && m.content === (ev.text || "")
+      const evText = (ev.text || "");
+      const pendingIdx = out.findIndex(
+        (m) => m.role === "user" && m.pending && m.content === evText
       );
-      if (idx !== -1) {
-        out[idx] = { ...out[idx], pending: false, seq, timestamp: ts };
+      if (pendingIdx !== -1) {
+        out[pendingIdx] = { ...out[pendingIdx], pending: false, seq, timestamp: ts };
         return out;
       }
       // Otherwise, only add if we don't already have this exact seq as a user.
-      if (!out.some((m) => m.role === "user" && m.seq === seq)) {
-        out.push({
-          id: genMsgId(),
-          role: "user",
-          content: ev.text || "",
-          timestamp: ts,
-          seq,
-        });
+      if (out.some((m) => m.role === "user" && m.seq === seq)) {
+        return out;
       }
+      // ISSUE-3 (RESPONSIVE-FIX): Also skip if we already have a NON-pending
+      // user message with the same content within a 5-second window. This
+      // catches the case where the backend re-emits the same user event
+      // with a DIFFERENT seq (e.g. on session restore, SSE reconnect, or
+      // a duplicate emit). Without this, the user would see their message
+      // duplicated in the chat.
+      const evTextTrim = evText.trim();
+      if (evTextTrim && out.some((m) =>
+        m.role === "user" &&
+        !m.pending &&
+        m.content.trim() === evTextTrim &&
+        Math.abs(m.timestamp - ts) < 5000
+      )) {
+        return out;
+      }
+      out.push({
+        id: genMsgId(),
+        role: "user",
+        content: ev.text || "",
+        timestamp: ts,
+        seq,
+      });
       return out;
     }
     case "assistant": {
@@ -1794,12 +1854,16 @@ async function _runTurn(
       set({ _lastEventSeq: 0 });
     }
 
-    // Bug 1 fix: small delay to give the backend a beat to buffer the early
-    // events before we open the SSE stream. Without this, on a brand-new
-    // session the backend's "user echo + first assistant_delta" may already
-    // be in flight by the time our stream connects, and the queue-based SSE
-    // could miss them. 300ms is the same backoff the polling fallback uses.
-    await new Promise((r) => setTimeout(r, 300));
+    // ISSUE-4 (RESPONSIVE-FIX): Reduced the pre-SSE delay from 300ms to 50ms.
+    // The original 300ms delay was added to give the backend time to buffer
+    // early events before the SSE stream connects. But the backend's
+    // subscribe() method uses a lock to atomically snapshot events + register
+    // the queue, so there's no race condition — events emitted BEFORE we
+    // subscribe are in the replay, events emitted AFTER are pushed live.
+    // The 300ms delay made the UI feel sluggish (no streaming cursor for
+    // 300ms after sending a message). 50ms is enough for the HTTP response
+    // to settle without noticeable lag.
+    await new Promise((r) => setTimeout(r, 50));
 
     // Open SSE stream for live events. If SSE fails, fall back to polling.
     await new Promise<void>((resolve) => {
@@ -1816,7 +1880,13 @@ async function _runTurn(
         // Bug 1 dedupe guard: if the SSE stream replays an event we've
         // already seen (ev.i < since), drop it — appendEvent() also dedupes
         // by seq but we skip the work entirely here for clarity.
-        if (typeof ev.i === "number" && ev.i < since - 1 && ev.type !== "assistant_delta" && ev.type !== "thinking_delta" && ev.type !== "thinking") {
+        // ISSUE-3 (RESPONSIVE-FIX): Fixed off-by-one — the previous check
+        // `ev.i < since - 1` let through events with `ev.i === since - 1`
+        // (which have already been seen, since `since` is always one past
+        // the last-seen event's i). The correct check is `ev.i < since`.
+        // Delta events (assistant_delta, thinking_delta) and thinking merges
+        // bypass this because they may share seq numbers with prior events.
+        if (typeof ev.i === "number" && ev.i < since && ev.type !== "assistant_delta" && ev.type !== "thinking_delta" && ev.type !== "thinking") {
           return;
         }
         bufferedEvents.push(ev);

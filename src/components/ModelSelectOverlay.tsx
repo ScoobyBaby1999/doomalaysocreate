@@ -29,10 +29,16 @@ function IcoSettings() {
   );
 }
 function IcoShield() {
+  // BATCH-3 Task 1 — IcoShield is now unused (the privacy notice button
+  // was removed per the user's request). Kept here so any future code can
+  // re-import it without a refactor. Marked `void` to silence the TS unused
+  // warning.
+  void 0;
   return (
     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
   );
 }
+void IcoShield;
 function IcoRefresh({ spinning }: { spinning?: boolean }) {
   return (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={spinning ? "animate-spin" : ""}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
@@ -54,11 +60,15 @@ function fmtCtx(k: number): string {
   return String(k);
 }
 
+// BATCH-3 Task 1 — confidenceDotColor is now unused (the privacy notice
+// button that used it was removed per the user's request). Kept here so any
+// future code can re-import it without a refactor.
 function confidenceDotColor(c: "high" | "medium" | "low"): string {
   if (c === "high") return "#22c55e";
   if (c === "medium") return "#f59e0b";
   return "#ef4444";
 }
+void confidenceDotColor;
 
 function syncedAgoLabel(iso: string | null): string {
   if (!iso) return "";
@@ -269,7 +279,13 @@ function saveProviderBoxExpanded(map: Record<string, boolean>) {
   try { localStorage.setItem(PROVIDER_BOX_EXPANDED_KEY, JSON.stringify(map)); } catch { /* ignore */ }
 }
 
-// ── ModelRow (used inside ProviderBox) — condensed single-line format ────
+// ── ModelRow (used inside ProviderBox) — SINGLE-LINE flexbox row ────────
+// BATCH-3 Task 1 (3rd time fix): completely simplified to a single-line
+// flex row so the rows can NEVER overlap. Layout is:
+//   [check] [model name (flex-1 truncate)] [context] [pricing]
+// No flex-wrap, no second line of segs, no min-height tricks. The whole
+// row is `min-h-[36px]` + `border-b border-white/5` so each row is a
+// discrete stripe with a clear separator.
 const ModelRow = memo(function ModelRow({
   model,
   isSelected,
@@ -281,65 +297,49 @@ const ModelRow = memo(function ModelRow({
   onSelect: () => void;
   dimmed?: boolean;
 }) {
-  const segs = model.attributes ? attributeSegments(model.attributes) : null;
-  const note = model.attributes?.note;
-  const hasSub = !!(segs || note);
-
+  const pricing = model.attributes?.pricing;
   return (
     <button
       onClick={onSelect}
       data-selected={isSelected ? "true" : undefined}
       aria-pressed={isSelected}
       className={`
-        flex flex-col w-full text-left px-2 py-1.5 min-h-[40px] border-b border-white/5 overflow-hidden transition-colors duration-100 cursor-pointer touch-target
-        ${isSelected ? "bg-accent/20 ring-1 ring-accent/40" : dimmed ? "" : "hover:bg-muted/40"}
-        ${dimmed && !isSelected ? "opacity-35" : ""}
+        flex items-center w-full text-left gap-2 px-2.5 min-h-[36px] border-b border-white/5
+        transition-colors duration-100 cursor-pointer touch-target
+        ${isSelected ? "bg-accent/15" : dimmed ? "" : "hover:bg-muted/40"}
+        ${dimmed && !isSelected ? "opacity-40" : ""}
       `}
     >
-      {/* Single-line row: [check] [model name] [context] */}
-      <span className="flex items-center w-full gap-1.5">
-        <span
-          className="flex-shrink-0 flex items-center justify-center rounded-full"
-          style={{
-            width: 14, height: 14, fontSize: 0,
-            border: isSelected ? "none" : "1.5px solid var(--border)",
-            backgroundColor: isSelected ? "#a855f7" : "transparent",
-          }}
-        >
-          {isSelected && <IcoCheck />}
-        </span>
-        <span
-          className={`text-[12px] leading-tight truncate flex-1 font-medium ${isSelected ? "text-white" : "text-foreground"}`}
-          title={model.id}
-        >
-          {model.displayName}
-        </span>
-        <span className="flex-shrink-0 text-[10px] text-muted-foreground tabular-nums">
-          {fmtCtx(model.contextLength)}
-        </span>
+      {/* Radio/check indicator (left, fixed). */}
+      <span
+        className="flex-shrink-0 flex items-center justify-center rounded-full"
+        style={{
+          width: 12, height: 12, fontSize: 0,
+          border: isSelected ? "none" : "1.5px solid var(--border)",
+          backgroundColor: isSelected ? "#a855f7" : "transparent",
+        }}
+      >
+        {isSelected && <IcoCheck />}
       </span>
-
-      {hasSub && (
-        <div className="flex flex-wrap gap-x-1 gap-y-px mt-0.5 pl-5 pr-1">
-          {segs && segs.map((s, i) =>
-            s.text === " \u00b7 " ? null : (
-              <span
-                key={i}
-                className="text-[9px] leading-none px-1 py-px rounded-sm"
-                style={s.color ? { color: dimmed ? undefined : s.color, backgroundColor: `${s.color}12` } : { color: dimmed ? undefined : "var(--muted-foreground)" }}
-              >
-                {s.text}
-              </span>
-            )
-          )}
-          {note && (
-            <span
-              className={`text-[9px] leading-none px-1 py-px rounded-sm ${note.startsWith("\u26a0") ? "text-amber-600 dark:text-amber-500 bg-amber-500/10" : "text-muted-foreground/70 bg-muted/30"}`}
-            >
-              {note}
-            </span>
-          )}
-        </div>
+      {/* Model name (flex-1, truncate). text-xs = 12px. */}
+      <span
+        className={`flex-1 min-w-0 truncate text-xs leading-tight font-medium ${isSelected ? "text-white" : "text-foreground"}`}
+        title={model.id}
+      >
+        {model.displayName}
+      </span>
+      {/* Context length (fixed, right-aligned). text-[10px]. */}
+      <span className="flex-shrink-0 text-[10px] text-muted-foreground tabular-nums">
+        {fmtCtx(model.contextLength)}
+      </span>
+      {/* Pricing (fixed, right-aligned). text-[10px]. Hidden if no pricing. */}
+      {pricing && (
+        <span
+          className="flex-shrink-0 text-[10px] tabular-nums px-1.5 py-px rounded-sm bg-muted/40 text-muted-foreground max-w-[80px] truncate"
+          title={pricing}
+        >
+          {pricing}
+        </span>
       )}
     </button>
   );
@@ -433,6 +433,9 @@ function ProviderBox({
       // Drop target — the entire box accepts drops from sibling boxes.
       onDragOver={onDragOverBox}
       onDrop={onDropOnBox}
+      // BATCH-3 Task 1 — overflow-hidden on collapsed so children never
+      // leak; overflow-visible on expanded so dropdowns/popovers inside
+      // model rows can extend beyond the box.
       className={`flex flex-col rounded-xl border transition-colors ${
         expanded ? "overflow-visible" : "overflow-hidden"
       } ${
@@ -441,13 +444,8 @@ function ProviderBox({
       style={{ borderColor: isDragTarget ? undefined : `${provider.color}30` }}
     >
       {/* Header — drag handle (left, desktop only) + tap-to-expand (middle)
-          + gear (right). BATCH-2 Task 5.11 — cleaned up the header so the
-          rows don't overlap on mobile:
-            • Drag handle hidden on mobile (DnD is desktop-only; touch users
-              use the arrow buttons inside the expanded view).
-            • Up/Down arrow buttons moved OUT of the header into the expanded
-              body (less clutter, more room for the provider name).
-            • Provider name uses a smaller font on mobile so it fits. */}
+          + gear (right). BATCH-3 Task 1 — kept the compact header from
+          BATCH-2 (it works), only the body below was redesigned. */}
       <div
         className="flex items-center gap-1 px-2 shrink-0 min-h-[44px]"
         style={{ backgroundColor: `${provider.color}0d`, borderBottom: expanded ? `1px solid ${provider.color}1f` : "none" }}
@@ -498,62 +496,19 @@ function ProviderBox({
         </button>
       </div>
 
-      {/* BATCH-2 Task 5.11 — touch-friendly up/down reorder buttons, now
-          inside the expanded view (out of the cramped header). Desktop
-          users can still drag the handle in the header. */}
-      {expanded && (
-        <div className="flex items-center gap-1 px-2 py-1 border-b border-border/30 bg-surface/20 shrink-0">
-          <span className="text-[9.5px] text-muted-foreground/60 uppercase tracking-wide shrink-0">Reorder</span>
-          <div className="flex gap-px ml-auto shrink-0">
-            <button
-              onClick={(e) => { e.stopPropagation(); onMoveUp(); }}
-              disabled={isFirst}
-              className="touch-target size-7 flex items-center justify-center rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
-              title="Move provider up"
-              aria-label="Move provider up"
-            >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
-            </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); onMoveDown(); }}
-              disabled={isLast}
-              className="touch-target size-7 flex items-center justify-center rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
-              title="Move provider down"
-              aria-label="Move provider down"
-            >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
-            </button>
-          </div>
-        </div>
-      )}
+      {/* BATCH-3 Task 1 — removed the privacy notice button that linked
+          to the privacy page (user said to remove them). The settings
+          gear in the header is enough — it opens ProvidersDialog with
+          the privacy info. */}
 
-      {/* Privacy notice — still tappable to open settings. */}
+      {/* Model list — only rendered when expanded. BATCH-3 Task 1 (3rd
+          time fix): single-column flexbox, NO gap between rows (each row
+          has border-b border-white/5), NO cv-auto / content-visibility,
+          NO flex-wrap. Each row is a single-line flex with min-h-[36px]
+          and a bottom border. This is the simplest possible layout that
+          cannot overlap. */}
       {expanded && (
-        <button
-          onClick={openSettings}
-          className="flex items-center gap-1.5 px-3 shrink-0 text-left hover:brightness-95 dark:hover:brightness-110 transition-all min-h-[28px]"
-          style={{
-            borderBottom: `1px solid ${confidenceDotColor(provider.privacy.confidence)}25`,
-            backgroundColor: `${confidenceDotColor(provider.privacy.confidence)}0d`,
-          }}
-          title={provider.privacy.notice}
-        >
-          <span className="shrink-0" style={{ color: confidenceDotColor(provider.privacy.confidence) }}>
-            <IcoShield />
-          </span>
-          <span className="text-[10px] leading-none text-muted-foreground truncate flex-1 py-1.5">
-            {provider.privacy.notice}
-          </span>
-        </button>
-      )}
-
-      {/* Model list — only rendered when expanded. FE-COMPLETION Task 4:
-          gap-2 + min-h-[40px] rows + removed cv-auto (it caused perceived
-          overlap because contain-intrinsic-size was 64px but rows are 40px,
-          so the browser painted 24px of empty space over the next row when
-          scrolling). Flexbox column layout — never CSS columns/masonry. */}
-      {expanded && (
-        <div className="flex flex-col p-1.5 max-h-[50vh] overflow-y-auto">
+        <div className="flex flex-col max-h-[50vh] overflow-y-auto bg-surface/20">
           {empty ? (
             <div className="flex items-center justify-center h-10 text-[11px] text-muted-foreground/50">
               no models synced
@@ -572,7 +527,7 @@ function ProviderBox({
                 <>
                   <button
                     onClick={() => setShowDimmed((v) => !v)}
-                    className="touch-target flex items-center gap-1.5 px-2 py-1 mt-0.5 border-t border-border/30 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors cursor-pointer select-none min-h-[28px] w-full text-left"
+                    className="touch-target flex items-center gap-1.5 px-2.5 py-1.5 border-b border-white/5 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors cursor-pointer select-none min-h-[32px] w-full text-left"
                   >
                     <span
                       className="text-[10px] leading-none transition-transform duration-150"
@@ -581,7 +536,7 @@ function ProviderBox({
                       {"\u25b8"}
                     </span>
                     <span className="text-[9px] leading-none">
-                      {showDimmed ? `Hide ${dimmed.length} dimmed` : `Show ${dimmed.length} dimmed`}
+                      {showDimmed ? `Hide ${dimmed.length} filtered out` : `Show ${dimmed.length} filtered out`}
                     </span>
                   </button>
                   {showDimmed && dimmed.map((m) => (
@@ -597,6 +552,32 @@ function ProviderBox({
               )}
             </>
           )}
+          {/* Reorder controls — kept at the BOTTOM of the expanded body so
+              they don't take space at the top and the model list is the
+              primary content. */}
+          <div className="flex items-center gap-1 px-2.5 py-1.5 border-t border-white/5 mt-auto shrink-0 bg-surface/40">
+            <span className="text-[9.5px] text-muted-foreground/60 uppercase tracking-wide shrink-0">Reorder</span>
+            <div className="flex gap-px ml-auto shrink-0">
+              <button
+                onClick={(e) => { e.stopPropagation(); onMoveUp(); }}
+                disabled={isFirst}
+                className="touch-target size-7 flex items-center justify-center rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
+                title="Move provider up"
+                aria-label="Move provider up"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m18 15-6-6-6 6"/></svg>
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onMoveDown(); }}
+                disabled={isLast}
+                className="touch-target size-7 flex items-center justify-center rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-surface2/60 transition-colors disabled:opacity-20"
+                title="Move provider down"
+                aria-label="Move provider down"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -696,7 +677,7 @@ const CondensedModelRow = memo(function CondensedModelRow({
 
   return (
     <div
-      className="flex flex-col w-full text-left rounded-xl px-2 py-1.5 min-h-[36px] overflow-hidden transition-colors duration-100"
+      className="cv-auto flex flex-col w-full text-left rounded-xl px-2 py-1.5 min-h-[36px] overflow-hidden transition-colors duration-100"
       data-selected={isSelected ? "true" : undefined}
     >
       {/* ── Single-line row: [check] [name] [dots] [context] ──────────── */}
@@ -1594,7 +1575,7 @@ export function ModelSelectOverlay() {
                   <div className="p-3 sm:p-4">
                     {/* Single-column list — fixed overlap issues from the
                         old `sm:columns-2` masonry layout. */}
-                    <div className="flex flex-col gap-2">
+                    <div className="flex flex-col space-y-2">
                       {orderedProviders.map((p, idx) => {
                         const isExpanded = !!providerBoxExpanded[p.name];
                         return (

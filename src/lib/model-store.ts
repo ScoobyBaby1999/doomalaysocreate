@@ -110,7 +110,14 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   searchQuery: "",
   activeFilters: loadPersisted<string[]>(`${PREFIX}.activeFilters`, []),
   contextMin: loadPersisted<number>(`${PREFIX}.contextMin`, 0),
-  hideUnavailable: loadPersisted<boolean>(`${PREFIX}.hideUnavailable`, true),
+  // ISSUE-1 (RESPONSIVE-FIX): default to `false` so ALL models show in the
+  // condensed view, with unavailable ones dimmed (opacity-40) instead of
+  // hidden behind a collapsed "Unavailable models (N)" section. Previously
+  // `true` which hid ~150 of the 198 logical models behind a collapsed
+  // section, making it look like only ~50 models were available.
+  // Key renamed (v2) so any pre-fix persisted `true` from the old key is
+  // ignored — every user starts fresh with the new "show all" default.
+  hideUnavailable: loadPersisted<boolean>(`${PREFIX}.hideUnavailable.v2`, false),
   pricingFilter: loadPersisted<"free" | "paid">(`${PREFIX}.pricingFilter`, "free"),
 
   condensedModels: [],
@@ -209,7 +216,7 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   closeOverlay: () => set({ overlayOpen: false, searchQuery: "" }),
   setHideUnavailable: (v: boolean) => {
     set({ hideUnavailable: v });
-    persist(`${PREFIX}.hideUnavailable`, v);
+    persist(`${PREFIX}.hideUnavailable.v2`, v);
   },
 
   setPricingFilter: (v: "free" | "paid") => {
