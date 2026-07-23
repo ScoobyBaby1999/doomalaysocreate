@@ -89,7 +89,16 @@ AGENT_SYSTEM_PROMPT = (
     "recent events. Write decisions and findings to the blackboard so other "
     "agents can see them. "
     "You can git clone repos, install packages, run build tools, and do "
-    "anything a developer terminal can do. Lead with the outcome, not the process."
+    "anything a developer terminal can do. Lead with the outcome, not the process.\n\n"
+    "ISSUE-5 (RESPONSIVE-FIX): TOOL CALLING — The tools listed above are "
+    "available as FUNCTION CALLS via the model's native tool-calling API "
+    "(OpenAI function-calling format). You MUST invoke tools via the "
+    "function-calling mechanism, NOT by emitting tool calls as plain text. "
+    "For example, do NOT write `memory {\"action\": \"read\"}` or "
+    "`shell(command=\"ls\")` as text — instead, emit a function_call with "
+    "the tool name and arguments. The runtime executes the function call "
+    "and returns the result as a tool_result. Emitting tool calls as text "
+    "will NOT execute them — the user will see raw text instead of results."
 )
 
 #   open-tier model routing: dynamically built from providers_catalog.json +
@@ -1326,17 +1335,37 @@ class StrandsAdapter(BaseAdapter):
         _thread_local.workspace = self.workspace
         _thread_local.workspace_id = self.workspace_id
         sess = getattr(self, "_session", None)
-        # Track whether thinking was emitted via the streaming callback.
-        # If so, skip thinking emission in the post-turn walk (which would
-        # duplicate the text). Reset at the start of each turn.
+        # Track whether thinking / assistant text was emitted via the streaming
+        # callback. If so, skip re-emitting it in the post-turn walk (which
+        # would duplicate the text). Reset at the start of each turn.
         self._thinking_streamed = False
-        # Build a streaming callback handler: thinking text in real-time,
-        # plus mid-turn cost ceiling enforcement for conscious agents.
+        # ISSUE-2 (RESPONSIVE-FIX): track assistant text streamed via deltas.
+        # Strands' callback_handler receives `data` (str) for each content
+        # token chunk (see strands/handlers/callback_handler.py — the
+        # PrintingCallbackHandler streams `data` to stdout). We emit each
+        # chunk as an `assistant_delta` event so the frontend can render
+        # token-by-token streaming. The post-turn walk then SKIPS the full
+        # `assistant` event because the streaming bubble already has the
+        # complete text (finalized by the trailing `status: idle` event).
+        self._assistant_streamed = False
+        self._assistant_streamed_text = ""
+
+        # Build a streaming callback handler: thinking text + content deltas
+        # in real-time, plus mid-turn cost ceiling enforcement for conscious
+        # agents.
         def _stream_callback(**kw):
             reasoning = kw.get("reasoningText")
             if reasoning:
                 self._thinking_streamed = True
                 emit({"type": "thinking", "text": reasoning})
+            # ISSUE-2 (RESPONSIVE-FIX): capture content text deltas for
+            # token-by-token streaming. Strands sends `data` (str) for each
+            # text chunk and `complete` (bool) on the final chunk.
+            data = kw.get("data")
+            if data:
+                self._assistant_streamed = True
+                self._assistant_streamed_text = (self._assistant_streamed_text or "") + data
+                emit({"type": "assistant_delta", "text": data})
             # Cost ceiling check (conscious agents only)
             if sess is not None and getattr(sess, "conscious_id", None):
                 if not _cost_turn_ok(sess.conscious_id):
@@ -1399,6 +1428,15 @@ class StrandsAdapter(BaseAdapter):
             emit({"type": "error", "error": str(_agent_error[0])[:200]})
         # Walk newly-appended messages for tool results and final assistant text
         msgs = getattr(self.agent, "messages", []) or []
+        # ISSUE-3 (RESPONSIVE-FIX): Safety check — if the conversation manager
+        # trimmed old messages (SlidingWindowConversationManager with
+        # window_size=40), the cursor may point past the end of the list.
+        # Reset to 0 so we walk all REMAINING messages. This prevents missing
+        # assistant replies in long conversations. (We accept that some
+        # already-emitted tool_use/tool_result events might re-emit — the
+        # frontend dedupes by seq.)
+        if self._msg_cursor > len(msgs):
+            self._msg_cursor = 0
         for m in msgs[self._msg_cursor:]:
             role = m.get("role")
             for block in (m.get("content") or []):
@@ -1429,6 +1467,24 @@ class StrandsAdapter(BaseAdapter):
                         emit({"type": "thinking", "text": _clip(txt)})
                 elif "text" in block and role == "assistant":
                     if block["text"].strip():
+                        # ISSUE-2 (RESPONSIVE-FIX): if the streaming callback
+                        # already streamed the assistant text as deltas, the
+                        # frontend's streaming bubble already has the full
+                        # text (accumulated from assistant_delta events).
+                        # Skip emitting a full `assistant` event because it
+                        # would REPLACE the streaming content (causing visual
+                        # flicker). The trailing `status: idle` event
+                        # finalizes the streaming bubble.
+                        #
+                        # Safety: only skip if we actually streamed something.
+                        # If `_assistant_streamed` is True but
+                        # `_assistant_streamed_text` is empty (edge case where
+                        # the callback was called with `data=""`), fall back
+                        # to emitting the full text so the user always sees a
+                        # reply.
+                        if (getattr(self, "_assistant_streamed", False)
+                                and getattr(self, "_assistant_streamed_text", "")):
+                            continue
                         emit({"type": "assistant", "text": block["text"]})
         self._msg_cursor = len(msgs)
 
