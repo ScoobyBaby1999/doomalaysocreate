@@ -1209,6 +1209,180 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)[:200]})
             return
+        # --- PUBLIC comprehensive test runner (no auth) ---
+        if route == "/api/debug/run-tests":
+            import agent_sessions as _as
+            import time as _time
+            import tempfile as _tf
+            from pathlib import Path as _P
+            import threading as _th
+            results = []
+            def _test(name, func):
+                t0 = _time.time()
+                try:
+                    result = func()
+                    elapsed = round(_time.time() - t0, 1)
+                    results.append({"test": name, "pass": True, "elapsed_s": elapsed, "result": result})
+                except Exception as e:
+                    elapsed = round(_time.time() - t0, 1)
+                    results.append({"test": name, "pass": False, "elapsed_s": elapsed,
+                                    "error": str(e)[:200]})
+            def _run_adapter_turn(system_prompt, msg, timeout=30):
+                """Run a single adapter turn, return events list."""
+                tmpdir = _P(_tf.mkdtemp())
+                adapter = _as.StrandsAdapter(tmpdir, model=None, workspace_id=None,
+                                             system_prompt=system_prompt)
+                events = []
+                adapter._session = None  # safe default
+                adapter.open()
+                done = {"done": False, "error": None}
+                def _turn():
+                    try:
+                        adapter.turn(msg, lambda ev: events.append(ev))
+                        done["done"] = True
+                    except Exception as e:
+                        done["error"] = str(e)[:200]
+                t = _th.Thread(target=_turn, daemon=True)
+                t.start()
+                t.join(timeout=timeout)
+                if not done["done"] and not done["error"]:
+                    events.append({"type": "error", "error": f"timeout ({timeout}s)"})
+                elif done["error"]:
+                    events.append({"type": "error", "error": done["error"]})
+                return events
+
+            # Test 1: Basic chat
+            def test1():
+                evs = _run_adapter_turn("You are a helpful assistant.", "Say hello.", 30)
+                asst = [e for e in evs if e.get("type") == "assistant"]
+                if asst:
+                    return f"Response: {asst[0].get('text','')[:80]}"
+                raise Exception(f"No assistant event. Events: {[e.get('type') for e in evs]}")
+            _test("Basic chat", test1)
+
+            # Test 2: Back-to-back messages
+            def test2():
+                tmpdir = _P(_tf.mkdtemp())
+                adapter = _as.StrandsAdapter(tmpdir, model=None, workspace_id=None,
+                                             system_prompt="You are a helpful assistant. Be concise.")
+                adapter._session = None
+                adapter.open()
+                all_events = []
+                done = {"done": False, "error": None}
+                def _turn():
+                    try:
+                        adapter.turn("My name is TestUser.", lambda ev: all_events.append(ev))
+                        adapter.turn("What is my name?", lambda ev: all_events.append(ev))
+                        done["done"] = True
+                    except Exception as e:
+                        done["error"] = str(e)[:200]
+                t = _th.Thread(target=_turn, daemon=True)
+                t.start()
+                t.join(timeout=60)
+                asst = [e for e in all_events if e.get("type") == "assistant"]
+                if len(asst) >= 2:
+                    return f"Got {len(asst)} responses. Last: {asst[-1].get('text','')[:60]}"
+                raise Exception(f"Expected 2+ responses, got {len(asst)}. done={done}")
+            _test("Back-to-back messages", test2)
+
+            # Test 3: Tool use (shell)
+            def test3():
+                evs = _run_adapter_turn(
+                    _as.AGENT_SYSTEM_PROMPT,
+                    "Use the shell tool to run: echo hello_world. Then tell me the output.",
+                    60)
+                tool_uses = [e for e in evs if e.get("type") == "tool_use"]
+                asst = [e for e in evs if e.get("type") == "assistant"]
+                if tool_uses:
+                    return f"Tool used: {tool_uses[0].get('name','?')}. Assistant: {asst[-1].get('text','')[:60] if asst else 'none'}"
+                raise Exception(f"No tool_use event. Events: {[e.get('type') for e in evs]}")
+            _test("Tool use (shell)", test3)
+
+            # Test 4: Direct LLM (different provider)
+            def test4():
+                import urllib.request as _ur
+                import json as _json
+                # Test NVIDIA
+                key = os.environ.get("NVIDIA_API_KEY", "")
+                if not key:
+                    raise Exception("NVIDIA_API_KEY not set")
+                url = "https://integrate.api.nvidia.com/v1/chat/completions"
+                body = _json.dumps({
+                    "model": "z-ai/glm-5.2",
+                    "messages": [{"role": "user", "content": "Say OK"}],
+                    "max_tokens": 10,
+                }).encode()
+                req = _ur.Request(url, data=body, headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {key}",
+                })
+                with _ur.urlopen(req, timeout=15) as resp:
+                    data = _json.loads(resp.read().decode())
+                text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                return f"NVIDIA response: {text[:50]}"
+            _test("Direct LLM (NVIDIA)", test4)
+
+            # Test 5: OpenRouter (if key set)
+            def test5():
+                import urllib.request as _ur
+                import json as _json
+                key = os.environ.get("OPENROUTER_API_KEY", "")
+                if not key:
+                    return "SKIPPED: OPENROUTER_API_KEY not set"
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                body = _json.dumps({
+                    "model": "z-ai/glm-5.2:free",
+                    "messages": [{"role": "user", "content": "Say OK"}],
+                    "max_tokens": 10,
+                }).encode()
+                req = _ur.Request(url, data=body, headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {key}",
+                    "HTTP-Referer": "https://huggingface.co/spaces",
+                    "X-Title": "doomalaysocreate",
+                })
+                with _ur.urlopen(req, timeout=15) as resp:
+                    data = _json.loads(resp.read().decode())
+                text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                return f"OpenRouter response: {text[:50]}"
+            _test("Direct LLM (OpenRouter)", test5)
+
+            # Test 6: Model roster
+            def test6():
+                import urllib.request as _ur
+                import json as _json
+                key = os.environ.get("NVIDIA_API_KEY", "")
+                url = "https://integrate.api.nvidia.com/v1/models"
+                req = _ur.Request(url, headers={
+                    "Authorization": f"Bearer {key}" if key else "",
+                    "User-Agent": "doomalaysocreate/1.0",
+                })
+                with _ur.urlopen(req, timeout=10) as resp:
+                    data = _json.loads(resp.read().decode())
+                models = data.get("data", [])
+                return f"NVIDIA has {len(models)} models"
+            _test("Model roster (NVIDIA)", test6)
+
+            # Test 7: Chat session creation
+            def test7():
+                import chat_routes
+                cs = chat_routes.create_chat_session(model="openai/z-ai/glm-5.2",
+                                                      workspace_id=None, user_id=None)
+                if cs and cs.get("id"):
+                    return f"Session created: {cs['id'][:8]}... title={cs.get('title','?')}"
+                raise Exception("Failed to create chat session")
+            _test("Chat session creation", test7)
+
+            # Summary
+            passed = sum(1 for r in results if r["pass"])
+            failed = sum(1 for r in results if not r["pass"])
+            self._send_json(200, {
+                "total": len(results),
+                "passed": passed,
+                "failed": failed,
+                "results": results,
+            })
+            return
         # --- PUBLIC diagnostic endpoint (no auth) for live monitoring ---
         # Returns recent ERROR/WARN logs + agent session count + provider status.
         # No sensitive data (no keys, no tokens, no user data).
