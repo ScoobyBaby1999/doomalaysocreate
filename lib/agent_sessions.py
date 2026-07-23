@@ -922,6 +922,9 @@ class StrandsAdapter(BaseAdapter):
                     pass
         except Exception:
             extra_body = {}
+        # Add a timeout so LiteLLM doesn't hang forever on an unresponsive
+        # provider. 60s is generous for reasoning models but bounded.
+        client_args["timeout"] = 60
         llm_kwargs = dict(client_args=client_args, model_id=model, stream=False)
         if extra_body:
             # Strands LiteLLMModel forwards additional_request_params as
