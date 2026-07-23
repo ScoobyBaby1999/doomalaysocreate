@@ -1321,8 +1321,12 @@ class StrandsAdapter(BaseAdapter):
         _agent_error: list = []
         def _run_agent():
             try:
-                self.agent(user_msg)
+                log_event("agent_call_start", session_id=getattr(self._session, 'id', '?'),
+                          model=self.resolved_model)
+                resp = self.agent(user_msg)
+                log_event("agent_call_done", session_id=getattr(self._session, 'id', '?'))
             except Exception as e:
+                log_event("agent_call_error", error=str(e)[:200])
                 _agent_error.append(e)
         _t = _threading.Thread(target=_run_agent, daemon=True)
         _t.start()
