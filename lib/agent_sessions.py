@@ -1362,7 +1362,7 @@ class StrandsAdapter(BaseAdapter):
         import threading as _threading
         _agent_error: list = []
         _agent_done = {"done": False}
-        _TIMEOUT_S = 90
+        _TIMEOUT_S = 30
 
         def _run_agent():
             try:

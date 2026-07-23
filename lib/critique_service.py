@@ -1442,7 +1442,7 @@ class Handler(BaseHTTPRequestHandler):
                 sess.submit("Hi")
                 # Collect events for up to 60s (give the LLM time to respond)
                 events = []
-                deadline = _time.time() + 60
+                deadline = _time.time() + 120
                 while _time.time() < deadline:
                     try:
                         ev = q.get(timeout=1)
