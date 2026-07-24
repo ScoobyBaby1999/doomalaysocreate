@@ -1837,7 +1837,17 @@ async function _runTurn(
   set: (partial: Partial<ChatState> | ((s: ChatState) => Partial<ChatState>)) => void,
   get: () => ChatState,
 ): Promise<void> {
-  // Ensure we have an active chat session.
+  // STRANDS-COMPLETE-FIX (Issue 2): the backend REQUIRES chat_session_id
+  // on every POST /api/agent call. The frontend MUST create the session
+  // FIRST via createSession() and AWAIT its response before calling
+  // client.send(). If we let client.send() be called with an undefined/
+  // empty sessionId, the backend returns 400 ("chat_session_id is
+  // required") and the user sees an error. The previous flow auto-
+  // created a session on the backend if the id was missing — that caused
+  // DUPLICATE sessions in the sidebar when the createSession() response
+  // was slow (the user clicked send before the session id landed, so the
+  // backend made a SECOND session for the message). Now the frontend is
+  // the sole source of truth for session creation.
   let sessionId = get().activeSessionId;
   if (!sessionId) {
     try {
@@ -1848,6 +1858,19 @@ async function _runTurn(
       });
       return;
     }
+  }
+  // Defensive: never call client.send() without a non-empty chat_session_id.
+  // createSession() should always return a UUID hex string, but if the
+  // backend returned a malformed response (empty body, network blip), we
+  // surface a clear error instead of letting client.send() fire a 400.
+  if (!sessionId || typeof sessionId !== "string" || !sessionId.trim()) {
+    set({
+      error: "Failed to create chat session — please try again.",
+      isBusy: false,
+      isStreaming: false,
+      status: "error",
+    });
+    return;
   }
 
   // Add user message optimistically (pending until backend echoes it).
