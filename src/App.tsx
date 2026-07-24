@@ -15,6 +15,8 @@ import { BenchmarksScreen } from "./screens/BenchmarksScreen";
 import { ModelSelectOverlay } from "./components/ModelSelectOverlay";
 import { ProvidersDialog } from "./components/ProvidersDialog";
 import { useModelStore } from "./lib/model-store";
+import { useChatStore } from "./state/chatStore";
+import { AgentClient } from "./api/agent";
 
 import { getJWTSub } from "./lib/jwt";
 import { deriveToken } from "./api/token";
@@ -48,6 +50,23 @@ export default function App() {
     setBaseUrl(settings.baseUrl);
     fetchProviders();
   }, [settings.baseUrl]);
+
+  // FIX-ISSUE-2 (FIX-CHAT-BROKEN): kick off the chat session load on APP
+  // mount (not just when the user navigates to the chat tab). The HF Space
+  // sleeps after inactivity and restarts on the next request; we want the
+  // chat session list to be ready as soon as the user lands on any tab,
+  // so switching to chat later doesn't pay the network round-trip. The
+  // call is idempotent — if AgentChat's own mount-time loadSessions already
+  // fired, this is a no-op (the store caches sessions + isLoadingSessions).
+  const loadSessions = useChatStore((s) => s.loadSessions);
+  useEffect(() => {
+    // Only fire when we have credentials (baseUrl + token) — otherwise
+    // the request 401s and adds noise to the console.
+    if (!settings.baseUrl || !settings.token) return;
+    const client = new AgentClient(settings);
+    loadSessions(client);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.baseUrl, settings.token]);
 
   // Handle OAuth callback hashes
   // GitHub: #github-connected=<id> | #github-grant=<token> (proxy) | #github-error=...

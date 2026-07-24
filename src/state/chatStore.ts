@@ -255,6 +255,10 @@ export interface ChatState {
 
   // Core operations
   loadSessions: (client: AgentClient) => Promise<void>;
+  // FIX-ISSUE-2 / FIX-ISSUE-3 (FIX-CHAT-BROKEN): lightweight refresh of the
+  // session list (no full reload). Used by the 30s auto-refresh so multi-
+  // device/tab sync works without a manual page reload.
+  refreshSessions: (client: AgentClient) => Promise<void>;
   createSession: (client: AgentClient, model?: string) => Promise<string>;
   switchSession: (client: AgentClient, sessionId: string) => Promise<void>;
   deleteSession: (client: AgentClient, sessionId: string) => Promise<void>;
@@ -1071,10 +1075,22 @@ export const useChatStore = create<ChatState>()(
           const { sessions } = await client.listChatSessions();
           // Restore active session if it still exists.
           let activeId = get().activeSessionId || storedActiveId;
+          // FIX-ISSUE-3 (FIX-CHAT-BROKEN): multi-device sync — if the
+          // active session ID from localStorage doesn't exist on the
+          // server (e.g. it was deleted from another device/tab, or the
+          // Space restarted and the DB was reset), fall back to the most
+          // recent session instead of nulling. This prevents the user
+          // from landing on an empty chat when their session was deleted
+          // elsewhere. The fallback session's events are loaded below by
+          // the switchSession call.
           if (activeId && !sessions.find((s) => s.id === activeId)) {
-            activeId = null;
+            activeId = sessions[0]?.id ?? null;
             try {
-              localStorage.removeItem(ACTIVE_SESSION_KEY);
+              if (activeId) {
+                localStorage.setItem(ACTIVE_SESSION_KEY, activeId);
+              } else {
+                localStorage.removeItem(ACTIVE_SESSION_KEY);
+              }
             } catch {
               /* ignore */
             }
@@ -1099,6 +1115,55 @@ export const useChatStore = create<ChatState>()(
             activeSessionId: storedActiveId,
             sessions: [],
           });
+        }
+      },
+
+      // FIX-ISSUE-2 / FIX-ISSUE-3 (FIX-CHAT-BROKEN): lightweight periodic
+      // session-list refresh. Pulls the latest session list from the backend
+      // so sessions created/renamed/deleted on other devices/tabs sync to
+      // this client without a manual reload. Safe to call mid-turn — it
+      // does NOT touch the active session's events or interrupt an
+      // in-flight agent turn.
+      refreshSessions: async (client) => {
+        // Skip if a request is already in flight (prevents request piling
+        // up when the network is slow).
+        if (get().isLoadingSessions) return;
+        _lastClientRef.current = client;
+        try {
+          const { sessions } = await client.listChatSessions();
+          const activeId = get().activeSessionId;
+          // If the active session was deleted from another device, fall
+          // back to the most recent session (don't auto-switch events —
+          // let the user click to switch, to avoid clobbering an unsaved
+          // optimistic message they may be typing).
+          let nextActive = activeId;
+          if (activeId && !sessions.find((s) => s.id === activeId)) {
+            nextActive = sessions[0]?.id ?? null;
+            try {
+              if (nextActive) {
+                localStorage.setItem(ACTIVE_SESSION_KEY, nextActive);
+              } else {
+                localStorage.removeItem(ACTIVE_SESSION_KEY);
+              }
+            } catch {
+              /* ignore */
+            }
+            set({ sessions, activeSessionId: nextActive });
+            // If we fell back to a new session, load its events.
+            if (nextActive && nextActive !== activeId) {
+              try {
+                await get().switchSession(client, nextActive);
+              } catch {
+                /* non-fatal — next refresh will retry */
+              }
+            }
+          } else {
+            // Active session still exists — just update the list (titles,
+            // updated_at, etc. may have changed on other devices).
+            set({ sessions });
+          }
+        } catch {
+          /* network error — silent; will retry on next interval */
         }
       },
 

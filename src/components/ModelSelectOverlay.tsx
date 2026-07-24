@@ -104,6 +104,48 @@ function capColor(cap: string): string | undefined {
 }
 
 // ── Filter / sort helpers ───────────────────────────────────────────────
+
+// FIX-ISSUE-1 (FIX-CHAT-BROKEN): helper that pulls the effort_levels list
+// from a model's attributes. The backend's roster endpoint returns either
+// `effortLevels` (camelCase) or `effort_levels` (snake_case) — we accept
+// both. A non-empty list means the model is reasoning-capable on its host
+// (even if it has no benchmark data — e.g. GLM 5.2). The "reasoning" filter
+// uses this so reasoning-capable models aren't hidden just because they
+// lack OpenRouter ranks or AA intelligence scores.
+function effortLevelsOf(attrs: ModelAttributes | undefined): string[] {
+  if (!attrs) return [];
+  return attrs.effortLevels ?? attrs.effort_levels ?? [];
+}
+
+// FIX-ISSUE-1: broader code-capability check. Some providers tag code
+// capability with names like "code generation", "coding", "code completion"
+// rather than just "code". We match any capability containing "code".
+function hasCodeCapability(caps: string[]): boolean {
+  return caps.some((c) => {
+    const s = c.toLowerCase().trim();
+    return s === "code" || s === "coding" || s.includes("code");
+  });
+}
+
+// FIX-ISSUE-1: broader reasoning-capability check that ALSO considers
+// `effort_levels` (the authoritative signal from the backend's roster
+// endpoint — empty list means the host doesn't expose a thinking knob).
+// A model with effort_levels like ["on","off"] is reasoning-capable EVEN
+// if it has no benchmark data (GLM 5.2 on opencode-zen/go is the poster
+// child — no OpenRouter ranks, no AA intelligence score, but it IS a
+// reasoning model).
+function isReasoningCapable(model: { attributes?: ModelAttributes; displayName?: string; id?: string; logical?: string }): boolean {
+  const caps = model.attributes?.capabilities ?? [];
+  if (caps.some((c) => {
+    const s = c.toLowerCase().trim();
+    return s === "reasoning" || s === "thinking" || s.includes("reason");
+  })) return true;
+  if (effortLevelsOf(model.attributes).length > 0) return true;
+  // Fallback: model name contains "reasoning" or "thinking" or "-r1".
+  const name = [model.displayName ?? "", model.id ?? model.logical ?? ""].join(" ").toLowerCase();
+  return /\b(reasoning|thinking)\b/.test(name) || /(^|[-/])r1($|[-/])/.test(name);
+}
+
 function modelMatchesFilters(model: ProviderModel, activeFilters: string[], contextMin: number): boolean {
   const caps = model.attributes?.capabilities ?? [];
   const bm = model.attributes?.benchmarks;
@@ -113,11 +155,13 @@ function modelMatchesFilters(model: ProviderModel, activeFilters: string[], cont
 
   return activeFilters.some((filter) => {
     if (filter === "reasoning") {
-      if (caps.includes("reasoning")) return true;
+      // FIX-ISSUE-1: prefer the authoritative effort_levels signal —
+      // GLM 5.2 has no benchmark data but IS a reasoning model.
+      if (isReasoningCapable(model)) return true;
       if ((bm?.intelligence ?? 0) >= 20) return true;
     }
     if (filter === "code") {
-      if (caps.includes("code")) return true;
+      if (hasCodeCapability(caps)) return true;
       if ((bm?.coding ?? 0) >= 20 || (bm?.aaCoding ?? 0) >= 20) return true;
     }
     if (filter === "tools") {
@@ -135,10 +179,9 @@ function modelMatchesFilters(model: ProviderModel, activeFilters: string[], cont
 }
 
 function isReasoningModel(model: { displayName: string; id?: string; logical?: string; attributes?: ModelAttributes }): boolean {
-  const caps = model.attributes?.capabilities ?? [];
-  if (caps.includes("reasoning")) return true;
-  const name = [model.displayName, model.id ?? model.logical ?? ""].join(" ").toLowerCase();
-  return /\breasoning\b/.test(name);
+  // FIX-ISSUE-1: delegate to isReasoningCapable so the reasoning filter
+  // and the badge logic agree on what counts as a reasoning model.
+  return isReasoningCapable(model);
 }
 
 function bestFilterScore(model: ProviderModel, activeFilters: string[]): number {
@@ -159,27 +202,43 @@ function sortByFilterScore(models: ProviderModel[], activeFilters: string[]): Pr
   return [...models].sort((a, b) => bestFilterScore(b, activeFilters) - bestFilterScore(a, activeFilters));
 }
 
-function avgRank(attrs: ModelAttributes | undefined): number {
-  const ranks = attrs?.ranks;
-  if (!ranks || ranks.length === 0) return Infinity;
-  return ranks.reduce((s, r) => s + r.rank, 0) / ranks.length;
-}
-
+// FIX-ISSUE-1 (FIX-CHAT-BROKEN): rewritten default sort.
+//
+// The previous sort used `avgRank` (OpenRouter ranks) as the PRIMARY key.
+// Models with no OpenRouter ranks (GLM 5.2 on opencode-zen/go, models only
+// on NVIDIA NIM, etc.) got avgRank = Infinity and were pushed to the
+// bottom — so Nemotron (which has OpenRouter ranks) ranked higher than
+// GLM 5.2 by default, even though GLM 5.2 is the stronger model.
+//
+// New sort order (per the FIX-CHAT-BROKEN spec):
+//   1. AA intelligence score descending (models WITH benchmarks first).
+//   2. If no intelligence score, context length descending (bigger ctx
+//      usually correlates with stronger models — and at least gives a
+//      deterministic order for unbenchmarked models).
+//   3. If no context, alphabetical by displayName (deterministic fallback).
+//   4. Models with NO benchmark data still appear (after benchmarked ones),
+//      sorted by context length then name — never pushed off-screen.
 function defaultSort(models: ProviderModel[]): ProviderModel[] {
   return [...models].sort((a, b) => {
-    const aAvg = avgRank(a.attributes);
-    const bAvg = avgRank(b.attributes);
-    if (aAvg !== bAvg) return aAvg === Infinity ? 1 : bAvg === Infinity ? -1 : aAvg - bAvg;
-
     const aIntel = a.attributes?.benchmarks?.intelligence ?? 0;
     const bIntel = b.attributes?.benchmarks?.intelligence ?? 0;
+    // (1) AA intelligence descending. A non-zero score beats a zero score
+    //     (so benchmarked models float above unbenchmarked ones).
     if (aIntel !== bIntel) return bIntel - aIntel;
 
+    // (2) Context length descending (when neither has an intel score,
+    //     OR they tie on intel — bigger context usually = stronger model).
+    const aCtx = a.contextLength ?? 0;
+    const bCtx = b.contextLength ?? 0;
+    if (aCtx !== bCtx) return bCtx - aCtx;
+
+    // (3) Coding benchmark descending (tie-breaker when ctx is equal).
     const aCode = a.attributes?.benchmarks?.coding ?? 0;
     const bCode = b.attributes?.benchmarks?.coding ?? 0;
     if (aCode !== bCode) return bCode - aCode;
 
-    return 0;
+    // (4) Alphabetical by displayName (deterministic final tie-breaker).
+    return (a.displayName || a.id || "").localeCompare(b.displayName || b.id || "");
   });
 }
 
@@ -853,11 +912,20 @@ function condensedModelMatchesFilters(model: CondensedModel, activeFilters: stri
   const caps = model.attributes?.capabilities ?? [];
   const bm = model.attributes?.benchmarks;
   return activeFilters.some((filter) => {
-    if (filter === "reasoning") return isReasoningModel(model);
+    // FIX-ISSUE-1 (FIX-CHAT-BROKEN): the "reasoning" filter previously
+    // called isReasoningModel(model), which only checked capabilities +
+    // the model name. GLM 5.2 has no "reasoning" capability tag and its
+    // name doesn't contain "reasoning" — so it was HIDDEN by the filter
+    // even though it IS a reasoning model. Now we use isReasoningCapable
+    // which also checks effort_levels (the authoritative signal from the
+    // backend's roster endpoint).
+    if (filter === "reasoning") return isReasoningCapable(model);
     if (filter === "intelligence") return (bm?.intelligence ?? 0) >= 20;
-    if (filter === "code") return caps.includes("code") || (bm?.coding ?? 0) >= 20 || (bm?.aaCoding ?? 0) >= 20;
+    // FIX-ISSUE-1: broader code-capability check (matches "code",
+    // "coding", "code generation", etc.).
+    if (filter === "code") return hasCodeCapability(caps) || (bm?.coding ?? 0) >= 20 || (bm?.aaCoding ?? 0) >= 20;
     if (filter === "agent") return (bm?.agentic ?? 0) >= 20;
-    if (filter === "tools") return caps.includes("tools") || caps.includes("tool use") || (bm?.agentic ?? 0) >= 20;
+    if (filter === "tools") return caps.includes("tools") || caps.includes("tool use") || caps.includes("function calling") || (bm?.agentic ?? 0) >= 20;
     if (filter === "vision") return caps.includes("vision");
     if (filter === "speech") return caps.includes("speech") || caps.includes("audio");
     return false;

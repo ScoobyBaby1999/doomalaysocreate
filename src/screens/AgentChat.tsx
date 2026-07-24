@@ -267,6 +267,43 @@ export function AgentChat({ settings }: { settings: Settings }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // FIX-ISSUE-2 / FIX-ISSUE-3 (FIX-CHAT-BROKEN): periodic session refresh.
+  // The HF Space sleeps after inactivity and restarts on the next request.
+  // When it restarts, the in-memory agent sessions are gone (but the SQLite
+  // chat_sessions + chat_events tables persist on /data). The 30s refresh
+  // pulls the latest session list so:
+  //   - Sessions created on another device/tab appear here.
+  //   - Sessions deleted on another device/tab disappear here.
+  //   - Title auto-derivation (from the backend's "title" event) shows up
+  //     even if the user was on a different tab when it fired.
+  // It does NOT interrupt an in-flight agent turn — refreshSessions is a
+  // lightweight GET that only updates the session LIST, not the active
+  // session's events.
+  const refreshSessions = useChatStore((s) => s.refreshSessions);
+  useEffect(() => {
+    const REFRESH_MS = 30_000;
+    const id = setInterval(() => {
+      // Skip while a turn is in flight — the SSE stream is already
+      // receiving events, and a session-list refresh mid-stream could
+      // trigger a re-render that disrupts the streaming bubble.
+      if (useChatStore.getState().isBusy) return;
+      refreshSessions(clientRef.current);
+    }, REFRESH_MS);
+    // Also refresh when the tab regains focus (user switched tabs and
+    // came back — pull the latest so they see other-device changes).
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && !useChatStore.getState().isBusy) {
+        refreshSessions(clientRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshSessions]);
+
   // BATCH-3 Task 2 — when the user changes the model (via the ModelSelectOverlay),
   // persist the new model to the active chat session so switching chats restores
   // the per-chat model. We subscribe to selectedModelId + selectedSlotId changes
