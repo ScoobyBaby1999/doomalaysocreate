@@ -56,7 +56,13 @@
     "cloudflare/@cf/google/gemma-4-26b-a4b-it": { "body": {"chat_template_kwargs": {"enable_thinking": true}, "max_completion_tokens": 32768}, "effort_levels": ["on", "off"], "note": "CF schema exposes chat_template_kwargs + reasoning_effort; ctx 256k; vision. max_completion_tokens (max_tokens deprecated on CF)" },
 
     "gpt-oss-120b": { "body": {}, "effort_levels": [], "note": "CF chat-completions schema does NOT list reasoning_effort (responses API only) - a rejected param would 400-blacklist the slot, so effort stays default. raise via system prompt 'Reasoning: high' if needed. ctx 128k" },
-    "step-flash": { "body": {}, "effort_levels": [], "note": "no thinking param documented; ctx 256k; vision; 100-350 tok/s" }
+    "step-flash": { "body": {}, "effort_levels": [], "note": "no thinking param documented; ctx 256k; vision; 100-350 tok/s" },
+
+    "privatemodeai/kimi-k2.6": { "body": {"chat_template_kwargs": {"thinking": true}}, "effort_levels": ["on", "off"], "note": "PrivateMode AI (Edgeless Systems) confidential-computing proxy. VERIFIED via https://docs.privatemode.ai/models/overview/ — 'Kimi K2.6 performs reasoning steps to improve response quality. To disable reasoning and reduce latency at the cost of quality, extend your request with: {chat_template_kwargs:{thinking:false}}'. Same param shape as NVIDIA NIM kimi-k2.6. Use kimi-latest to always route to latest Kimi." },
+    "privatemodeai/gemma-4-31b": { "body": {"chat_template_kwargs": {"enable_thinking": true}}, "effort_levels": ["on", "off"], "note": "PrivateMode AI deprecated gemma-4-31b. Same chat_template_kwargs:{enable_thinking:true|false} param shape as NVIDIA NIM. PMAI recommends migrating to gpt-oss-120b or kimi-k2.6." },
+
+    "openrouter/*": { "body": {"reasoning": {"enabled": true}}, "effort_levels": ["none", "minimal", "low", "medium", "high", "xhigh", "max"], "note": "OpenRouter canonical reasoning shape (verified https://openrouter.ai/docs/guides/best-practices/reasoning-tokens). reasoning:{effort:LEVEL} mutually exclusive with reasoning.max_tokens. reasoning:{enabled:true} is the toggle form. The /api/v1/models endpoint's supported_parameters list surfaces 'reasoning' for any model that accepts this shape (live-detected by lib/effort_detector.py). Levels: none|minimal|low|medium|high|xhigh|max." },
+    "github-models/*": { "body": {}, "effort_levels": [], "note": "GitHub Models catalog returns capabilities=['reasoning'] for natively-reasoning models (phi-4-reasoning, deepseek-r1, deepseek-r1-0528). These reason on EVERY request — no configurable effort knob — so effort_levels is []. The frontend hides the effort button. GitHub Models uses standard Azure OpenAI params; phi-4-reasoning strips/overrides system prompts (quirk: system_in_user=true)." }
   },
 
   "web_search": {
