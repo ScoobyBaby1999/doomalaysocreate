@@ -532,6 +532,14 @@ def _build_provider_models(
     model_ids: dict[str, str],  # {stripped_display: raw_id}
     registry: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    # CHAT-RELIABILITY-FIX: import effort_detector lazily so this module stays
+    # import-safe even if the detector's live OpenRouter/GitHub fetch fails
+    # (best-effort: the detector swallows its own errors and returns []).
+    try:
+        from effort_detector import detect_effort_levels as _det_levels
+    except Exception:
+        _det_levels = None
+
     models: list[dict[str, Any]] = []
     for display_id, raw_id in model_ids.items():
         if not display_id:
@@ -572,6 +580,40 @@ def _build_provider_models(
         if free_note:
             existing = attributes.get("note", "")
             attributes["note"] = f"{existing} {free_note}".strip() if existing else free_note
+
+        # CHAT-RELIABILITY-FIX: per-HOST effort_levels.
+        #
+        # Previously the catalog returned the OpenRouter family-level
+        # capabilities (e.g. ["reasoning","tools","vision"]) but NEVER
+        # populated `attributes.effort_levels`. The frontend fell back to a
+        # hardcoded ["low","med","high","max"] tuple for every model — so
+        # the effort popover showed the SAME four names whether the user
+        # picked NVIDIA GLM-5.2 (real levels: on/off), OpenRouter GLM-5.2
+        # (7-level ladder), or PrivateModeAI GLM-5.2 (on/off). The user
+        # reported exactly this: "the effort mode showed the same naming
+        # conventions for both privatemodeai and Nvidia."
+        #
+        # Fix: call effort_detector.detect_effort_levels(provider, raw_id)
+        # for each (provider, raw_model_id) pair. The detector:
+        #   - For OpenRouter: live /api/v1/models `supported_parameters`
+        #     includes "reasoning" → canonical 7-level ladder.
+        #   - For NVIDIA / Cloudflare / PrivateModeAI / OpenCode: curated
+        #     reasoning_catalog.json entry for (provider/model_id).
+        #   - For GitHub Models: [] (native reasoning, no knob).
+        # Result: every host entry carries its own authoritative effort_levels
+        # list. The frontend's `selectedModelInfo` lookup (which matches by
+        # slotId == "provider/raw_id") finds the right host and shows its
+        # specific effort names.
+        if _det_levels is not None:
+            try:
+                host_effort_levels = _det_levels(
+                    provider_name, raw_id, logical=logical_id, family=family)
+                if host_effort_levels:
+                    attributes["effort_levels"] = list(host_effort_levels)
+            except Exception:
+                # Detector is best-effort; never break the catalog build
+                # on a single model's effort detection error.
+                pass
 
         if bm and not attributes.get("capabilities"):
             all_low = all(isinstance(v, (int, float)) and v < 20 for v in bm.values())

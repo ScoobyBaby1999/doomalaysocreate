@@ -3188,19 +3188,33 @@ class Handler(BaseHTTPRequestHandler):
         Subscribes to the session's event queue and pushes real-time events
         as SSE ``data:`` frames. Falls back to polling if the session doesn't
         support queue-based subscription (legacy sessions).
+
+        CHAT-RELIABILITY-FIX: previously this returned 404 immediately when
+        the session didn't exist (e.g. the SSE client connected BEFORE the
+        POST /api/agent response arrived — rare under HF Space cold-start
+        or network jitter, but a real race). The frontend's onError fired,
+        the polling fallback also 404'd, and the user saw "I sent Hi but
+        got no reply" because neither path delivered the assistant event.
+
+        Now: open the SSE response (200 + headers) IMMEDIATELY and poll the
+        session registry for up to 5 seconds. The session should appear
+        within ~50ms (the POST handler registers it before responding), but
+        the 5s window absorbs Space cold-start latency, container restarts,
+        and any OS-level scheduling delay. If the session still hasn't
+        appeared after 5s, we emit a typed "error" event so the frontend
+        can surface the failure to the user instead of hanging silently.
         """
         from urllib.parse import parse_qs, urlsplit
         sid = route[len("/api/agent/"):-len("/stream")]
-        session = agent_sessions.get_session(sid)
-        if session is None:
-            self._send_json(404, {"error": "no such agent session"})
-            return
         query = parse_qs(urlsplit(self.path).query)
         try:
             since = int(query.get("since", ["0"])[0])
         except ValueError:
             since = 0
 
+        # Open the SSE response immediately so the client's fetch() resolves
+        # with 200 OK and starts reading the stream. We'll send heartbeats
+        # while waiting for the session to appear.
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -3208,6 +3222,43 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
+
+        # Wait for the session to be registered (up to 5 seconds). The POST
+        # /api/agent handler registers the session in agent_sessions._sessions
+        # before returning 202, so under normal conditions this loop runs
+        # zero or one iterations. The wait absorbs:
+        #   - HF Space cold-start (the POST handler may take seconds to
+        #     import + initialize on the first request after sleep)
+        #   - Network reordering (the SSE GET arrives before the POST 202
+        #     reaches the client)
+        #   - Process restarts that race the POST + GET pair
+        session = agent_sessions.get_session(sid)
+        wait_deadline = time.time() + 5.0
+        while session is None and time.time() < wait_deadline:
+            try:
+                self.wfile.write(b": heartbeat\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return  # client disconnected while waiting — give up silently
+            time.sleep(0.1)
+            session = agent_sessions.get_session(sid)
+
+        if session is None:
+            # Session never appeared — emit a typed error so the frontend
+            # surfaces the failure instead of hanging on a silent stream.
+            # The frontend's SSE handler will fall back to polling (which
+            # also 404s) and eventually show "(no response)" — better than
+            # a perpetual spinner.
+            err_ev = {"i": -1, "ts": time.time(), "type": "error",
+                      "error": f"agent session {sid} not found within 5s "
+                               f"(expired or never created)"}
+            try:
+                line = f"data: {json.dumps(err_ev, ensure_ascii=False)}\n\n"
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            return
 
         # Use queue-based subscription if available, else fall back to polling
         sub = getattr(session, "subscribe", None)
