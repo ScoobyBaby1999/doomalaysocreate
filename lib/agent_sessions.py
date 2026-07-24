@@ -1931,20 +1931,53 @@ class AgentSession:
         with self.lock:
             if (ev.get("type") == "thinking"
                     and self.events and self.events[-1].get("type") == "thinking"):
-                # Always APPEND to the last thinking event. The Strands callback
-                # sends reasoning fragments (one per token or chunk). Tool calls
-                # (tool_use/tool_result) naturally separate reasoning blocks —
-                # after a tool_result, self.events[-1] is tool_result (not
-                # thinking), so a new thinking event is created automatically.
-                # This means consecutive thinking events are ALWAYS continuations
-                # of the same reasoning block, so appending is correct.
+                # FIX-ISSUE-5 (FIX-CHAT-BROKEN): Thinking dedup.
+                #
+                # The Strands callback_handler emits `reasoningText` as the
+                # ACCUMULATED string each time (NOT a delta). So as the model
+                # reasons, we get a sequence like:
+                #   emit("The user said Hey")
+                #   emit("The user said Hey - this is a casual greeting")
+                #   emit("The user said Hey - this is a casual greeting. I should...")
+                # Each call's text is a PREFIX-EXTENSION of the previous.
+                #
+                # Previously this code only skipped when new_text was a prefix
+                # of old_text (stale re-emit). It did NOT detect the reverse
+                # case (new extends old) — and fell through to the else branch
+                # which APPENDS. The result was the accumulated text got
+                # concatenated with itself on every token, producing the
+                # runaway duplication seen in the transcript:
+                #   "The user said Hey - this is a casual greeting. I should
+                #    respond brieflyThe user said Hey - this is a simple
+                #    greeting.The user said Hey - this is a simple greeting.
+                #    I should respond brieflyThe user said Hey - ..."
+                #
+                # The fix below handles three cases:
+                #  1. new_text starts with old_text → REPLACE (new is the
+                #     accumulated version; emit only the full new text so the
+                #     frontend replaces its bubble content).
+                #  2. old_text starts with new_text (and new is shorter) →
+                #     SKIP (stale re-emit of an earlier prefix; keep old).
+                #  3. No prefix relationship → APPEND (genuine fragment, e.g.
+                #     a new reasoning chunk after a tool call).
                 old_text = (self.events[-1].get("text", "") or "")
                 new_text = (ev.get("text", "") or "")
-                # Skip stale duplicates (new text is a prefix of old)
-                if old_text and new_text and old_text.startswith(new_text) and len(new_text) < len(old_text):
+                if old_text and new_text and new_text.startswith(old_text) and len(new_text) > len(old_text):
+                    # Case 1: new is the accumulated version — REPLACE.
+                    self.events[-1]["text"] = new_text
+                    self.events[-1]["ts"] = time.time()
+                    stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
+                    stream_ev["text"] = self.events[-1]["text"]
+                elif old_text and new_text and old_text.startswith(new_text) and len(new_text) < len(old_text):
+                    # Case 2: new is a stale prefix of old — SKIP (keep old).
+                    stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
+                    stream_ev["text"] = old_text
+                elif old_text and new_text and new_text == old_text:
+                    # Case 2b: identical — SKIP (no-op).
                     stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
                     stream_ev["text"] = old_text
                 else:
+                    # Case 3: no prefix relationship — APPEND.
                     self.events[-1]["text"] = old_text + new_text
                     self.events[-1]["ts"] = time.time()
                     stream_ev = {"i": self.events[-1]["i"], "ts": self.events[-1]["ts"], **ev}
@@ -2296,13 +2329,32 @@ class AgentSession:
                     self.emit({"type": "error", "error": err_detail})
             finally:
                 self._interrupting = False
-                # Check whether any assistant event was emitted during the
-                # turn (events appended after pre_count). If not, emit a
-                # placeholder so the user sees SOMETHING.
+                # FIX-ISSUE-4 (FIX-CHAT-BROKEN): Check whether any assistant
+                # event was emitted during the turn (events appended after
+                # pre_count). If NEITHER a full `assistant` event NOR any
+                # `assistant_delta` event was emitted, emit a placeholder so
+                # the user sees SOMETHING.
+                #
+                # Previously this check only looked for type == "assistant".
+                # But the streaming callback emits `assistant_delta` events
+                # (token-by-token) and the post-turn walk SKIPS the full
+                # `assistant` event when streaming captured the text (see
+                # _assistant_streamed / _assistant_streamed_text guards).
+                # So a turn that produced a complete streamed reply had ZERO
+                # `assistant` events — the placeholder fired after EVERY real
+                # streamed response, producing the duplicate:
+                #   ## Assistant
+                #   Hey! How can I help you today?
+                #   ## Assistant
+                #   (no response from the model — check that the provider
+                #    key is valid and the model name is correct)
+                # The fix: count `assistant_delta` events as well so the
+                # placeholder ONLY fires when the model genuinely produced no
+                # output (empty response, init error, provider 400, etc.).
                 if not self._interrupting:
                     with self.lock:
                         for ev in self.events[pre_count:]:
-                            if ev.get("type") == "assistant":
+                            if ev.get("type") in ("assistant", "assistant_delta"):
                                 assistant_emitted = True
                                 break
                     if not assistant_emitted:

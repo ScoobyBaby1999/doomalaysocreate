@@ -5075,6 +5075,21 @@ def main() -> int:
     # initialize SQLite database for GitHub + HF integration (fast, local)
     db.init_db()
 
+    # FIX-ISSUE-2 (FIX-CHAT-BROKEN): eagerly create the chat_sessions and
+    # chat_events tables at boot so the first user request after a Space
+    # restart doesn't pay the schema-setup cost (which previously happened
+    # lazily inside _ensure_schema_once on the first /api/chat/sessions
+    # call). The tables live in the same /data/doomalaysocreate.db file
+    # (persistent volume on HF Space), so chat history survives restarts.
+    # This is best-effort — a failure here is non-fatal (the lazy init in
+    # chat_routes._ensure_schema_once will retry on first request).
+    try:
+        import chat_routes
+        chat_routes._ensure_schema_once()
+        log_event("chat_schema_ready")
+    except Exception as e:
+        log_event("chat_schema_init_error", error=str(e)[:200])
+
     # Start the privatemode proxy in a BACKGROUND thread — its 90s attestation
     # must NOT block boot (HF's healthcheck times out and the Space gets stuck
     # at APP_STARTING). The provider sync (in Panel.__init__) runs after.

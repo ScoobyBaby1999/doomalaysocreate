@@ -366,14 +366,26 @@ def get_model_capabilities(provider_name: str | None, model_id: str | None, *,
                            family: str | None = None,
                            benchmarks: dict | None = None,
                            reasoning_catalog: dict | None = None,
-                           web_search_catalog: dict | None = None) -> dict:
+                           web_search_catalog: dict | None = None,
+                           use_live_detection: bool = True) -> dict:
     """Return what this (provider, model) actually supports on its host.
 
     This is the AUTHORITATIVE capability detector used by the roster endpoint
     (so the frontend shows accurate per-(provider, model) capability badges
     instead of "always True for web search"). It cross-references:
 
+      - LIVE OpenRouter /api/v1/models ``supported_parameters`` field
+        (when use_live_detection=True and provider == 'openrouter') — this
+        dynamically detects effort + tools + vision per model from the live
+        OpenRouter model list (10-minute in-process cache, refreshable via
+        lib.effort_detector.refresh_live_cache()).
+      - LIVE GitHub Models catalog ``capabilities`` field (when provider ==
+        'github-models') — surfaces reasoning + tool-calling capability per
+        model from the live GitHub Models catalog.
       - reasoning_catalog.json 'reasoning' section  -> effort support + param name
+        (curated fallback when live detection returns nothing OR provider has
+        no live API — NVIDIA NIM per-model docs, Cloudflare per-model schema,
+        PrivateMode AI docs, OpenCode Zen).
       - reasoning_catalog.json 'web_search' section -> native web search support
       - benchmarks.json tags/note                   -> tools / vision tags
 
@@ -381,10 +393,13 @@ def get_model_capabilities(provider_name: str | None, model_id: str | None, *,
         {
             'effort': bool,                # supports a reasoning/thinking param
             'effort_param': str|None,      # the param name (e.g. 'reasoning_effort')
+            'effort_levels': list[str],   # ordered level names (empty = no knob)
             'web_search': bool,            # supports native web-search tool
             'web_search_native': bool,     # alias of web_search (clarity)
             'tools': bool,                 # supports function/tool calling
             'vision': bool,                # supports image input
+            'audio': bool,                 # supports audio input (OpenRouter live)
+            'video': bool,                 # supports video input (OpenRouter live)
         }
     """
     rcat = reasoning_catalog if reasoning_catalog is not None else load_reasoning_catalog()
@@ -397,29 +412,66 @@ def get_model_capabilities(provider_name: str | None, model_id: str | None, *,
     if family is None and m:
         family = make_model_family(m)
 
+    # --- LIVE detection (OpenRouter + GitHub Models) -----------------------
+    # When use_live_detection=True we consult the live API first. The detector
+    # returns (effort_levels, body_template, caps_extra). Live data wins when
+    # it returns a non-empty effort_levels list; otherwise we fall back to
+    # the curated catalog (which is the source of truth for NVIDIA / CF / PMAI).
+    live_levels: list[str] = []
+    live_body: dict = {}
+    live_caps: dict = {}
+    if use_live_detection:
+        try:
+            from effort_detector import detect_effort_levels as _det_levels, \
+                detect_effort_body as _det_body
+            live_levels = _det_levels(p, m, logical=logical, family=family)
+            # Only treat the live-detected body as authoritative when the
+            # detector also found levels (a [] result means the live API
+            # explicitly says "no effort param" OR the fetch failed; we can't
+            # tell which, so we still consult the curated catalog below).
+            if live_levels:
+                live_body = _det_body(p, m, level=None, logical=logical, family=family)
+            try:
+                from effort_detector import detect_model_capabilities as _det_caps
+                live_caps = _det_caps(p, m, logical=logical, family=family,
+                                       benchmarks=benchmarks) or {}
+            except Exception:
+                pass
+        except Exception:
+            # Detector is best-effort — fall back to the curated catalog silently.
+            pass
+
+    # --- Curated catalog (NVIDIA NIM / CF / PMAI per-model entries) --------
     rbody = resolve_reasoning_body(rcat, logical=logical, who=who, family=family)
-    if rbody:
-        if "reasoning" in rbody:
+
+    # Prefer live-detected body when we have one; fall back to curated.
+    body = live_body if live_body else rbody
+    if body:
+        if "reasoning" in body:
             effort_param = "reasoning"
-        elif "reasoning_effort" in rbody:
+        elif "reasoning_effort" in body:
             effort_param = "reasoning_effort"
-        elif "chat_template_kwargs" in rbody:
+        elif "chat_template_kwargs" in body:
             effort_param = "chat_template_kwargs"
         else:
-            effort_param = next(iter(rbody.keys()), None)
+            effort_param = next(iter(body.keys()), None)
     else:
         effort_param = None
 
     ws_native = supports_native_web_search(wscat, provider=p, model=m)
 
-    # Tools / vision: derive from benchmarks tags + catalog notes.
+    # Tools / vision: prefer LIVE signals, then benchmarks tags + catalog notes.
     bench = benchmarks or {}
     bench_lower = _bench_lower(bench)
     full = (bench_lower + " " + (logical or "").lower()
             + " " + (model_id or "").lower()
             + " " + (provider_name or "").lower())
-    has_vision = any(t in full for t in ("vision", "image", "multimodal"))
-    has_tools = any(t in full for t in ("tool", "function", "agentic"))
+    has_vision = bool(live_caps.get("vision")) or any(
+        t in full for t in ("vision", "image", "multimodal"))
+    has_tools = bool(live_caps.get("tools")) or any(
+        t in full for t in ("tool", "function", "agentic"))
+    has_audio = bool(live_caps.get("audio")) or "audio" in full
+    has_video = bool(live_caps.get("video")) or "video" in full
 
     # Host-level guarantees: OpenRouter exposes OpenAI-style tools on every
     # chat-completions model; CF Workers AI chat-completions exposes tools
@@ -431,22 +483,25 @@ def get_model_capabilities(provider_name: str | None, model_id: str | None, *,
         if "function calling" in full or "tool" in full:
             has_tools = True
 
-    # Effort levels: the ordered list of effort level names this
-    # (provider, model) supports on its host. Empty list = no effort param
-    # (model either doesn't reason, or reasons natively with no knob).
-    # The frontend uses this to show/hide the effort button AND to render
-    # the correct variant names (some models have 3 levels, some have 7,
-    # with different names like 'low/mid/ultra' vs 'none/minimal/low/.../max').
-    effort_levels = resolve_effort_levels(rcat, logical=logical, who=who, family=family)
+    # Effort levels: prefer LIVE-detected list (covers all 211 reasoning-capable
+    # OpenRouter models + any new ones added since the curated catalog was last
+    # updated). Fall back to the curated catalog when live returns [] (covers
+    # NVIDIA NIM / CF / PMAI where the API doesn't expose per-model effort).
+    if live_levels:
+        effort_levels = live_levels
+    else:
+        effort_levels = resolve_effort_levels(rcat, logical=logical, who=who, family=family)
 
     return {
-        "effort": bool(rbody),
+        "effort": bool(body) or bool(effort_levels),
         "effort_param": effort_param,
         "effort_levels": effort_levels,
         "web_search": ws_native,
         "web_search_native": ws_native,
         "tools": has_tools,
         "vision": has_vision,
+        "audio": has_audio,
+        "video": has_video,
     }
 
 
