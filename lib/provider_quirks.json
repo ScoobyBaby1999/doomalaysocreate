@@ -1,0 +1,255 @@
+{
+  "//": "Provider-specific Python invocation quirks, researched live from each provider's docs.",
+  "//1": "Each entry encodes how the StrandsAdapter / scheduler should call this provider,",
+  "//2": "including the exact params that work + any model-specific gotchas. Read by",
+  "//3": "lib/provider_tools.py at runtime and merged into the extra_body for chat-completions.",
+  "//4": "SOURCES (all fetched via curl + parsed):",
+  "//5": "  - OpenRouter: https://openrouter.ai/api/v1/models  (supported_parameters per model)",
+  "//6": "                https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+  "//7": "  - NVIDIA NIM: https://docs.api.nvidia.com/nim/reference/<model-slug>-infer  (per-model)",
+  "//8": "  - Cloudflare: https://developers.cloudflare.com/workers-ai/models/<slug>/  (per-model)",
+  "//9": "  - GitHub Models: https://models.github.ai/catalog/models  (capabilities array)",
+  "//10": "  - PrivateMode AI: https://docs.privatemode.ai/models/overview/",
+  "//11": "  - OpenCode Zen: https://opencode.ai/docs/zen/  (limited; per-model params inferred from upstream)",
+  "//12": "  - OpenCode Go:  https://opencode.ai/docs/go/   (subscription; same shape as Zen)",
+
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "auth": "Bearer OPENROUTER_API_KEY",
+      "endpoints": { "chat": "/chat/completions", "models": "/models" },
+      "max_context_default": 262144,
+      "temperature": { "min": 0.0, "max": 2.0, "default": 1.0 },
+      "top_p": { "min": 0.0, "max": 1.0, "default": 1.0 },
+      "top_k": { "min": 0, "max": 2000, "default": null },
+      "presence_penalty": { "min": -2.0, "max": 2.0, "default": 0.0 },
+      "frequency_penalty": { "min": -2.0, "max": 2.0, "default": 0.0 },
+      "repetition_penalty": { "min": 0.0, "max": 2.0, "default": 1.0 },
+      "min_p": { "min": 0.0, "max": 1.0, "default": null },
+      "logit_bias": null,
+      "logprobs": { "max_top_logprobs": 20 },
+      "stop": { "max_sequences": 4, "max_length_chars": 1000 },
+      "seed": true,
+      "response_format": true,
+      "structured_outputs": true,
+      "tools": true,
+      "tool_choice": true,
+      "reasoning": {
+        "shape": "reasoning:{effort:LEVEL}",
+        "levels": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        "alt_shape": "reasoning:{enabled:true}",
+        "max_tokens_shape": "reasoning:{max_tokens:2000}",
+        "exclude_reasoning_shape": "reasoning:{exclude:false}",
+        "include_reasoning_param": "include_reasoning:true",
+        "mutually_exclusive": "effort and max_tokens cannot both be set",
+        "live_detection": "/api/v1/models returns supported_parameters; 'reasoning' or 'reasoning_effort' in list means model accepts the reasoning shape"
+      },
+      "web_search": {
+        "shape": "plugins:[{id:'web'}]",
+        "engines": ["native", "exa", "perplexity", "parallel"],
+        "default_engine": "native for OpenAI/Anthropic/Google/Perplexity/xAI, exa for others",
+        "exa_cost_per_req": 0.005,
+        "shortcut": "append ':online' to model slug"
+      },
+      "extra_headers": {
+        "HTTP-Referer": "https://doomalaysocreate.hf.space",
+        "X-Title": "doomalaysocreate"
+      },
+      "quirks": [
+        ":free routes require logging/training consent (privacy_optout NOT available)",
+        "Sending reasoning.max_tokens alongside reasoning.effort returns 400",
+        "Sending include_reasoning=true returns reasoning tokens in the response (extra output tokens billed)"
+      ],
+      "python_snippet": "from openai import OpenAI\nclient = OpenAI(base_url='https://openrouter.ai/api/v1', api_key=os.environ['OPENROUTER_API_KEY'])\nresp = client.chat.completions.create(\n    model='moonshotai/kimi-k3',\n    messages=[{'role':'user','content':'hi'}],\n    reasoning={'effort':'high'},  # optional: 'none|minimal|low|medium|high|xhigh|max'\n    extra_body={'plugins':[{'id':'web'}]},  # optional: native web search\n)\nprint(resp.choices[0].message.content)"
+    },
+
+    "nvidia": {
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "auth": "Bearer NVIDIA_API_KEY",
+      "endpoints": { "chat": "/chat/completions", "models": "/models" },
+      "max_context_default": 131072,
+      "temperature": { "min": 0.0, "max": 2.0, "default": 0.7 },
+      "top_p": { "min": 0.0, "max": 1.0, "default": 1.0 },
+      "top_k": { "min": 0, "max": 128, "default": null },
+      "presence_penalty": { "min": -2.0, "max": 2.0, "default": 0.0 },
+      "frequency_penalty": { "min": -2.0, "max": 2.0, "default": 0.0 },
+      "seed": true,
+      "response_format": true,
+      "tools": true,
+      "tool_choice": true,
+      "stream_options": { "include_usage": true },
+      "reasoning": {
+        "shape": "VARIES PER MODEL — see lib/reasoning_catalog.json 'reasoning' section",
+        "shapes": {
+          "deepseek-v4-pro|deepseek-v4-flash": {"reasoning_effort": "none|high|max", "default": "high"},
+          "nemotron-3-ultra-550b-a55b": {"reasoning_effort": "none|medium|high", "default": "high", "reasoning_budget": "-1..32768, default 16384"},
+          "moonshotai/kimi-k2.6": {"chat_template_kwargs": {"thinking": "true|false"}, "default": "true"},
+          "google/gemma-4-31b-it": {"chat_template_kwargs": {"enable_thinking": "true|false"}, "default": "true"},
+          "glm-5.1": {"chat_template_kwargs": {"enable_thinking": "true|false", "clear_thinking": "true|false"}, "default": "true/false"}
+        },
+        "live_detection": "Per-model NIM reference page (https://docs.api.nvidia.com/nim/reference/<slug>-infer) lists the canonical params + their enums. The 'Snippets translate this field into the model chat_template_kwargs' note means top-level reasoning_effort is the supported API; chat_template_kwargs is the underlying shape and also works."
+      },
+      "web_search": { "native": false, "fallback": "web_tools.py injection (Tavily/DuckDuckGo)" },
+      "extra_headers": {},
+      "quirks": [
+        "Free tier: 40 RPM, 1000 RPD per model (captest-verified 2026-06)",
+        "NIM rate-limit 429s on rapid successive test calls — added num_retries=3 retry_after=5",
+        "deepseek-v4-pro 'max' effort thinks past every timeout (captest killed at 35min still thinking) — override per-request when truly needed",
+        "nemotron-3-ultra requires force_nonempty_content:true when combining tools+thinking",
+        "nemotron-3-ultra reasoning_budget is soft (closes at newline before budget or +500 tok)",
+        "GLM-5.1 captest-verified; NIM ref page 404s but the param shape works",
+        "Streaming via SSE: stream_options:{include_usage:true} returns token counts in the final chunk"
+      ],
+      "python_snippet": "from openai import OpenAI\nclient = OpenAI(base_url='https://integrate.api.nvidia.com/v1', api_key=os.environ['NVIDIA_API_KEY'])\nresp = client.chat.completions.create(\n    model='deepseek-ai/deepseek-v4-pro',\n    messages=[{'role':'user','content':'hi'}],\n    reasoning_effort='high',  # none|high|max (varies per model — kimi-k2.6 uses chat_template_kwargs:{thinking:true})\n    max_tokens=4096,\n)\nprint(resp.choices[0].message.content)"
+    },
+
+    "cloudflare": {
+      "base_url": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai",
+      "auth": "Bearer CF_API_TOKEN",
+      "endpoints": { "chat": "/v1/chat/completions", "models": "/models/search" },
+      "max_context_default": 262144,
+      "temperature": { "min": 0.0, "max": 5.0, "default": 0.6 },
+      "top_p": { "min": 0.0, "max": 1.0, "default": 1.0 },
+      "top_k": { "min": 0, "max": 1000, "default": null },
+      "presence_penalty": { "min": -2.0, "max": 2.0, "default": 0.0 },
+      "frequency_penalty": { "min": -2.0, "max": 2.0, "default": 0.0 },
+      "seed": true,
+      "response_format": true,
+      "tools": "per-model (function-calling tag in catalog)",
+      "tool_choice": "per-model",
+      "stream_options": { "include_usage": true },
+      "reasoning": {
+        "shape": "VARIES PER MODEL — see lib/reasoning_catalog.json 'reasoning' section",
+        "shapes": {
+          "@cf/moonshotai/kimi-k2.6": {"reasoning_effort": "low|medium|high"},
+          "@cf/nvidia/nemotron-3-120b-a12b": {"chat_template_kwargs": {"enable_thinking": "true|false"}},
+          "@cf/google/gemma-4-26b-a4b-it": {"chat_template_kwargs": {"enable_thinking": "true|false"}}
+        },
+        "live_detection": "Per-model CF docs page (https://developers.cloudflare.com/workers-ai/models/<slug>/) lists reasoning_effort + chat_template_kwargs (both shown in schema, but only ONE is meaningful per model — see curated catalog)."
+      },
+      "web_search": { "native": false, "fallback": "web_tools.py injection" },
+      "extra_headers": {},
+      "quirks": [
+        "max_tokens is DEPRECATED — use max_completion_tokens or thinking gets cut mid-trace (seen live)",
+        "CF requires httpx (urllib fails on TLS/HTTP2)",
+        "Per-model schema pages list both reasoning_effort AND chat_template_kwargs but only ONE is meaningful — sending the wrong one silently no-ops (does NOT 400, but does nothing)",
+        "Function calling tag in the model list page indicates tool support",
+        "Free tier: 10000 Neurons/day per account, shared across all models"
+      ],
+      "python_snippet": "import httpx\nclient = httpx.Client(base_url='https://api.cloudflare.com/client/v4/accounts/'+account_id+'/ai', headers={'Authorization':'Bearer '+token})\nresp = client.post('/v1/chat/completions', json={\n    'model':'@cf/moonshotai/kimi-k2.6',\n    'messages':[{'role':'user','content':'hi'}],\n    'reasoning_effort':'high',  # low|medium|high (kimi-k2.6 only; others use chat_template_kwargs:{enable_thinking:true})\n    'max_completion_tokens':32768,  # NOT max_tokens (deprecated)\n})\nprint(resp.json()['result']['response'])"
+    },
+
+    "github-models": {
+      "base_url": "https://models.inference.ai.azure.com",
+      "auth": "Bearer GITHUB_TOKEN",
+      "endpoints": { "chat": "/chat/completions", "models": "/models" },
+      "max_context_default": 128000,
+      "temperature": { "min": 0.0, "max": 2.0, "default": 0.7 },
+      "top_p": { "min": 0.0, "max": 1.0, "default": 1.0 },
+      "presence_penalty": { "min": -2.0, "max": 2.0, "default": 0.0 },
+      "frequency_penalty": { "min": -2.0, "max": 2.0, "default": 0.0 },
+      "seed": true,
+      "response_format": true,
+      "tools": true,
+      "tool_choice": true,
+      "reasoning": {
+        "shape": "none — GitHub Models uses standard Azure OpenAI params, no reasoning_effort",
+        "behavior": "Models tagged 'reasoning' in capabilities reason NATIVELY on every request (phi-4-reasoning, deepseek-r1, deepseek-r1-0528). No configurable effort knob.",
+        "live_detection": "https://models.github.ai/catalog/models returns capabilities:['reasoning', 'streaming', 'tool-calling'] per model. 'reasoning' tag = native reasoning (no param); 'tool-calling' tag = function-calling support."
+      },
+      "web_search": { "native": false, "fallback": "web_tools.py injection" },
+      "extra_headers": { "X-GitHub-Api-Version": "2026-03-10" },
+      "quirks": [
+        "phi-4-reasoning STRIPS custom system prompts (captest: in_tokens=233, never saw the input) — quirk folds system into the user message",
+        "deepseek-r1 reasons natively (no param) — already gets the thinking tokens",
+        "Rate limit: tier-based (free tier ~150 RPM, 4000 TPM for low-tier accounts)",
+        "Models are OpenAI-compatible — use OpenAI client with the GitHub Models base URL"
+      ],
+      "python_snippet": "from openai import OpenAI\nclient = OpenAI(base_url='https://models.inference.ai.azure.com', api_key=os.environ['GITHUB_TOKEN'])\nresp = client.chat.completions.create(\n    model='microsoft/Phi-4-reasoning',\n    messages=[{'role':'user','content':'hi'}],  # NOTE: phi-4-reasoning strips system prompts — fold system into user\n    temperature=0.7,\n)\nprint(resp.choices[0].message.content)"
+    },
+
+    "privatemodeai": {
+      "base_url": "http://localhost:8080/v1",
+      "auth": "Bearer PRIVATEMODEAI_API_KEY (confidential-computing proxy runs locally; E2E encryption + remote attestation)",
+      "endpoints": { "chat": "/chat/completions", "messages": "/messages", "models": "/models", "embeddings": "/embeddings", "audio": "/audio/transcriptions" },
+      "max_context_default": 262144,
+      "temperature": { "min": 0.0, "max": 2.0, "default": 0.7 },
+      "top_p": { "min": 0.0, "max": 1.0, "default": 1.0 },
+      "seed": true,
+      "response_format": true,
+      "tools": "per-model",
+      "tool_choice": "per-model",
+      "reasoning": {
+        "shape": "VARIES PER MODEL — see lib/reasoning_catalog.json 'reasoning' section",
+        "shapes": {
+          "kimi-k2.6": {"chat_template_kwargs": {"thinking": "true|false"}, "default": "true"},
+          "gemma-4-31b": {"chat_template_kwargs": {"enable_thinking": "true|false"}, "default": "true"}
+        },
+        "live_detection": "Docs page https://docs.privatemode.ai/models/overview/ documents the param per model. Use 'kimi-latest' to always route to the latest Kimi model."
+      },
+      "web_search": { "native": false, "fallback": "web_tools.py injection" },
+      "extra_headers": {},
+      "quirks": [
+        "Confidential-computing proxy — E2E encryption, remote attestation, no provider-side plaintext",
+        "gemma-4-31b is DEPRECATED on PMAI — migrate to gpt-oss-120b or kimi-k2.6",
+        "Use 'kimi-latest' to always route to the latest available Kimi model",
+        "Whisper, Voxtral, Qwen3-embedding are also available (non-chat endpoints)",
+        "API is OpenAI-compatible — use OpenAI client with the local base URL"
+      ],
+      "python_snippet": "from openai import OpenAI\nclient = OpenAI(base_url='http://localhost:8080/v1', api_key=os.environ['PRIVATEMODEAI_API_KEY'])\nresp = client.chat.completions.create(\n    model='kimi-k2.6',\n    messages=[{'role':'user','content':'hi'}],\n    extra_body={'chat_template_kwargs':{'thinking': True}},  # toggle reasoning on/off\n)\nprint(resp.choices[0].message.content)"
+    },
+
+    "opencode-zen": {
+      "base_url": "https://opencode.ai/zen/v1",
+      "auth": "OPENCODE_ZEN_API_KEY (free + paid; -free suffix models still paid on Zen)",
+      "endpoints": { "chat": "/chat/completions", "models": "/models" },
+      "max_context_default": 200000,
+      "temperature": { "min": 0.0, "max": 2.0, "default": 0.7 },
+      "top_p": { "min": 0.0, "max": 1.0, "default": 1.0 },
+      "seed": true,
+      "response_format": true,
+      "tools": true,
+      "tool_choice": true,
+      "reasoning": {
+        "shape": "UNKNOWN — Zen /v1/models returns only id+object+created+owned_by; no supported_parameters",
+        "behavior": "Zen is an OpenAI-compatible proxy. Underlying models (Claude, GPT-5.x, DeepSeek, GLM, Kimi) accept their upstream reasoning params, but Zen does not document which ones it forwards. CONSERVATIVE: don't send reasoning params (a 400 blacklists the slot). Frontend hides the effort button for Zen models.",
+        "live_detection": "None — Zen's /v1/models does not expose supported_parameters. Curated catalog is empty for opencode-zen."
+      },
+      "web_search": { "native": false, "fallback": "web_tools.py injection" },
+      "extra_headers": {},
+      "quirks": [
+        "big-pickle is the only verified-free Zen model (rest require Zen credits even with -free suffix)",
+        "_ZEN_PAID_SUFFIX_EXCEPTIONS: minimax-m3-free, qwen3.6-plus-free — despite -free suffix these are PAID on Zen (only free via Go)",
+        "57 models total (Jun 2026): Claude (12), Gemini (6), GPT (16), Grok (2), DeepSeek (3), GLM (3), Minimax (3), Kimi (3), Qwen (2), misc (7)",
+        "Models are OpenAI-compatible — use OpenAI client with the Zen base URL",
+        "Reasoning params are NOT sent — Zen doesn't document forwarding, and a 400 blacklists the slot"
+      ],
+      "python_snippet": "from openai import OpenAI\nclient = OpenAI(base_url='https://opencode.ai/zen/v1', api_key=os.environ['OPENCODE_ZEN_API_KEY'])\nresp = client.chat.completions.create(\n    model='kimi-k2.6',\n    messages=[{'role':'user','content':'hi'}],\n    # NOTE: no reasoning param — Zen doesn't document forwarding chat_template_kwargs\n)\nprint(resp.choices[0].message.content)"
+    },
+
+    "opencode-go": {
+      "base_url": "https://opencode.ai/zen/go/v1",
+      "auth": "OPENCODE_GO_API_KEY (paid subscription tier)",
+      "endpoints": { "chat": "/chat/completions", "models": "/models" },
+      "max_context_default": 200000,
+      "temperature": { "min": 0.0, "max": 2.0, "default": 0.7 },
+      "top_p": { "min": 0.0, "max": 1.0, "default": 1.0 },
+      "seed": true,
+      "response_format": true,
+      "tools": true,
+      "tool_choice": true,
+      "reasoning": {
+        "shape": "UNKNOWN — same as Zen, /v1/models returns only basic fields",
+        "behavior": "OpenCode Go is the paid tier of Zen. Same model list shape, no documented reasoning param forwarding. CONSERVATIVE: don't send reasoning params."
+      },
+      "web_search": { "native": false, "fallback": "web_tools.py injection" },
+      "extra_headers": {},
+      "quirks": [
+        "Subscription tier — 20 models, no per-request billing (flat monthly)",
+        "Includes paid Zen models with -free suffix (laguna-s-2.1-free, mimo-v2.5-free, etc.)",
+        "Reasoning params NOT sent (same conservative behaviour as Zen)"
+      ],
+      "python_snippet": "from openai import OpenAI\nclient = OpenAI(base_url='https://opencode.ai/zen/go/v1', api_key=os.environ['OPENCODE_GO_API_KEY'])\nresp = client.chat.completions.create(model='claude-sonnet-5', messages=[{'role':'user','content':'hi'}])\nprint(resp.choices[0].message.content)"
+    }
+  }
+}
