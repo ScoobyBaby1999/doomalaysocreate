@@ -28,6 +28,8 @@ Why a separate module (instead of inlining into providers.py)?
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 from providers import (
     REASONING_CATALOG_PATH,
@@ -35,6 +37,83 @@ from providers import (
     make_model_family,
     resolve_reasoning_body,
 )
+
+
+# ----------------------------------------------------------------------------
+# provider_quirks.json — per-provider Python invocation reference
+# ----------------------------------------------------------------------------
+
+_PROVIDER_QUIRKS_PATH = Path(os.environ.get(
+    "PROVIDER_QUIRKS", Path(__file__).resolve().parent / "provider_quirks.json"))
+_QUIRKS_CACHE: dict | None = None
+
+
+def load_provider_quirks() -> dict:
+    """Load lib/provider_quirks.json — per-provider Python invocation reference.
+
+    Cached on the module (the file ships with the codebase; a Space restart
+    picks up any edits). The file documents how each provider expects to be
+    called (base_url, auth, params, reasoning shape, web-search shape, model
+    quirks, python snippet). Read by the roster endpoint so the frontend can
+    surface provider-specific docs, and by StrandsAdapter for context-length
+    defaults + temperature ranges.
+
+    Returns the parsed JSON dict (with the ``providers`` section keyed by
+    provider name) or {} when the file is missing/garbled.
+    """
+    global _QUIRKS_CACHE
+    if _QUIRKS_CACHE is not None:
+        return _QUIRKS_CACHE
+    try:
+        _QUIRKS_CACHE = _load_json_commented(_PROVIDER_QUIRKS_PATH)
+    except (OSError, ValueError):
+        _QUIRKS_CACHE = {}
+    return _QUIRKS_CACHE
+
+
+def get_provider_quirks(provider_name: str) -> dict:
+    """Return the quirks dict for a specific provider.
+
+    Normalises the provider name (dashes/spaces/underscores) so the caller
+    can pass any form (``openrouter``, ``OPENROUTER``, ``Open Router``).
+    Returns {} when the provider isn't documented.
+    """
+    p = (provider_name or "").strip().lower().replace("_", "-").replace(" ", "")
+    sec = load_provider_quirks().get("providers", {}) or {}
+    return dict(sec.get(p) or {})
+
+
+def provider_max_context(provider_name: str, default: int = 8192) -> int:
+    """Return the documented max-context default for this provider."""
+    q = get_provider_quirks(provider_name)
+    val = q.get("max_context_default")
+    if isinstance(val, int) and val > 0:
+        return val
+    return default
+
+
+def provider_temperature_range(provider_name: str) -> tuple[float, float, float]:
+    """Return (min, max, default) temperature for this provider."""
+    q = get_provider_quirks(provider_name)
+    t = q.get("temperature") or {}
+    try:
+        mn = float(t.get("min", 0.0))
+        mx = float(t.get("max", 2.0))
+        df = float(t.get("default", 0.7))
+    except (TypeError, ValueError):
+        mn, mx, df = 0.0, 2.0, 0.7
+    return (mn, mx, df)
+
+
+def provider_extra_headers(provider_name: str) -> dict:
+    """Return any documented extra HTTP headers for this provider.
+
+    These are merged into the LiteLLM client_args.extra_headers at runtime
+    by StrandsAdapter (e.g. OpenRouter wants HTTP-Referer + X-Title).
+    """
+    q = get_provider_quirks(provider_name)
+    h = q.get("extra_headers") or {}
+    return dict(h) if isinstance(h, dict) else {}
 
 
 # ----------------------------------------------------------------------------
@@ -204,59 +283,46 @@ def reasoning_param_name(provider_name: str, model_id: str) -> str | None:
 def get_model_capabilities(provider_name: str, model_id: str,
                            *, logical: str | None = None,
                            family: str | None = None,
-                           benchmarks: dict | None = None) -> dict:
+                           benchmarks: dict | None = None,
+                           use_live_detection: bool = True) -> dict:
     """Return what this (provider, model) actually supports on its host.
+
+    Delegates to ``providers.get_model_capabilities`` so the live-effort
+    detector (``lib/effort_detector.py``) is consulted in a single place.
+    The detector merges:
+      - LIVE OpenRouter /api/v1/models supported_parameters per model
+        (dynamically detects effort + tools + vision for OpenRouter models)
+      - LIVE GitHub Models catalog capabilities array
+        (surfaces reasoning + tool-calling for github-models)
+      - curated reasoning_catalog.json entries for providers without a live
+        per-model effort API (NVIDIA NIM, Cloudflare, PrivateMode AI, OpenCode)
 
     Returns:
         {
             'effort': bool,         # supports a reasoning/thinking param
             'effort_param': str|None,  # the param name (e.g. 'reasoning_effort')
+            'effort_levels': list[str],  # ordered level names (empty = no knob)
             'web_search': bool,     # supports native web-search tool
             'web_search_native': bool,  # alias of web_search (clarity)
             'tools': bool,          # supports function/tool calling
             'vision': bool,         # supports image input
+            'audio': bool,          # supports audio input (OpenRouter live)
+            'video': bool,          # supports video input (OpenRouter live)
         }
 
     ``benchmarks`` is the optional per-logical-model benchmark dict from
     ``benchmarks.json`` (used to surface tools/vision tags when the catalog
     doesn't already imply them).
+
+    ``use_live_detection`` (default True) toggles the live OpenRouter +
+    GitHub Models API fetch. Set to False for offline mode (catalog-only).
     """
-    rbody = reasoning_body_for(provider_name, model_id, logical=logical, family=family)
-    effort_param = reasoning_param_name(provider_name, model_id) if rbody else None
-    ws_native = supports_native_web_search(provider_name, model_id)
-
-    # Tools/vision: derive from benchmarks tags + catalog notes when available.
-    bench = benchmarks or {}
-    bench_lower = " ".join(str(bench.get(k, "") or "").lower()
-                           for k in ("tags", "note")).lower()
-    full = (bench_lower + " " + (logical or "").lower()
-            + " " + (model_id or "").lower()
-            + " " + (provider_name or "").lower())
-    has_vision = any(t in full for t in ("vision", "image", "multimodal"))
-    has_tools = any(t in full for t in ("tool", "function", "agentic"))
-
-    # Reasoning bodies themselves imply tool support (thinking models are
-    # always tool-capable); OpenRouter always supports tools; CF Workers AI
-    # chat-completions exposes tools on every model that has a chat-completions
-    # endpoint. Conservative: leave it as-is (only flag when benchmark says).
-    p = _normalize_provider(provider_name)
-    if p in ("openrouter",):
-        # OpenRouter exposes OpenAI-style tools on every chat-completions model.
-        has_tools = True
-    if p == "cloudflare" and (model_id or "").startswith("@cf/"):
-        # CF chat-completions endpoint supports tools on every model that
-        # accepts function calling (documented as "Function calling" tag).
-        if "function calling" in full or "tool" in full:
-            has_tools = True
-
-    return {
-        "effort": bool(rbody),
-        "effort_param": effort_param,
-        "web_search": ws_native,
-        "web_search_native": ws_native,
-        "tools": has_tools,
-        "vision": has_vision,
-    }
+    from providers import get_model_capabilities as _get_caps
+    return _get_caps(
+        provider_name, model_id,
+        logical=logical, family=family, benchmarks=benchmarks,
+        use_live_detection=use_live_detection,
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -301,4 +367,9 @@ __all__ = [
     "reasoning_param_name",
     "get_model_capabilities",
     "build_extra_body",
+    "load_provider_quirks",
+    "get_provider_quirks",
+    "provider_max_context",
+    "provider_temperature_range",
+    "provider_extra_headers",
 ]

@@ -436,7 +436,83 @@ class Panel:
             "frontier_ok": frontier_safe_available >= 2,
             "benchmark_note": "indicative, hand-curated (see benchmarks.json) - not authoritative",
             "templates": templates_by_kind,
+            # Per-provider Python invocation reference (researched live from
+            # each provider's docs). Frontend uses this to render
+            # provider-specific docs (max context, temperature ranges,
+            # reasoning shape, python snippet, model quirks). See
+            # lib/provider_quirks.json + lib/provider_tools.load_provider_quirks().
+            "provider_quirks": _provider_quirks_for_roster(),
+            # Live-detected effort summary: how many models in the roster
+            # have a reasoning/effort parameter (so the frontend can show a
+            # "X models support effort" badge without iterating hosts).
+            "effort_summary": _effort_summary(models),
         }
+
+
+def _provider_quirks_for_roster() -> dict:
+    """Build the per-provider quirks summary for the /api/roster response.
+
+    Returns a dict keyed by provider name, each value containing the fields
+    the frontend needs to render a provider-info panel: base_url, auth note,
+    max_context_default, temperature range, reasoning shape, web_search shape,
+    python_snippet, and a short list of quirks. The full provider_quirks.json
+    is loaded lazily (cached on the module after the first call).
+    """
+    try:
+        from provider_tools import load_provider_quirks
+        data = load_provider_quirks().get("providers", {}) or {}
+    except Exception:
+        return {}
+    out: dict = {}
+    for name, q in data.items():
+        if not isinstance(q, dict):
+            continue
+        out[name] = {
+            "base_url": q.get("base_url", ""),
+            "auth": q.get("auth", ""),
+            "max_context_default": q.get("max_context_default"),
+            "temperature": q.get("temperature") or {},
+            "top_p": q.get("top_p") or {},
+            "top_k": q.get("top_k") or {},
+            "seed": q.get("seed"),
+            "response_format": q.get("response_format"),
+            "tools": q.get("tools"),
+            "tool_choice": q.get("tool_choice"),
+            "reasoning": q.get("reasoning") or {},
+            "web_search": q.get("web_search") or {},
+            "extra_headers": q.get("extra_headers") or {},
+            "quirks": q.get("quirks") or [],
+            "python_snippet": q.get("python_snippet", ""),
+        }
+    return out
+
+
+def _effort_summary(models: list[dict]) -> dict:
+    """Build a summary of effort-mode support across the roster.
+
+    Returns {total, with_effort, without_effort, by_provider: {prov: count}}.
+    The frontend uses this to show a "X of Y models support effort modes"
+    badge without iterating hosts.
+    """
+    total = len(models)
+    with_effort = 0
+    by_provider: dict[str, int] = {}
+    for m in models:
+        caps = (m.get("capabilities") or {})
+        if caps.get("effort") or caps.get("effort_levels"):
+            with_effort += 1
+        for h in (m.get("hosts") or []):
+            hc = h.get("capabilities") or {}
+            if hc.get("effort") or hc.get("effort_levels"):
+                prov = h.get("slot", "").split("/", 1)[0]
+                if prov:
+                    by_provider[prov] = by_provider.get(prov, 0) + 1
+    return {
+        "total": total,
+        "with_effort": with_effort,
+        "without_effort": total - with_effort,
+        "by_provider": by_provider,
+    }
 
 
 def _load_panel_cfg() -> dict:
@@ -1190,6 +1266,17 @@ class Handler(BaseHTTPRequestHandler):
                     provider_sync._sync_cache = None
                 except Exception:
                     pass
+                # Refresh the live effort-detector cache (OpenRouter + GitHub
+                # Models model lists). This is what backs the dynamic effort
+                # mode detection — without this, the detector's 10-minute cache
+                # would keep returning stale data after a new model ships on
+                # OpenRouter or GitHub Models.
+                try:
+                    import effort_detector
+                    effort_detector.refresh_live_cache()
+                    log_event("resync_effort_cache_refreshed")
+                except Exception as e:
+                    log_event("resync_effort_cache_error", error=str(e)[:200])
                 # Trigger a fresh sync
                 try:
                     from providers import make_provider_registry
