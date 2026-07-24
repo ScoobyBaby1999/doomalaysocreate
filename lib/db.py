@@ -999,3 +999,310 @@ def delete_provider_key(user_id: str, provider: str) -> bool:
         _db().commit()
         return cur.rowcount > 0
 
+
+
+# ---------------------------------------------------------------------------
+# HF Dataset DB sync — survives Space restarts on the free tier (no /data)
+# ---------------------------------------------------------------------------
+# The HF Space free tier has NO persistent storage: /data is wiped on every
+# restart (sleep -> wake, rebuild, login). The SQLite DB at /data/doomalaysocreate.db
+# holds ALL chat history (chat_sessions, chat_events), per-user workspaces,
+# provider keys, and conscious agents -- losing it means users see "blank
+# chat sidebar" after every Space wake-up.
+#
+# The HF Dataset `ScoobyBaby1999/doomalaysocreate-metrics-public` (the same
+# one already used for the public template library) IS persistent -- files
+# committed to it survive forever. We mirror the DB binary there as
+# `doomalaysocreate.db` so the next boot can restore the conversation history.
+#
+# Throttle: uploads are batched to at most one every 30s. A burst of chat
+# messages triggers a sync on the first message and again 30s later if more
+# arrive in between. On boot, restore_db_from_dataset() downloads the file
+# and replaces /data/doomalaysocreate.db if the dataset version is newer.
+
+# The dataset repo to sync the DB to (same one used for templates + metrics).
+DB_SYNC_DATASET_REPO = os.environ.get(
+    "DOOMALAYSOCREATE_DB_DATASET",
+    "ScoobyBaby1999/doomalaysocreate-metrics-public",
+).strip()
+
+# Path inside the dataset repo where the DB binary lives.
+DB_SYNC_PATH_IN_REPO = "doomalaysocreate.db"
+
+# Minimum seconds between sync uploads (throttle so we don't hammer HF).
+DB_SYNC_MIN_INTERVAL_S = float(os.environ.get("DOOMALAYSOCREATE_DB_SYNC_INTERVAL", "30"))
+
+# Internal state -- last sync time + a daemon thread that batches uploads.
+_db_sync_lock = threading.Lock()
+_db_sync_last_upload_ts: float = 0.0
+_db_sync_pending = False
+_db_sync_thread: threading.Thread | None = None
+_db_sync_wakeup = threading.Event()
+
+
+def _hf_token_for_db_sync() -> str:
+    """Resolve the HF token to use for DB sync. Prefers HF_TOKEN, then
+    HUGGINGFACE_TOKEN, then any per-user token configured in the users
+    table (last resort -- used when the Space has no env-var token but a
+    user has HF-linked their account). Empty string if no token found."""
+    tok = (os.environ.get("HF_TOKEN", "")
+           or os.environ.get("HUGGINGFACE_TOKEN", "")).strip()
+    if tok:
+        return tok
+    # Best-effort: scan users table for any HF token (used on duped Spaces
+    # where the operator hasn't set HF_TOKEN but a user has HF-linked).
+    try:
+        import crypto  # local import -- only needed for the fallback path
+        db = _db()
+        rows = db.execute(
+            "SELECT hf_token_encrypted FROM users "
+            "WHERE hf_token_encrypted IS NOT NULL "
+            "AND hf_token_encrypted != '' LIMIT 1").fetchall()
+        for r in rows:
+            enc = r["hf_token_encrypted"]
+            try:
+                plain = crypto.decrypt_secret(enc)
+                if plain:
+                    return plain.strip()
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ""
+
+
+def _hf_available_for_db_sync() -> bool:
+    """True iff we have a token AND the huggingface_hub library is importable."""
+    if not _hf_token_for_db_sync():
+        return False
+    try:
+        import huggingface_hub  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def restore_db_from_dataset() -> bool:
+    """Download the DB from the HF dataset on boot.
+
+    Replaces /data/doomalaysocreate.db IFF the dataset copy is newer than
+    the local copy (compared by mtime). Called once at startup BEFORE
+    ``init_db()`` opens the SQLite connection so the restored file is the
+    one SQLite sees.
+
+    Returns True if the DB was restored, False otherwise (no copy on the
+    dataset, network error, local copy is newer, etc.). Never raises.
+    """
+    if not _hf_available_for_db_sync():
+        return False
+    token = _hf_token_for_db_sync()
+    try:
+        from huggingface_hub import hf_hub_download, HfApi
+        from huggingface_hub.utils import (
+            RepositoryNotFoundError,
+            RevisionNotFoundError,
+            EntryNotFoundError,
+        )
+    except ImportError:
+        return False
+    # Ensure the dataset repo exists (creates it public if missing).
+    api = HfApi(token=token)
+    try:
+        api.create_repo(repo_id=DB_SYNC_DATASET_REPO, repo_type="dataset",
+                        private=False, exist_ok=True)
+    except Exception:
+        # Network error / rate limit -- proceed to attempt download anyway.
+        pass
+    # Download the DB binary. On a fresh boot /data is wiped so the local
+    # DB doesn't exist -- the downloaded copy always wins.
+    try:
+        downloaded_path = hf_hub_download(
+            repo_id=DB_SYNC_DATASET_REPO,
+            filename=DB_SYNC_PATH_IN_REPO,
+            repo_type="dataset",
+            token=token,
+        )
+    except (RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError):
+        # First boot -- dataset or file doesn't exist yet. Nothing to restore.
+        return False
+    except Exception:
+        # Network error -- non-fatal, proceed with local DB.
+        return False
+    if not downloaded_path or not os.path.exists(downloaded_path):
+        return False
+    # Compare mtimes. If the dataset version is newer (or local doesn't
+    # exist), replace the local DB. We close any open SQLite connection
+    # first so the file can be overwritten cleanly.
+    try:
+        remote_mtime = os.path.getmtime(downloaded_path)
+    except OSError:
+        remote_mtime = 0.0
+    local_exists = DB_PATH.exists()
+    if local_exists:
+        try:
+            local_mtime = os.path.getmtime(DB_PATH)
+        except OSError:
+            local_mtime = 0.0
+        # If local is newer (e.g. a quick sleep/wake cycle where the in-
+        # memory state was just flushed), keep local. Use a 1s epsilon to
+        # avoid floating-point tie issues.
+        if local_mtime > remote_mtime + 1.0:
+            return False
+    # Close any open connection so we can overwrite the file.
+    global _conn
+    if _conn is not None:
+        try:
+            _conn.close()
+        except Exception:
+            pass
+        _conn = None
+    try:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.copy2(downloaded_path, DB_PATH)
+        try:
+            print(f"[db] restored {DB_PATH} from HF dataset "
+                  f"({os.path.getsize(DB_PATH)} bytes)", flush=True)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def sync_db_to_dataset(force: bool = False) -> bool:
+    """Queue a DB sync to the HF dataset. Throttled to at most one upload
+    every ``DB_SYNC_MIN_INTERVAL_S`` seconds (default 30s).
+
+    Returns True if the sync was queued (or completed synchronously if
+    the throttle window has elapsed), False if HF is unavailable or the
+    upload failed. Safe to call from any thread (e.g. after every chat
+    message -- the throttle batches them).
+
+    Pass ``force=True`` to bypass the throttle (used by flush_db_sync()
+    on SIGTERM for a final flush).
+    """
+    global _db_sync_last_upload_ts, _db_sync_pending, _db_sync_thread
+    if not _hf_available_for_db_sync():
+        return False
+    if not DB_PATH.exists():
+        return False
+    now = time.time()
+    with _db_sync_lock:
+        if not force and (now - _db_sync_last_upload_ts) < DB_SYNC_MIN_INTERVAL_S:
+            # Throttled -- mark a pending sync and ensure the worker wakes
+            # up after the throttle window elapses.
+            _db_sync_pending = True
+            _db_sync_wakeup.set()
+            _ensure_db_sync_worker()
+            return True
+        # We're going to upload now -- clear the pending flag and reset the
+        # timer under the lock so concurrent callers don't double-upload.
+        _db_sync_pending = False
+        _db_sync_last_upload_ts = now
+    # Do the actual upload OUTSIDE the lock so concurrent callers don't
+    # block on the network round-trip (which can take 5-30s for a multi-MB
+    # DB file). The lock above only guards the throttle decision.
+    return _do_db_sync_upload()
+
+
+def _ensure_db_sync_worker() -> None:
+    """Start the daemon worker that flushes the pending sync when the
+    throttle window elapses. Idempotent -- only starts one thread."""
+    global _db_sync_thread
+    if _db_sync_thread is not None and _db_sync_thread.is_alive():
+        return
+    _db_sync_thread = threading.Thread(target=_db_sync_worker_loop,
+                                       daemon=True,
+                                       name="db-sync-worker")
+    _db_sync_thread.start()
+
+
+def _db_sync_worker_loop() -> None:
+    """Background loop that flushes pending syncs after the throttle window.
+
+    Wakes up when ``_db_sync_wakeup`` is set (by a throttled caller), waits
+    out the remaining throttle window, then uploads. Keeps looping until
+    there are no more pending syncs."""
+    while True:
+        # Wait for someone to signal a pending sync.
+        _db_sync_wakeup.wait(timeout=60.0)
+        _db_sync_wakeup.clear()
+        # Drain pending syncs in a loop -- each iteration waits for the
+        # throttle window to elapse, then uploads.
+        while True:
+            wait_s = 0.0
+            with _db_sync_lock:
+                if not _db_sync_pending:
+                    break
+                now = time.time()
+                wait_s = (_db_sync_last_upload_ts + DB_SYNC_MIN_INTERVAL_S) - now
+                if wait_s <= 0:
+                    # Window elapsed -- upload now.
+                    _db_sync_pending = False
+                    _db_sync_last_upload_ts = now
+            if wait_s > 0:
+                # Sleep outside the lock so other callers can mark more
+                # pending syncs while we wait (they'll coalesce into one
+                # upload when the window elapses).
+                time.sleep(min(wait_s, 5.0))
+                continue
+            # Window elapsed -- upload.
+            _do_db_sync_upload()
+
+
+def _do_db_sync_upload() -> bool:
+    """Actually upload the DB file to the HF dataset. Network round-trip
+    happens here. Best-effort: logs failures, never raises."""
+    if not _hf_available_for_db_sync():
+        return False
+    if not DB_PATH.exists():
+        return False
+    token = _hf_token_for_db_sync()
+    try:
+        from huggingface_hub import HfApi, upload_file
+        from huggingface_hub.utils import HfHubHTTPError
+    except ImportError:
+        return False
+    api = HfApi(token=token)
+    try:
+        api.create_repo(repo_id=DB_SYNC_DATASET_REPO, repo_type="dataset",
+                        private=False, exist_ok=True)
+    except Exception:
+        pass
+    # Read the DB file as binary and upload. We use upload_file with
+    # path_or_fileobj=bytes so we don't need to worry about file handles
+    # or SQLite WAL mode locking the file. The bytes snapshot is atomic.
+    try:
+        with open(DB_PATH, "rb") as f:
+            db_bytes = f.read()
+    except Exception:
+        return False
+    try:
+        upload_file(
+            path_or_fileobj=db_bytes,
+            path_in_repo=DB_SYNC_PATH_IN_REPO,
+            repo_id=DB_SYNC_DATASET_REPO,
+            repo_type="dataset",
+            token=token,
+            commit_message="auto-sync doomalaysocreate.db",
+        )
+        return True
+    except HfHubHTTPError as exc:
+        try:
+            print(f"[db] sync upload failed: {type(exc).__name__}: "
+                  f"{str(exc)[:200]}", flush=True)
+        except Exception:
+            pass
+        return False
+    except Exception:
+        return False
+
+
+def flush_db_sync() -> None:
+    """Force-flush any pending DB sync. Called on SIGTERM shutdown so the
+    very last message a user sent before the Space slept isn't lost."""
+    try:
+        sync_db_to_dataset(force=True)
+    except Exception:
+        pass

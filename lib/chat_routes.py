@@ -469,6 +469,12 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
                                      workspace_id=workspace_id, user_id=user_id,
                                      **kwargs)
             _ok_session(handler, cs, status=201)
+            # STRANDS-COMPLETE-FIX (Issue 1): throttle-batched DB sync to
+            # the HF dataset so chat sessions survive Space restarts.
+            try:
+                _dbmod.sync_db_to_dataset()
+            except Exception:
+                pass
             return True
         if route.startswith("/api/chat/sessions/"):
             parts = route[len("/api/chat/sessions/"):].split("/")
@@ -505,6 +511,13 @@ def handle_request(method: str, path: str, body: dict, handler) -> bool:
                 count = append_chat_events(sid, persistable)
                 maybe_set_title(sid, persistable)
                 _json(handler, 200, {"persisted": count})
+                # STRANDS-COMPLETE-FIX (Issue 1): sync the newly-persisted
+                # events to the HF dataset so they survive a Space restart.
+                # Throttle-batched (max 1 upload / 30s) + best-effort.
+                try:
+                    _dbmod.sync_db_to_dataset()
+                except Exception:
+                    pass
                 return True
         _json(handler, 404, {"error": "unknown POST route"})
         return True

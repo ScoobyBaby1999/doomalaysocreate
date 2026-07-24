@@ -2882,29 +2882,25 @@ class Handler(BaseHTTPRequestHandler):
                               workspace_id=workspace_id,
                               note="proceeding without workspace (not owned by caller)")
                     workspace_id = None
-        # Optional chat_session_id: link this agent turn to a persistent chat
-        # session for history. If absent, we auto-create one so every message
-        # has a persistent home (matches the frontend's expectations).
+        # STRANDS-COMPLETE-FIX (Issue 2): the frontend MUST create the chat
+        # session first via POST /api/chat/sessions and pass the session id
+        # as `chat_session_id` in every POST /api/agent call. The previous
+        # auto-create logic here caused duplicate sessions: the frontend's
+        # createSession() call succeeded but its response was slow, so the
+        # user clicked send before the session id landed; this backend then
+        # auto-created a SECOND session -- the user saw two entries in the
+        # sidebar for one click. We now REQUIRE chat_session_id and reject
+        # with 400 if it's missing. The frontend's _runTurn already awaits
+        # createSession() before calling client.send(), so the id is always
+        # present in well-formed requests.
         chat_session_id = payload.get("chat_session_id")
         chat_session_id = (chat_session_id.strip()
                            if isinstance(chat_session_id, str) and chat_session_id.strip()
                            else None)
         if not chat_session_id:
-            # Auto-create a chat session for this turn. Bug 2: the previous
-            # implementation swallowed ALL exceptions silently, so if the DB
-            # write failed (e.g. /data not writable, schema migration error)
-            # the user saw "no new chat created" with no diagnostic. Log the
-            # failure so it's visible in the Space logs.
-            try:
-                import chat_routes
-                cs_user = self._require_user_from_jwt()
-                cs = chat_routes.create_chat_session(
-                    model=model, workspace_id=workspace_id, user_id=cs_user)
-                chat_session_id = cs["id"]
-            except Exception as e:  # noqa: BLE001
-                log_event("agent_chat_session_create_error",
-                          error=repr(e)[:200])
-                chat_session_id = None
+            self._send_json(400, {"error": "chat_session_id is required "
+                                         "(call POST /api/chat/sessions first)"})
+            return
         # Research mode params (optional). When webSearch or deepResearch is
         # true, the session uses ResearchAdapter instead of the Claude/Strands
         # SDK and drives research_templates directly from the panel's slots.
@@ -3032,6 +3028,14 @@ class Handler(BaseHTTPRequestHandler):
         if chat_session_id:
             resp["chat_session_id"] = chat_session_id
         self._send_json(202, resp)
+        # STRANDS-COMPLETE-FIX (Issue 1): throttle-batched DB sync to the
+        # HF dataset so chat history survives Space restarts. Best-effort,
+        # non-blocking -- the actual upload happens in a background worker
+        # that batches to at most one every 30s.
+        try:
+            db.sync_db_to_dataset()
+        except Exception:
+            pass
 
     def _handle_chat_judge(self, payload: dict) -> None:
         #   POST /api/chat/judge — in-chat multi-model judge panel.
@@ -5213,6 +5217,20 @@ def main() -> int:
     port = int(os.environ.get("PORT", os.environ.get("APP_PORT", "7860")))
 
     # initialize SQLite database for GitHub + HF integration (fast, local)
+    # STRANDS-COMPLETE-FIX (Issue 1): on the HF Space free tier /data is
+    # wiped on every restart (sleep -> wake, rebuild, login). The SQLite
+    # DB at /data/doomalaysocreate.db holds ALL chat history, so losing
+    # it means users see a blank chat sidebar after every wake-up. The HF
+    # Dataset `ScoobyBaby1999/doomalaysocreate-metrics-public` IS persistent
+    # -- we mirror the DB binary there and restore it on boot BEFORE
+    # init_db() opens the SQLite connection so the restored file is the one
+    # SQLite sees. Safe to call when HF_TOKEN is unset (no-op).
+    try:
+        restored = db.restore_db_from_dataset()
+        if restored:
+            log_event("db_restored_from_dataset")
+    except Exception as e:
+        log_event("db_restore_error", error=str(e)[:200])
     db.init_db()
 
     # FIX-ISSUE-2 (FIX-CHAT-BROKEN): eagerly create the chat_sessions and
@@ -5303,6 +5321,13 @@ def main() -> int:
         pass
     finally:
         dataset_persistence.shutdown_upload()
+        # STRANDS-COMPLETE-FIX (Issue 1): force-flush the DB to the HF
+        # dataset so the very last chat message a user sent before the
+        # Space slept/restarted isn't lost. Idempotent + best-effort.
+        try:
+            db.flush_db_sync()
+        except Exception:
+            pass
         server.server_close()
     return 0
 
