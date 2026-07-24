@@ -2927,9 +2927,11 @@ class Handler(BaseHTTPRequestHandler):
         effort = str(payload.get("effort", "")).strip().lower() or None
         if not effort and cs_meta:
             effort = (cs_meta.get("effort") or "").strip().lower() or None
-        if effort and effort not in ("low", "med", "high", "max"):
-            self._send_json(400, {"error": "'effort' must be one of low|med|high|max"})
-            return
+        # Accept any effort string — the valid levels are determined per-model
+        # by the effort_detector. The frontend sends the level the user selected
+        # from the model's effort_levels list (e.g. "on", "off", "none", "high",
+        # "max", "min", "ultra", etc.). The StrandsAdapter.open() resolves the
+        # correct body via effort_detector.detect_effort_body().
         web_search = bool(payload.get("webSearch") or payload.get("web_search"))
         if "webSearch" not in payload and "web_search" not in payload and cs_meta:
             web_search = bool(cs_meta.get("web_search", 0))

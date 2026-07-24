@@ -944,25 +944,34 @@ class StrandsAdapter(BaseAdapter):
         extra_body: dict = {}
         try:
             import provider_tools
+            import effort_detector
             # Resolve the canonical provider name from _resolve_open_model
             # (4th tuple element); fall back to key_env-derived name.
             _provider_for_caps = provider_label or key_env
-            _enable_reasoning = bool(self.effort and self.effort != "low")
+            _enable_reasoning = bool(self.effort and self.effort != "low" and self.effort != "off")
             _enable_native_ws = bool(self.web_search)
             # If native web search is requested but unsupported, fall back
             # to Strands' built-in web_search tool (Tavily/DuckDuckGo) —
-            # which is already loaded below in the tools list. We don't
-            # double-search: if native is on, the Strands web_search tool
-            # stays available but the model typically prefers the native
-            # plugin (lower latency, fresher results).
+            # which is already loaded below in the tools list.
             if _enable_native_ws and not provider_tools.supports_native_web_search(
                     _provider_for_caps, model):
                 _enable_native_ws = False
-            extra_body = provider_tools.build_extra_body(
-                _provider_for_caps, model,
-                enable_reasoning=_enable_reasoning,
-                enable_web_search=_enable_native_ws,
-            )
+            # Use effort_detector for the correct per-provider effort body.
+            # This translates the user-selected effort level (e.g. "on", "high",
+            # "max") to the correct provider-specific body (e.g.
+            # chat_template_kwargs:{thinking:true} or reasoning_effort:"high").
+            if _enable_reasoning and self.effort:
+                extra_body = effort_detector.detect_effort_body(
+                    _provider_for_caps, model, self.effort)
+                if not extra_body:
+                    # Fall back to the old catalog-based resolution
+                    extra_body = provider_tools.reasoning_body_for(
+                        _provider_for_caps, model)
+            if _enable_native_ws:
+                ws_body = provider_tools.native_web_search_body(
+                    _provider_for_caps, model)
+                if ws_body:
+                    extra_body.update(ws_body)
             if extra_body:
                 try:
                     log_event("agent_extra_body", provider=_provider_for_caps,
@@ -1434,8 +1443,12 @@ class StrandsAdapter(BaseAdapter):
         # assistant replies in long conversations. (We accept that some
         # already-emitted tool_use/tool_result events might re-emit — the
         # frontend dedupes by seq.)
-        if self._msg_cursor > len(msgs):
-            self._msg_cursor = 0
+        # If the cursor is past the end (SlidingWindowConversationManager
+        # trimmed old messages), DON'T reset to 0 — that would re-walk ALL
+        # remaining messages and re-emit old thinking/assistant events.
+        # Instead, skip the walk entirely (there are no NEW messages to emit).
+        if self._msg_cursor >= len(msgs):
+            self._msg_cursor = len(msgs)
         for m in msgs[self._msg_cursor:]:
             role = m.get("role")
             for block in (m.get("content") or []):
