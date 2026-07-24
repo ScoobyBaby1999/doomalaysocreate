@@ -90,11 +90,87 @@ def derive_display_name(model_id: str) -> str:
 
 
 def derive_capabilities_from_name(model_id: str) -> list[str]:
+    """Infer capability tags from a model's family-name pattern.
+
+    Used as a fallback when the OpenRouter / GitHub Models family registry
+    doesn't carry explicit capabilities for a model. The patterns reflect
+    naming conventions that vendors actually use (e.g. `bge-` for BAAI
+    embeddings, `flux-` for image generation, `-instruct` / `-chat` for
+    chat-tuned LLMs, `aura-` for Cloudflare TTS). No static per-model
+    data — the inference is purely from the dynamically-fetched model ID.
+    """
     fam = make_family(model_id)
     caps: list[str] = []
-    if re.search(r"\b(gemma|kimi|llama-4|qwen3|glm-5|step)\b", fam) or "vision" in fam:
+
+    # --- Vision (multimodal image input) ---
+    if (re.search(r"\b(gemma|kimi|llama-4|qwen3|glm-5|step|llava|florence)\b", fam)
+            or "vision" in fam
+            or re.search(r"-(vl|vlb|vqa)\b", fam)
+            or fam.endswith("-vl")
+            or fam.endswith("-vlb")
+            or fam.startswith("llava") or fam.startswith("mimo-v2-omni")):
         caps.append("vision")
-    return caps
+
+    # --- Embedding models ---
+    if "reranker" not in fam and (
+        fam.startswith("bge-") or fam.startswith("embed-")
+        or fam.startswith("gte-") or fam.startswith("e5-")
+        or "embeddinggemma" in fam or "-embedding" in fam
+    ):
+        caps.append("embedding")
+
+    # --- Reranker models ---
+    if "reranker" in fam or fam.startswith("bge-reranker"):
+        caps.append("reranker")
+
+    # --- Image generation ---
+    if (fam.startswith("flux") or "sdxl" in fam or "stable-diffusion" in fam
+            or "dreamshaper" in fam or "latent-consistency" in fam
+            or fam.endswith("-lcm") or "-lcm-" in fam
+            or fam.startswith("uform-gen") or fam.startswith("phoenix")):
+        caps.append("image_generation")
+
+    # --- Audio / speech ---
+    if (fam.startswith("aura-") or "whisper" in fam
+            or "-tts" in fam or "speech" in fam or "bark" in fam
+            or "voxtral" in fam or "melotts" in fam or "nova-3" in fam):
+        caps.append("audio")
+
+    # --- Classification / detection ---
+    if (fam.startswith("detr-") or fam.startswith("yolo")
+            or fam.startswith("bert-") or fam.startswith("distilbert")
+            or fam.startswith("roberta-") or fam.startswith("resnet")
+            or fam.startswith("llama-guard") or "guard" in fam
+            or "-cnn" in fam or fam.endswith("-sst-2-int8") or fam.endswith("-sst")):
+        caps.append("classification")
+
+    # --- Translation / seq2seq ---
+    if (fam.startswith("m2m100") or fam.startswith("nllb") or "-mt-" in fam):
+        caps.append("translation")
+
+    # --- Chat / tool-calling (instruction-tuned text models) ---
+    # Catches: *-instruct, *-chat, *-it, *-turbo, *-hermes, big-pickle (OpenCode's chat model),
+    # cohere-command-*, qwen*-coder-*, sqlcoder, mimo-v2-pro, smart-turn-*, lucid-origin
+    if (re.search(r"-instruct|-chat|-it|-turbo|-hermes", fam)
+            or "hermes" in fam or "chat" in fam
+            or "tool" in fam
+            or fam == "big-pickle"
+            or fam.startswith("cohere-command")
+            or fam.startswith("qwen") and "coder" in fam
+            or fam.startswith("sqlcoder")
+            or fam.startswith("mimo-v2-pro")
+            or fam.startswith("smart-turn")
+            or fam == "lucid-origin"):
+        caps.append("tools")
+
+    # --- Reasoning ---
+    if (re.search(r"\b(r1|o1|o3|o4|qwq|nemotron|reasoning|thinking)\b", fam)
+            or fam.startswith("deepseek-r")
+            or "-reasoning" in fam):
+        caps.append("reasoning")
+
+    # De-dup, preserving first-seen order
+    return list(dict.fromkeys(caps))
 
 
 def is_free_model(model_id: str, prompt_price: float | None = None, completion_price: float | None = None) -> bool:
@@ -304,39 +380,37 @@ def _openrouter_premium() -> bool:
 
 
 def _fetch_openrouter_family() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Fetch OpenRouter's model list and build the family registry.
+    """Fetch OpenRouter's FULL model list and build the family registry.
 
     Returns (models_list, family_registry) where family_registry maps
     family_key → {context, capabilities, benchmarks, pricing, ranks}.
 
-    Premium gating: when the user has NOT opted into premium mode
-    (env var OPENROUTER_PREMIUM unset/false), only ``:free`` models are
-    kept — paid models are filtered out of BOTH the raw list and the
-    family registry so the public catalog response never surfaces paid
-    OpenRouter routes to a free-tier user. When premium is enabled, the
-    full ~400-model list is returned.
+    IMPORTANT: This function fetches ALL ~340 OpenRouter models (free + paid)
+    and builds the metadata registry from the FULL list. Benchmarks, pricing,
+    capabilities, and context lengths are attached to the MODEL (not the
+    provider route), so filtering to only `:free` routes would discard
+    metadata for the underlying model families. The free-tier filter is
+    applied LATER by `_sync_provider_models()` / `OpenRouterSync.filter_free_models()`
+    when building the USER-FACING model list (which models the user can call).
+
+    The metadata registry, however, must include ALL models so that the same
+    family (e.g. `glm-5.2`) carries benchmark/pricing/capability data even
+    when served by a provider (NVIDIA, Cloudflare, PrivateModeAI) that
+    doesn't expose the OpenRouter benchmark field. Without this, only the
+    ~18 free models would contribute metadata — giving ~4% benchmark /
+    ~9% pricing / ~9% capability coverage instead of ~34% / 100% / 100%.
     """
     url = "https://openrouter.ai/api/v1/models?output_modalities=text"
     data = _fetch_json(url)
     if not data:
         return [], {}
 
-    all_models: list[dict] = data.get("data", [])
-    # Free-tier filter: when not premium, keep only :free / $0-pricing models.
-    if not _openrouter_premium():
-        raw_models = [
-            m for m in all_models
-            if is_free_model(
-                m.get("id", ""),
-                _safe_float((m.get("pricing") or {}).get("prompt")),
-                _safe_float((m.get("pricing") or {}).get("completion")),
-            )
-        ]
-    else:
-        raw_models = list(all_models)
+    raw_models: list[dict] = data.get("data", []) or []
     registry: dict[str, dict[str, Any]] = {}
 
-    # Pass 1: register every model's family metadata
+    # Pass 1: register every model's family metadata (NO free-tier filter —
+    # benchmarks/pricing/capabilities are properties of the MODEL, not the
+    # route. See the docstring above for the rationale.)
     for m in raw_models:
         mid = m.get("id", "")
         if not mid:
@@ -432,7 +506,179 @@ def _fetch_openrouter_family() -> tuple[list[dict[str, Any]], dict[str, dict[str
                     if k not in existing and k in meta:
                         existing[k] = meta[k]
 
+    # Pass 2: when a free-tier copy of a family exists, prefer to keep the
+    # free_model note for that family (free-tier users see free-model
+    # retention warnings even when the family is also served as a paid
+    # route). Also tag families that have ANY free route so the logical
+    # catalog can mark them as available to free-tier OpenRouter users.
+    if not _openrouter_premium():
+        for m in raw_models:
+            mid = m.get("id", "")
+            if not mid:
+                continue
+            prices = m.get("pricing") or {}
+            try:
+                pf = float(prices.get("prompt")) if prices.get("prompt") else None
+                cf = float(prices.get("completion")) if prices.get("completion") else None
+            except (ValueError, TypeError):
+                pf = cf = None
+            if is_free_model(mid, pf, cf):
+                family = make_family(mid)
+                if family in registry:
+                    registry[family]["free_note"] = (
+                        "Free-model retention: prompts may be logged for provider training."
+                    )
+                    registry[family]["has_free_route"] = True
+
+    log_event(
+        "openrouter_family_fetched",
+        total_models=len(raw_models),
+        families=len(registry),
+        with_benchmarks=sum(1 for v in registry.values() if v.get("benchmarks")),
+        with_pricing=sum(1 for v in registry.values() if v.get("pricing")),
+        with_capabilities=sum(1 for v in registry.values() if v.get("capabilities")),
+    )
     return raw_models, registry
+
+
+# ---------------------------------------------------------------------------
+# GitHub Models catalog — supplementary capabilities + summary data
+# ---------------------------------------------------------------------------
+def _fetch_github_models_family(registry: dict[str, dict[str, Any]]) -> None:
+    """Enrich the family registry with GitHub Models catalog data.
+
+    GitHub Models exposes `https://models.github.ai/catalog/models` (public,
+    no auth) which returns ~37 models with rich capabilities tags
+    ("agents", "streaming", "tool-calling", "agentsV2") and a short summary.
+    This supplements OpenRouter's metadata for models that GitHub Models
+    covers but OpenRouter doesn't (e.g. Azure-OpenAI-only gpt-4.1 variants).
+
+    Mutates ``registry`` in place: only ADDS fields, never overwrites
+    OpenRouter data (OpenRouter is the richer source when both cover a family).
+    Best-effort — failures are logged and silently ignored.
+    """
+    url = "https://models.github.ai/catalog/models"
+    data = _fetch_json(url)
+    if not isinstance(data, list):
+        log_event("github_models_fetch_empty", url=url)
+        return
+
+    enriched = 0
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        mid = entry.get("id") or entry.get("name") or ""
+        if not mid:
+            continue
+        family = make_family(mid)
+
+        meta: dict[str, Any] = {}
+
+        # capabilities from GitHub's curated capability tags
+        caps: list[str] = []
+        in_mods = entry.get("supported_input_modalities") or []
+        if "image" in in_mods:
+            caps.append("vision")
+        if "audio" in in_mods:
+            caps.append("audio")
+        gh_caps = entry.get("capabilities") or []
+        if "tool-calling" in gh_caps or "tools" in gh_caps:
+            caps.append("tools")
+        if "agents" in gh_caps or "agentsV2" in gh_caps:
+            caps.append("agents")
+        if "streaming" in gh_caps:
+            caps.append("streaming")
+        # tag-based reasoning hint
+        tags = entry.get("tags") or []
+        if any("reasoning" in str(t).lower() for t in tags):
+            caps.append("reasoning")
+        if caps:
+            meta["capabilities"] = caps
+
+        # context length from limits
+        limits = entry.get("limits") or {}
+        ctx = limits.get("max_input_tokens") or limits.get("max_total_tokens")
+        if ctx:
+            try:
+                meta["context"] = int(ctx)
+            except (ValueError, TypeError):
+                pass
+
+        if not meta:
+            continue
+
+        # merge: only fill fields missing from the OpenRouter registry
+        if family not in registry:
+            registry[family] = meta
+            enriched += 1
+        else:
+            existing = registry[family]
+            for k in ("context", "capabilities"):
+                if k not in existing and k in meta:
+                    existing[k] = meta[k]
+                    enriched += 1
+
+    log_event("github_models_family_enriched", total_entries=len(data), enriched=enriched)
+
+
+# ---------------------------------------------------------------------------
+# Artificial Analysis — graceful no-op when API unavailable
+# ---------------------------------------------------------------------------
+def _fetch_artificial_analysis_family(registry: dict[str, dict[str, Any]]) -> None:
+    """Attempt to enrich the registry with Artificial Analysis benchmark scores.
+
+    AA exposes their leaderboard data only via their Next.js SPA — the public
+    `/api/models` endpoint returns 404 (verified 2026-06). This function probes
+    the endpoint on each call; if AA ever publishes a public JSON API, this
+    will pick it up automatically with no further code changes.
+
+    Best-effort: failures are logged at debug level and silently ignored.
+    Mutates ``registry`` in place: only ADDS benchmark fields, never overwrites
+    OpenRouter data (OpenRouter's AA-sourced scores are already authoritative).
+    """
+    candidates = [
+        "https://artificialanalysis.ai/api/models",
+        "https://artificialanalysis.ai/api/leaderboard",
+    ]
+    for url in candidates:
+        data = _fetch_json(url)
+        if not data:
+            continue
+        # Normalize: accept either {"models": [...]} or a bare list
+        if isinstance(data, dict):
+            models = data.get("models") or data.get("data") or []
+        elif isinstance(data, list):
+            models = data
+        else:
+            continue
+        enriched = 0
+        for entry in models:
+            if not isinstance(entry, dict):
+                continue
+            mid = entry.get("model") or entry.get("id") or entry.get("name") or ""
+            if not mid:
+                continue
+            family = make_family(str(mid))
+            bm: dict[str, float] = {}
+            for k, label in (
+                ("intelligence_index", "intelligence"),
+                ("coding_index", "coding"),
+                ("agentic_index", "agentic"),
+            ):
+                v = entry.get(k)
+                if isinstance(v, (int, float)):
+                    bm[label] = float(v)
+            if not bm:
+                continue
+            if family not in registry:
+                registry[family] = {"benchmarks": bm}
+                enriched += 1
+            elif "benchmarks" not in registry[family]:
+                registry[family]["benchmarks"] = bm
+                enriched += 1
+        log_event("artificial_analysis_family_enriched", url=url, enriched=enriched)
+        if enriched:
+            return  # stop at the first candidate that yielded data
 
 
 # ---------------------------------------------------------------------------
@@ -655,11 +901,34 @@ def build_provider_catalog(force_refresh: bool = False) -> dict[str, Any]:
         catalog = _load_catalog()
         display_map = _PROVIDER_DISPLAY
 
-        # 1. Build family registry from OpenRouter
+        # 1. Build family registry from OpenRouter (ALL models — benchmarks /
+        #    pricing / capabilities are attached to the MODEL, not the route,
+        #    so the free-tier filter must NOT be applied here. It's applied
+        #    later by `_sync_provider_models()` when building the user-facing
+        #    model list.)
         or_models, family_registry = _fetch_openrouter_family()
         or_live = any(or_models)  # True if the fetch succeeded
 
-        # 2. Sync provider model lists
+        # 1b. Supplement the registry with GitHub Models catalog (capabilities +
+        #     context for Azure-OpenAI-only variants like gpt-4.1). Best-effort.
+        if or_live:
+            try:
+                _fetch_github_models_family(family_registry)
+            except Exception as e:
+                log_event("github_models_family_error", error=str(e)[:500])
+
+        # 1c. Probe Artificial Analysis public API for additional benchmark
+        #     scores. Currently 404 (verified 2026-06) — function is a no-op
+        #     when the endpoint is unavailable. Will auto-pick up if AA ever
+        #     publishes a public JSON API.
+        if or_live:
+            try:
+                _fetch_artificial_analysis_family(family_registry)
+            except Exception as e:
+                log_event("artificial_analysis_family_error", error=str(e)[:500])
+
+        # 2. Sync provider model lists (free-tier filter applied HERE for
+        #    OpenRouter via OpenRouterSync.filter_free_models when not premium)
         provider_models, live_set = _sync_provider_models(catalog)
 
         # 3. Build ProviderGroup for each catalog entry
@@ -784,6 +1053,7 @@ def _build_logical_catalog(
 
     # Merge family-registry attributes per group
     result: list[dict[str, Any]] = []
+    derived_caps_count = 0
     for family in sorted(groups.keys()):
         group = groups[family]
         fam_meta = family_registry.get(family, {})
@@ -792,6 +1062,15 @@ def _build_logical_catalog(
         caps = fam_meta.get("capabilities")
         if caps:
             attributes["capabilities"] = caps
+        else:
+            # No registry-sourced capabilities — fall back to name-based
+            # inference (vision/embedding/audio/image_generation/etc.).
+            # This ensures even Cloudflare-only niche models (bge-*, flux-*,
+            # aura-*, distilbert-*) get at least ONE capability tag.
+            dc = derive_capabilities_from_name(family)
+            if dc:
+                attributes["capabilities"] = dc
+                derived_caps_count += 1
         bm = fam_meta.get("benchmarks")
         if bm:
             attributes["benchmarks"] = bm
@@ -816,7 +1095,7 @@ def _build_logical_catalog(
             entry["attributes"] = attributes
         result.append(entry)
 
-    log_event("logical_catalog_built", count=len(result))
+    log_event("logical_catalog_built", count=len(result), derived_caps=derived_caps_count)
     return result
 
 
