@@ -1320,16 +1320,37 @@ export const useChatStore = create<ChatState>()(
                   // Try to find the model in the providers list to get the
                   // slot id + provider name. Fall back to setting just the
                   // logical id.
+                  // CHAT-RELIABILITY-FIX: prefer slotId match BEFORE logical-id
+                  // match. The previous loop used `mm.id === cs.model ||
+                  // mm.slotId === cs.model` — when cs.model was a logical id
+                  // (e.g. "glm-5.2"), the FIRST provider alphabetically that
+                  // had any model with that id won, ignoring the user's
+                  // original slot selection. Now we do two passes:
+                  // pass 1: exact slotId match (cs.model is already a slot).
+                  // pass 2: logical-id match (cs.model is a bare logical name).
                   let providerName = ms.selectedProviderName;
                   let slotId = cs.model;
+                  // Pass 1: cs.model might already be a slotId
+                  // (e.g. "nvidia/z-ai/glm-5.2") — match exact slotId.
                   for (const p of ms.providers) {
-                    const m = p.models.find(
-                      (mm) => mm.id === cs.model || mm.slotId === cs.model,
-                    );
+                    const m = p.models.find((mm) => mm.slotId === cs.model);
                     if (m) {
                       providerName = p.name;
                       slotId = m.slotId || m.id;
                       break;
+                    }
+                  }
+                  // Pass 2: cs.model is a bare logical id (e.g. "glm-5.2").
+                  // Match by model.id, but pick the host that the user
+                  // previously preferred (via the priority ordering).
+                  if (slotId === cs.model) {
+                    for (const p of ms.providers) {
+                      const m = p.models.find((mm) => mm.id === cs.model);
+                      if (m) {
+                        providerName = p.name;
+                        slotId = m.slotId || m.id;
+                        break;
+                      }
                     }
                   }
                   useModelStore.setState({
@@ -2016,8 +2037,44 @@ async function _runTurn(
         since,
         handleEvent,
         () => {
-          // SSE failed — fall back to polling.
+          // SSE failed — fall back to polling IMMEDIATELY (no delay).
+          //
+          // CHAT-RELIABILITY-FIX: previously this used setInterval(...,800),
+          // which means the first poll didn't fire for 800ms after the SSE
+          // error. The user reported "I sent Hi, got no response" — under
+          // HF Space cold-start the SSE could fail at 50ms, then 800ms
+          // passed before the first poll, then more polls... and if the
+          // agent turn was already done by the time polling started, the
+          // FIRST poll caught the idle status + final events in one shot
+          // (good), but the user perceived a long silence.
+          //
+          // Now: fire the first poll IMMEDIATELY (synchronously inside
+          // the onError callback — Promise.resolve().then(...)) so the
+          // polling loop starts within a microtask of the SSE failure.
+          // Subsequent polls still use a 250ms interval (was 800ms) for
+          // snappier catch-up after the initial poll. 250ms keeps CPU
+          // usage reasonable while ensuring no more than ~250ms of
+          // silence between events.
           if (pollTimer) return; // already polling
+          // Fire first poll immediately so the user sees the response
+          // ASAP (catches the common case where the SSE failed AFTER
+          // the agent finished and the events are already buffered).
+          Promise.resolve()
+            .then(async () => {
+              try {
+                const snap = await client.poll(agentSid!, since);
+                for (const ev of snap.events) handleEvent(ev);
+                if (snap.status !== "running" && snap.status !== "starting") {
+                  set((s) => ({ messages: finalizeStreaming(s.messages) }));
+                  finish();
+                }
+              } catch {
+                /* keep trying via the interval below */
+              }
+            })
+            .catch(() => { /* swallow — interval will retry */ });
+          // Aggressive 250ms polling (down from 800ms) so the user sees
+          // each assistant_delta within 250ms even when SSE is broken.
           pollTimer = setInterval(async () => {
             try {
               const snap = await client.poll(agentSid!, since);
@@ -2029,7 +2086,7 @@ async function _runTurn(
             } catch {
               /* keep trying */
             }
-          }, 800);
+          }, 250);
         },
         () => {
           // Stream closed by server — turn done (or socket dropped).

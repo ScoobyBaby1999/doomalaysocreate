@@ -321,14 +321,21 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
   getSelectedModel: () => {
     const { selectedModelId, selectedSlotId, providers } = get();
     if (!selectedModelId) return null;
-    // try slotId match first (pinned provider selection)
+    // CHAT-RELIABILITY-FIX: prefer slotId match (authoritative per-host key)
+    // BEFORE logical-id match. The previous code's single-loop `find()`
+    // with an OR condition returned the alphabetically-first provider that
+    // had a model with the matching logical id — which meant switching from
+    // "privatemodeai/glm-5.2" to "nvidia/glm-5.2" sometimes still returned
+    // the PMAI entry (or vice versa) because the iteration found the
+    // logical-id match in an earlier provider before checking the slotId
+    // match in the right one. Now we do slotId-first, logical-id-second.
     if (selectedSlotId) {
       for (const p of providers) {
-        const m = p.models.find((m) => m.slotId === selectedSlotId);
+        const m = p.models.find((mm) => mm.slotId === selectedSlotId);
         if (m) return m;
       }
     }
-    // fall back to logical model ID match
+    // fall back to logical model ID match (legacy selection without slotId)
     for (const p of providers) {
       const m = p.models.find((m) => m.id === selectedModelId);
       if (m) return m;

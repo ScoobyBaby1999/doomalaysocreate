@@ -5,6 +5,7 @@ import { GitHubClient } from "../api/github";
 import { useChatStore } from "../state/chatStore";
 import { useModelStore } from "../lib/model-store";
 import { isFreeModel } from "../lib/providers/family";
+import type { ProviderGroup, ProviderModel } from "../lib/providers/types";
 import { ChatMessageBubble } from "../components/ChatMessageBubble";
 import { SessionSidebar } from "../components/SessionSidebar";
 import { FileDrawer } from "../components/FileDrawer";
@@ -16,6 +17,38 @@ import { QueueMonitor } from "../components/QueueMonitor";
 import { TemplateLibrary } from "../components/TemplateLibrary";
 import { SaveAsTemplateDialog } from "../components/SaveAsTemplateDialog";
 import { Popover } from "../components/Popover";
+
+// CHAT-RELIABILITY-FIX: extracted helper so the per-host model-info lookup
+// can be called from TWO passes (slotId-first, then logical-id fallback)
+// without duplicating the capability/effort-derivation logic.
+//
+// The `effort` capability is derived from the presence of non-empty
+// `effort_levels` (the authoritative per-host signal populated by the
+// backend's effort_detector.detect_effort_levels()). The legacy check
+// `caps.includes("effort")` was always false because the OpenRouter
+// family-level capabilities only contain "reasoning" — so the effort
+// button was HIDDEN for NVIDIA/PMAI models even though they support
+// thinking on/off. Now the button shows whenever the model has any
+// effort_levels (and the popover lists them).
+function _buildModelInfo(m: ProviderModel, _p: ProviderGroup) {
+  const caps = m.attributes?.capabilities || [];
+  const effortLevels =
+    m.attributes?.effortLevels || m.attributes?.effort_levels || [];
+  return {
+    contextLength: m.contextLength || 128000,
+    capabilities: {
+      effort: effortLevels.length > 0 || caps.includes("effort"),
+      webSearch: caps.includes("webSearch") || caps.includes("web_search"),
+      deepResearch: caps.includes("deepResearch") || caps.includes("deep_research"),
+      extendedThinking:
+        caps.includes("extendedThinking") ||
+        caps.includes("extended_thinking") ||
+        effortLevels.length > 0,
+    },
+    effortLevels,
+    isFree: isFreeModel(m.id) || isFreeModel(m.slotId || ""),
+  };
+}
 
 export function AgentChat({ settings }: { settings: Settings }) {
   // Model store
@@ -103,36 +136,42 @@ export function AgentChat({ settings }: { settings: Settings }) {
   // Find the selected model in the providers list so we can read its REAL
   // contextLength (was hardcoded 128000) + capabilities (for ToolIcons
   // dimming) + free status (for PriceGauge).
+  //
+  // CHAT-RELIABILITY-FIX: previously this used a single `find()` with an
+  // OR condition: `m.id === selectedModelId || m.slotId === selectedSlotId`.
+  // When the user picked a slot like "privatemodeai/glm-5.2", BOTH the PMAI
+  // provider's slotId AND every other provider's logical id ("glm-5.2")
+  // matched. The iteration order is alphabetical (cloudflare comes before
+  // nvidia comes before privatemodeai), so the FIRST match was always the
+  // alphabetically-first provider — NOT the one the user picked. This is
+  // why "the effort mode showed the same naming conventions for both
+  // privatemodeai and Nvidia" — both showed CLOUDFLARE's levels (the
+  // alphabetically-first provider with that logical id), not the selected
+  // provider's levels.
+  //
+  // Fix: do TWO passes. Pass 1 matches by slotId ONLY (the authoritative
+  // per-host key). Pass 2 falls back to logical-id matching (covers the
+  // legacy selection path that doesn't set a slotId). This guarantees the
+  // user gets the SPECIFIC provider's effort_levels, capabilities, and
+  // pricing — not whatever provider happened to sort first.
   const selectedModelInfo = useMemo(() => {
     if (!selectedModelId && !selectedSlotId) return null;
-    for (const p of providers) {
-      const m = p.models.find(
-        (m) =>
-          m.id === selectedModelId ||
-          m.slotId === selectedSlotId ||
-          (selectedSlotId && m.slotId === selectedSlotId),
-      );
-      if (m) {
-        const caps = m.attributes?.capabilities || [];
-        // BATCH-3 Task 5 — read effortLevels from the model attributes.
-        // Both camelCase + snake_case are accepted (the backend may return
-        // either). When missing/empty, the effort button is hidden.
-        const effortLevels =
-          m.attributes?.effortLevels || m.attributes?.effort_levels || [];
-        return {
-          contextLength: m.contextLength || 128000,
-          capabilities: {
-            effort: caps.includes("effort"),
-            webSearch: caps.includes("webSearch") || caps.includes("web_search"),
-            deepResearch: caps.includes("deepResearch") || caps.includes("deep_research"),
-            extendedThinking:
-              caps.includes("extendedThinking") || caps.includes("extended_thinking"),
-          },
-          // BATCH-3 Task 5 — per-model effort variants (e.g.
-          // ["low","medium","high"] or ["low","mid","ultra","max"]).
-          effortLevels,
-          isFree: isFreeModel(m.id) || isFreeModel(m.slotId || ""),
-        };
+    // Pass 1: slotId match (authoritative — pinned to a specific host).
+    if (selectedSlotId) {
+      for (const p of providers) {
+        const m = p.models.find((mm) => mm.slotId === selectedSlotId);
+        if (m) {
+          return _buildModelInfo(m, p);
+        }
+      }
+    }
+    // Pass 2: logical-id match (legacy selection without slotId).
+    if (selectedModelId) {
+      for (const p of providers) {
+        const m = p.models.find((mm) => mm.id === selectedModelId);
+        if (m) {
+          return _buildModelInfo(m, p);
+        }
       }
     }
     return null;

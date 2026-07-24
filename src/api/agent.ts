@@ -295,6 +295,21 @@ export class AgentClient {
    * `onEvent` callback fires once per parsed event; `onError` fires on
    * network errors (abort excluded). `onClose` fires when the stream ends
    * (server closed the connection, including when the agent finishes).
+   *
+   * CHAT-RELIABILITY-FIX: previously the outer `this.bearer(0).then(...)`
+   * chain had NO `.catch()` — if `bearer(0)` rejected (e.g. crypto.subtle
+   * unavailable, token rotation failure, promise rejection inside
+   * deriveToken), the chain silently dropped without ever calling
+   * `onError` or `onClose`. The chatStore's SSE-failure → polling
+   * fallback never kicked in, so the user saw "I sent Hi but got no
+   * reply" — the SSE stream silently failed and the polling fallback was
+   * never triggered. This was the root cause of "got 2 responses out of 3".
+   *
+   * Now: the outer chain has a `.catch()` that surfaces any rejection as
+   * `onError`, so the polling fallback can take over. Also added a 401
+   * retry on the previous token window (matches the `raw()` helper's
+   * behavior) so a token rotation that lands mid-stream doesn't kill the
+   * connection silently.
    */
   stream(
     sessionId: string,
@@ -305,14 +320,30 @@ export class AgentClient {
   ): AbortController {
     const ac = new AbortController();
     const baseUrl = this.settings.baseUrl;
-    this.bearer(0).then((token) => {
-      const url = `${baseUrl}/api/agent/${sessionId}/stream?since=${since}`;
+    const jwtHeaders = this.jwtHeaders();
+    const openStream = (token: string, sinceArg: number) => {
+      const url = `${baseUrl}/api/agent/${sessionId}/stream?since=${sinceArg}`;
       fetch(url, {
         signal: ac.signal,
-        headers: { Authorization: `Bearer ${token}`, ...this.jwtHeaders() },
+        headers: { Authorization: `Bearer ${token}`, ...jwtHeaders },
       })
         .then(async (r) => {
           if (!r.ok) {
+            // CHAT-RELIABILITY-FIX: on 401, retry once with the previous
+            // token window (handles clock-skew + token rotation). The
+            // backend accepts the previous window's token, so one retry
+            // covers a window-boundary race without infinite loops.
+            if (r.status === 401 && this.settings.rotationSecret) {
+              try {
+                const prevToken = await this.bearer(1);
+                if (prevToken && prevToken !== token) {
+                  openStream(prevToken, sinceArg);
+                  return;
+                }
+              } catch {
+                /* fall through to onError */
+              }
+            }
             onError?.(new Error(`SSE stream returned HTTP ${r.status}`));
             return;
           }
@@ -357,7 +388,19 @@ export class AgentClient {
             onError?.(e instanceof Error ? e : new Error(String(e)));
           }
         });
-    });
+    };
+    // CHAT-RELIABILITY-FIX: catch outer bearer rejection so the SSE failure
+    // surfaces as `onError` (which triggers the polling fallback in
+    // chatStore). Without this `.catch()`, a rejected bearer promise silently
+    // drops the entire chain — no fetch, no onError, no fallback — and the
+    // user sees "I sent Hi but got no reply".
+    this.bearer(0)
+      .then((token) => openStream(token, since))
+      .catch((e) => {
+        if ((e as Error)?.name !== "AbortError") {
+          onError?.(e instanceof Error ? e : new Error(String(e)));
+        }
+      });
     return ac;
   }
 
@@ -561,6 +604,11 @@ export class AgentClient {
    * callback fires for every job_started/job_progress/job_delta/job_complete/
    * job_error event. We use fetch + ReadableStream (not native EventSource)
    * so we can pass the Authorization header (EventSource can't).
+   *
+   * CHAT-RELIABILITY-FIX: same outer-chain `.catch()` fix as `stream()` —
+   * if `bearer(0)` rejects, the monitor stream silently dropped without
+   * ever calling `onError`. Now any rejection surfaces so the caller can
+   * reconnect or surface the error.
    */
   monitorStream(
     spaceId: string | null,
@@ -569,15 +617,28 @@ export class AgentClient {
   ): AbortController {
     const ac = new AbortController();
     const baseUrl = this.settings.baseUrl;
-    this.bearer(0).then((token) => {
+    const jwtHeaders = this.jwtHeaders();
+    const openMonitor = (token: string) => {
       const qs = spaceId ? `?spaceId=${encodeURIComponent(spaceId)}` : "";
       const url = `${baseUrl}/api/monitor${qs}`;
       fetch(url, {
         signal: ac.signal,
-        headers: { Authorization: `Bearer ${token}`, ...this.jwtHeaders() },
+        headers: { Authorization: `Bearer ${token}`, ...jwtHeaders },
       })
         .then(async (r) => {
           if (!r.ok) {
+            // 401 retry on the previous token window (matches `raw()`).
+            if (r.status === 401 && this.settings.rotationSecret) {
+              try {
+                const prevToken = await this.bearer(1);
+                if (prevToken && prevToken !== token) {
+                  openMonitor(prevToken);
+                  return;
+                }
+              } catch {
+                /* fall through to onError */
+              }
+            }
             onError?.(new Error(`monitor stream HTTP ${r.status}`));
             return;
           }
@@ -618,7 +679,16 @@ export class AgentClient {
             onError?.(e instanceof Error ? e : new Error(String(e)));
           }
         });
-    });
+    };
+    // CHAT-RELIABILITY-FIX: outer-chain catch so a rejected bearer surfaces
+    // as `onError` instead of silently dropping the whole stream.
+    this.bearer(0)
+      .then((token) => openMonitor(token))
+      .catch((e) => {
+        if ((e as Error)?.name !== "AbortError") {
+          onError?.(e instanceof Error ? e : new Error(String(e)));
+        }
+      });
     return ac;
   }
 }
