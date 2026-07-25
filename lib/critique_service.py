@@ -1555,8 +1555,10 @@ class Handler(BaseHTTPRequestHandler):
             def test1():
                 evs = _run_adapter_turn("You are a helpful assistant.", "Say hello.", 30)
                 asst = [e for e in evs if e.get("type") == "assistant"]
-                if asst:
-                    return f"Response: {asst[0].get('text','')[:80]}"
+                deltas = [e for e in evs if e.get("type") == "assistant_delta"]
+                text = asst[0].get('text','') if asst else ''.join(e.get('text','') for e in deltas)
+                if text:
+                    return f"Response: {text[:80]}"
                 raise Exception(f"No assistant event. Events: {[e.get('type') for e in evs]}")
             _test("Basic chat", test1)
 
