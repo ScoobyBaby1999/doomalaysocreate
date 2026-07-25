@@ -1137,11 +1137,64 @@ function TemplatePreview({
           <Markdown text={t.markdown || "_No markdown body._"} />
         </div>
       ) : (
-        <div className="flex-1 overflow-auto bg-background/60">
-          <MarkdownRaw
-            text={t.markdown || "(empty template — no markdown body)"}
-            className={compact ? "p-2" : "p-3"}
-          />
+        <div className="flex-1 overflow-y-auto bg-background/60 max-h-[60vh]">
+          {t.stages && t.stages.length > 0 ? (
+            <div className={compact ? "p-2" : "p-3"}>
+              {/* Show the actual template structure — stages with roles, instructions, fanout */}
+              {t.task_type && (
+                <div className="mb-3 pb-2 border-b border-border/40">
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Task Type: </span>
+                  <span className="text-xs font-mono text-accent">{t.task_type}</span>
+                </div>
+              )}
+              {t.stages.map((stage, i) => (
+                <div key={i} className="mb-3 pb-3 border-b border-border/20 last:border-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[10px] font-mono text-muted-foreground">#{i + 1}</span>
+                    <span className="text-xs font-semibold text-foreground">{stage.name}</span>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-sm bg-accent/20 text-accent font-mono">{stage.role}</span>
+                    {stage.fanout && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded-sm bg-purple-500/20 text-purple-400 font-mono">
+                        fanout: {stage.fanout.over} (×{stage.fanout.max_parallel})
+                      </span>
+                    )}
+                    {stage.max_tokens && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded-sm bg-blue-500/20 text-blue-400 font-mono">
+                        {stage.max_tokens} tok
+                      </span>
+                    )}
+                  </div>
+                  <pre className="text-[11px] font-mono text-muted-foreground whitespace-pre-wrap break-words leading-relaxed">
+                    {stage.instructions}
+                  </pre>
+                  {stage.inputs && stage.inputs.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      <span className="text-[9px] text-muted-foreground/60">inputs:</span>
+                      {stage.inputs.map((inp, j) => (
+                        <code key={j} className="text-[9px] font-mono px-1 py-0.5 rounded-sm bg-muted/30 text-cyan-400">{inp}</code>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {t.output_rules && (
+                <div className="mt-2 pt-2 border-t border-border/40">
+                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">Output Rules</div>
+                  {t.output_rules.format && <div className="text-[11px] font-mono text-muted-foreground">format: {t.output_rules.format}</div>}
+                  {t.output_rules.min_words && <div className="text-[11px] font-mono text-muted-foreground">min_words: {t.output_rules.min_words}</div>}
+                  {t.output_rules.banned_phrases && t.output_rules.banned_phrases.length > 0 && (
+                    <div className="text-[11px] font-mono text-muted-foreground">banned: {t.output_rules.banned_phrases.join(", ")}</div>
+                  )}
+                  {t.output_rules.tone && <div className="text-[11px] font-mono text-muted-foreground">tone: {t.output_rules.tone}</div>}
+                </div>
+              )}
+            </div>
+          ) : (
+            <MarkdownRaw
+              text={t.markdown || "(empty template — no markdown body)"}
+              className={compact ? "p-2" : "p-3"}
+            />
+          )}
         </div>
       )}
 

@@ -27,6 +27,24 @@ export type TemplateKind =
   | "chat"
   | "custom";
 
+export interface TemplateStage {
+  name: string;
+  role: string;
+  instructions: string;
+  inputs?: string[];
+  fanout?: { over: string; max_parallel: number };
+  max_tokens?: number;
+}
+
+export interface TemplateOutputRules {
+  format?: string;
+  min_words?: number;
+  max_words?: number;
+  required_sections?: string[];
+  banned_phrases?: string[];
+  tone?: string;
+}
+
 export interface Template {
   id: string;
   author_id: string;
@@ -34,6 +52,10 @@ export interface Template {
   name: string;
   description: string | null;
   markdown: string;
+  /** Multi-stage template structure (roles.py + content/prompts/ format) */
+  task_type?: string;
+  stages?: TemplateStage[];
+  output_rules?: TemplateOutputRules;
   kind: TemplateKind;
   tags: string[];
   is_public: boolean;

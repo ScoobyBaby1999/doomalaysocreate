@@ -59,6 +59,8 @@ interface ModelSelectionState {
   getSelectedProvider: () => ProviderGroup | null;
 
   fetchCondensedModels: (force?: boolean) => Promise<void>;
+  /** Wait for providers to be loaded (for switchSession to avoid race). */
+  waitForProviders: (timeoutMs?: number) => Promise<boolean>;
   setCondensedView: (v: boolean) => void;
   setProviderPriority: (logical: string, orderedProviders: string[]) => void;
   setGlobalProviderPriority: (orderedProviders: string[] | null) => void;
@@ -256,6 +258,20 @@ export const useModelStore = create<ModelSelectionState>((set, get) => ({
       await get().refreshProviders();
       return;
     }
+  },
+
+  // Wait for providers to be loaded (used by switchSession to avoid the
+  // race condition where model restore fires before the roster is fetched).
+  // Returns true if providers were loaded within the timeout, false otherwise.
+  waitForProviders: async (timeoutMs = 5000): Promise<boolean> => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const state = get();
+      if (!state.loading && state.providers.length > 0) return true;
+      if (state.error) return false;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return get().providers.length > 0;
   },
 
   setCondensedView: (v: boolean) => {

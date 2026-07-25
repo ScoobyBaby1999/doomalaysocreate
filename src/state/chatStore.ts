@@ -1314,6 +1314,13 @@ export const useChatStore = create<ChatState>()(
             // provider on the next send.
             if (cs.model) {
               try {
+                // Wait for the model store's providers list to be loaded
+                // before trying to restore the model. On boot, loadSessions
+                // and fetchProviders race — if loadSessions finishes first,
+                // the providers list is still empty and the model can't be
+                // found. Waiting up to 5s for the roster ensures the model
+                // is properly restored on boot AND when switching chats.
+                await useModelStore.getState().waitForProviders(5000);
                 const ms = useModelStore.getState();
                 // Only update if the model differs (avoid loops).
                 if (ms.selectedModelId !== cs.model && ms.selectedSlotId !== cs.model) {
