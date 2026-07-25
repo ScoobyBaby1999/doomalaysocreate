@@ -39,7 +39,7 @@ from pathlib import Path
 
 AGENT_ROOT = Path(os.environ.get("AGENT_ROOT", "/tmp/agent"))
 SESSION_TTL_S = int(os.environ.get("AGENT_SESSION_TTL_S", "7200"))   # 2h idle
-MAX_SESSIONS = int(os.environ.get("AGENT_MAX_SESSIONS", "8"))        # RAM bound
+MAX_SESSIONS = int(os.environ.get("AGENT_MAX_SESSIONS", "32"))        # RAM bound
 MAX_EVENT_CHARS = int(os.environ.get("AGENT_MAX_EVENT_CHARS", "4000"))
 MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", "50"))
 
@@ -2703,8 +2703,21 @@ def get_or_create(session_id: str | None = None,
                 # create a new one with the new model.
                 existing.close()
                 _sessions.pop(existing.id, None)
+        # If the pool is full, try to evict the oldest IDLE session (not running)
+        # before raising CapacityError. This prevents the "max 8 sessions" error
+        # when the user has been switching between multiple chats.
         if len(_sessions) >= MAX_SESSIONS:
-            raise CapacityError(f"max {MAX_SESSIONS} concurrent agent sessions")
+            # Find the oldest idle session (not running, not starting)
+            oldest_idle = None
+            for s in _sessions.values():
+                if s.status not in ("running", "starting") and not s.closed:
+                    if oldest_idle is None or s.updated < oldest_idle.updated:
+                        oldest_idle = s
+            if oldest_idle is not None:
+                oldest_idle.close()
+                _sessions.pop(oldest_idle.id, None)
+            else:
+                raise CapacityError(f"max {MAX_SESSIONS} concurrent agent sessions (all running)")
         # resolve workspace_id to a filesystem path
         workspace_path = None
         if workspace_id:
