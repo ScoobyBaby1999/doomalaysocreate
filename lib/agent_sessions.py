@@ -1499,7 +1499,7 @@ class StrandsAdapter(BaseAdapter):
             pass
         # Record the message count BEFORE the agent call so the post-turn
         # walk only emits NEW messages (not the entire history).
-        _pre_count = len(getattr(self.agent, "messages", []) or [])
+        self._pre_count = len(getattr(self.agent, "messages", []) or [])
         # Run the agent call with a thread + timeout. The GIL means we can't
         # hard-kill a blocking C extension call, but we CAN set a timeout and
         # process whatever messages were produced so far (best-effort).
@@ -1549,10 +1549,10 @@ class StrandsAdapter(BaseAdapter):
         # already-emitted tool_use/tool_result events might re-emit — the
         # frontend dedupes by seq.)
         # Walk only NEW messages (those added by this turn's agent call).
-        # _pre_count was set before self.agent(user_msg) was called.
-        _start = getattr(self, "_pre_count", 0) if hasattr(self, "_pre_count") else self._msg_cursor
+        # self._pre_count was set before self.agent(user_msg) was called.
+        _start = getattr(self, "_pre_count", 0)
         if _start > len(msgs):
-            _start = len(msgs)  # SlidingWindowConversationManager trimmed
+            _start = max(0, len(msgs) - 5)  # SlidingWindow trimmed — walk last 5
         for m in msgs[_start:]:
             role = m.get("role")
             for block in (m.get("content") or []):
