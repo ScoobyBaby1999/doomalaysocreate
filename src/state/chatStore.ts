@@ -2151,6 +2151,17 @@ async function _runTurn(
     // Refresh session list to pick up auto-title.
     try {
       const { sessions } = await client.listChatSessions();
+      // If the active session isn't in the refreshed list (e.g. DB sync
+      // delay on HF Space), keep it in the list so the user doesn't see
+      // their session "disappear". The next refresh will include it once
+      // the DB syncs.
+      const activeId = get().activeSessionId;
+      if (activeId && !sessions.find((s) => s.id === activeId)) {
+        const activeSession = get().sessions.find((s) => s.id === activeId);
+        if (activeSession) {
+          sessions.unshift(activeSession);
+        }
+      }
       set({ sessions });
     } catch {
       /* ignore */
