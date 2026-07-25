@@ -1817,7 +1817,9 @@ class Handler(BaseHTTPRequestHandler):
                     results["adapter_turn"] = f"FAIL: {_adapter_done['error']}"
                 else:
                     asst_ev = [e for e in _adapter_events if e.get("type") == "assistant"]
-                    results["adapter_turn"] = f"OK — {len(_adapter_events)} events, assistant: {asst_ev[0].get('text','')[:60] if asst_ev else 'NONE'}"
+                    asst_deltas = [e for e in _adapter_events if e.get("type") == "assistant_delta"]
+                    asst_text = asst_ev[0].get('text','') if asst_ev else ''.join(e.get('text','') for e in asst_deltas)
+                    results["adapter_turn"] = f"OK — {len(_adapter_events)} events, assistant: {asst_text[:60] if asst_text else 'NONE'}"
             except Exception as e:
                 results["adapter_turn"] = f"FAIL: {e}"
                 results["adapter_traceback"] = _tb.format_exc()[:400]
