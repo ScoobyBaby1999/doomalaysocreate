@@ -1423,23 +1423,11 @@ class StrandsAdapter(BaseAdapter):
         # Without this seed, a freshly-booted agent would have an empty
         # messages list, so the second user message ("What tools do you
         # have?") would be sent with NO conversation history -- the model
-        # would reply as if it were the FIRST message, producing the
-        # duplicate "Hey! What's up?" response the user reported.
-        #
-        # We rebuild messages from the persisted chat_events (user + assistant
-        # text events). tool_use / tool_result / thinking / status events are
-        # skipped -- Strands expects them in the structured toolUse/toolResult
-        # block format with UUIDs we don't have, and the text-only context is
-        # enough for the model to know the conversation history.
-        self._prepopulate_messages_from_chat_history()
-        # _msg_cursor is set inside _prepopulate_messages_from_chat_history()
-        # to len(self.agent.messages) so the post-turn walk in turn() SKIPS
-        # the seeded messages (they're already rendered in the UI from the
-        # persisted chat_events; re-emitting them would duplicate). If no
-        # history was loaded, the cursor stays at 0 so the walk emits every
-        # new message as normal.
-        if not hasattr(self, "_msg_cursor") or self._msg_cursor is None:
-            self._msg_cursor = 0
+        # Don't pre-populate messages from chat_events — it caused the
+        # "same response repeated" bug. The Strands FileSessionManager handles
+        # conversation persistence. If /data/ is ephemeral, conversations
+        # restart fresh on Space restart (acceptable).
+        self._msg_cursor = 0  # set in turn() after each turn
         # Register conscious tools for inspection (the panel tool is already
         # registered above as a Strands tool).
         try:
@@ -1448,77 +1436,6 @@ class StrandsAdapter(BaseAdapter):
         except Exception:
             pass
 
-    def _prepopulate_messages_from_chat_history(self) -> None:
-        """Seed self.agent.messages with the prior conversation persisted in
-        the SQLite chat_events table. Called once in open() right after the
-        Agent is constructed. Sets self._msg_cursor so the post-turn walk
-        in turn() skips these seeded messages (the UI already has them from
-        the persisted chat_events; re-emitting would duplicate).
-
-        Best-effort + defensive: any error is swallowed (the agent just
-        starts with an empty messages list, same as before this fix)."""
-        self._msg_cursor = 0  # safe default; turn() walks from here
-        sess = self._session_ref()
-        if sess is None:
-            return
-        chat_session_id = getattr(sess, "chat_session_id", None)
-        if not chat_session_id:
-            return
-        if self.agent is None:
-            return
-        try:
-            import chat_routes
-            events = chat_routes.get_chat_events(chat_session_id) or []
-        except Exception:
-            return
-        if not events:
-            return
-        # Build Strands-format messages from the persisted events. Only
-        # user + assistant text events are translated -- tool_use /
-        # tool_result / thinking / status are skipped (see comment above).
-        msgs: list = []
-        for ev in events:
-            ev_type = ev.get("type")
-            if ev_type == "user":
-                text = ev.get("text") or ""
-                if text:
-                    msgs.append({"role": "user",
-                                 "content": [{"text": text}]})
-            elif ev_type == "assistant":
-                text = ev.get("text") or ""
-                # Skip the placeholder "no response from the model" message
-                # (it's a synthetic fallback, not real model output).
-                if text and "no response from the model" not in text:
-                    msgs.append({"role": "assistant",
-                                 "content": [{"text": text}]})
-            # Skip thinking/tool_use/tool_result/status events -- Strands
-            # expects them in the structured toolUse/toolResult block format
-            # which we don't persist. The text-only user+assistant pairs are
-            # enough for the model to continue the conversation coherently.
-        if not msgs:
-            return
-        # Skip the LAST user message if it's the one the user just sent
-        # (the agent will receive it via self.agent(user_msg) anyway). We
-        # can't perfectly detect this, but we can skip the trailing user
-        # message IFF the very last event in `events` is a `user` event
-        # AND the next turn is about to send the same text. Safe default:
-        # don't skip -- the model sees the prior user message + a fresh
-        # user message; this is fine because Strands deduplicates the
-        # immediate user message in the conversation manager.
-        try:
-            self.agent.messages = msgs
-            self._msg_cursor = len(msgs)
-            try:
-                log_event("agent_messages_prepopulated",
-                          chat_session_id=chat_session_id,
-                          message_count=len(msgs))
-            except Exception:
-                pass
-        except Exception:
-            # Setting .messages failed -- leave the agent with its default
-            # (empty) messages list. The agent will still work, just without
-            # prior context (same as before this fix).
-            pass
 
     def _session_ref(self):
         """Back-reference to the owning AgentSession (set by AgentSession._run)."""
@@ -1580,6 +1497,9 @@ class StrandsAdapter(BaseAdapter):
             self.agent.callback_handler = _stream_callback
         except Exception:
             pass
+        # Record the message count BEFORE the agent call so the post-turn
+        # walk only emits NEW messages (not the entire history).
+        _pre_count = len(getattr(self.agent, "messages", []) or [])
         # Run the agent call with a thread + timeout. The GIL means we can't
         # hard-kill a blocking C extension call, but we CAN set a timeout and
         # process whatever messages were produced so far (best-effort).
@@ -1628,13 +1548,12 @@ class StrandsAdapter(BaseAdapter):
         # assistant replies in long conversations. (We accept that some
         # already-emitted tool_use/tool_result events might re-emit — the
         # frontend dedupes by seq.)
-        # If the cursor is past the end (SlidingWindowConversationManager
-        # trimmed old messages), DON'T reset to 0 — that would re-walk ALL
-        # remaining messages and re-emit old thinking/assistant events.
-        # Instead, skip the walk entirely (there are no NEW messages to emit).
-        if self._msg_cursor >= len(msgs):
-            self._msg_cursor = len(msgs)
-        for m in msgs[self._msg_cursor:]:
+        # Walk only NEW messages (those added by this turn's agent call).
+        # _pre_count was set before self.agent(user_msg) was called.
+        _start = getattr(self, "_pre_count", 0) if hasattr(self, "_pre_count") else self._msg_cursor
+        if _start > len(msgs):
+            _start = len(msgs)  # SlidingWindowConversationManager trimmed
+        for m in msgs[_start:]:
             role = m.get("role")
             for block in (m.get("content") or []):
                 if "toolUse" in block:
@@ -1684,6 +1603,7 @@ class StrandsAdapter(BaseAdapter):
                             continue
                         emit({"type": "assistant", "text": block["text"]})
         self._msg_cursor = len(msgs)
+        self._pre_count = len(msgs)  # update for next turn
 
         # COST TRANSPARENCY: emit usage/cost info after each turn.
         # Strands tracks this on the agent's _loop_state.
