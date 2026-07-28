@@ -916,6 +916,15 @@ class StrandsAdapter(BaseAdapter):
         self.resolved_model = model
         self.resolved_api_base = base_url
         self.resolved_provider = provider_label or key_env
+        # Inject model identity into the system prompt so the agent knows
+        # which model it is. The user can ask "which model are you?" and
+        # get an accurate answer.
+        _model_display = model.replace("openai/", "").split("/")[-1]
+        _provider_display = (provider_label or key_env or "unknown").replace("_API_KEY", "").replace("_TOKEN", "").replace("_", " ").title()
+        self.system_prompt = (self.system_prompt or "") + (
+            "\n\nYou are running as " + _model_display + " via " + _provider_display + ". "
+            "If the user asks which model you are, tell them you are " + _model_display + "."
+        )
 
         # CHAT-COMPLETE-FIX (Bug 5): append the resolved model identity to the
         # system prompt so the agent knows WHICH model it is. Without this,
