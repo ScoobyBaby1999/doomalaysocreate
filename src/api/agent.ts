@@ -317,11 +317,29 @@ export class AgentClient {
     onEvent: (ev: AgentEvent) => void,
     onError?: (err: Error) => void,
     onClose?: () => void,
+    opts?: { maxRetries?: number; retryDelayMs?: number },
   ): AbortController {
     const ac = new AbortController();
     const baseUrl = this.settings.baseUrl;
     const jwtHeaders = this.jwtHeaders();
+    // CHAT-COMPLETE-FIX (Bug 1): retry the SSE open on 404 / network error
+    // before giving up. The backend's _handle_agent_stream waits up to 5s for
+    // the session to appear, but under HF Space cold-start the POST /api/agent
+    // handler can take longer than that to register the session (import +
+    // init + DB restore). Without retry, the SSE returns 404, onError fires,
+    // the polling fallback also 404s, and the user sees "I sent Hi but got
+    // no reply" — they have to switch chats or refresh to see the response
+    // (which was generated but never delivered). With retry (default 3
+    // attempts, 200ms backoff), the SSE reconnects once the session is
+    // registered, and the live event stream delivers the response in
+    // real-time.
+    const maxRetries = opts?.maxRetries ?? 3;
+    const retryDelayMs = opts?.retryDelayMs ?? 200;
+    // Track attempts across 401-retry + 404/error-retry so we don't loop
+    // forever. `attempt` is incremented each time openStream() is called.
+    let attempt = 0;
     const openStream = (token: string, sinceArg: number) => {
+      attempt++;
       const url = `${baseUrl}/api/agent/${sessionId}/stream?since=${sinceArg}`;
       fetch(url, {
         signal: ac.signal,
@@ -341,14 +359,34 @@ export class AgentClient {
                   return;
                 }
               } catch {
-                /* fall through to onError */
+                /* fall through to retry / onError */
               }
+            }
+            // CHAT-COMPLETE-FIX (Bug 1): retry on 404 (session not yet
+            // registered) up to maxRetries times with retryDelayMs backoff.
+            // 404 is the most common failure mode under HF Space cold-start —
+            // the SSE GET arrives before the POST handler has registered the
+            // session in agent_sessions._sessions. The backend waits 5s, but
+            // if the POST takes longer (cold start + DB restore), the SSE
+            // returns 404. Retrying gives the POST time to finish.
+            if (r.status === 404 && attempt <= maxRetries && !ac.signal.aborted) {
+              setTimeout(() => {
+                if (!ac.signal.aborted) openStream(token, sinceArg);
+              }, retryDelayMs);
+              return;
             }
             onError?.(new Error(`SSE stream returned HTTP ${r.status}`));
             return;
           }
           const reader = r.body?.getReader();
           if (!reader) {
+            // Retry on missing body too (shouldn't happen, but be defensive).
+            if (attempt <= maxRetries && !ac.signal.aborted) {
+              setTimeout(() => {
+                if (!ac.signal.aborted) openStream(token, sinceArg);
+              }, retryDelayMs);
+              return;
+            }
             onError?.(new Error("SSE: no response body"));
             return;
           }
@@ -379,12 +417,32 @@ export class AgentClient {
             onClose?.();
           } catch (e) {
             if ((e as Error)?.name !== "AbortError") {
+              // CHAT-COMPLETE-FIX (Bug 1): retry on mid-stream read errors
+              // (network blip, proxy reset) before surfacing to onError.
+              // Only retry if we haven't exhausted attempts — once the
+              // stream has been open for a while and received events, a
+              // mid-stream drop is more likely a real disconnect than a
+              // cold-start race, so we still cap at maxRetries.
+              if (attempt <= maxRetries && !ac.signal.aborted) {
+                setTimeout(() => {
+                  if (!ac.signal.aborted) openStream(token, sinceArg);
+                }, retryDelayMs);
+                return;
+              }
               onError?.(e instanceof Error ? e : new Error(String(e)));
             }
           }
         })
         .catch((e) => {
           if ((e as Error)?.name !== "AbortError") {
+            // CHAT-COMPLETE-FIX (Bug 1): retry on initial fetch failure
+            // (DNS, connection refused, network error) before surfacing.
+            if (attempt <= maxRetries && !ac.signal.aborted) {
+              setTimeout(() => {
+                if (!ac.signal.aborted) openStream(token, sinceArg);
+              }, retryDelayMs);
+              return;
+            }
             onError?.(e instanceof Error ? e : new Error(String(e)));
           }
         });

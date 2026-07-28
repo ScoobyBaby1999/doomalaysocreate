@@ -328,16 +328,20 @@ export function eventsToMessages(events: AgentEvent[]): ChatMessage[] {
       case "user": {
         // ISSUE-3 (RESPONSIVE-FIX): dedup user events when loading from the
         // DB. If the previous message is ALSO a user message with the same
-        // content (within a 5-second window), skip this event — it's a
+        // content (within a 10-second window), skip this event — it's a
         // duplicate emit. This catches persisted events that were accidentally
         // double-stored (e.g. backend emit + frontend persistEvents both
         // wrote the same event with different seqs).
+        // CHAT-COMPLETE-FIX (Bug 2): increased from 5s to 10s to match
+        // appendEvent()'s dedup window. Without this, a reload after a
+        // cold-start session (where the backend took >5s to echo the user
+        // event) would show duplicates in the persisted history.
         const evText = (ev.text || "").trim();
         if (evText && messages.length > 0) {
           const last = messages[messages.length - 1];
           if (last.role === "user" &&
               last.content.trim() === evText &&
-              Math.abs(last.timestamp - ts) < 5000) {
+              Math.abs(last.timestamp - ts) < 10000) {
             // Skip — duplicate user event.
             break;
           }
@@ -634,17 +638,27 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
         return out;
       }
       // ISSUE-3 (RESPONSIVE-FIX): Also skip if we already have a NON-pending
-      // user message with the same content within a 5-second window. This
+      // user message with the same content within a 10-second window. This
       // catches the case where the backend re-emits the same user event
       // with a DIFFERENT seq (e.g. on session restore, SSE reconnect, or
       // a duplicate emit). Without this, the user would see their message
       // duplicated in the chat.
+      // CHAT-COMPLETE-FIX (Bug 2): increased from 5s to 10s. The 5s window
+      // was too narrow — under HF Space cold-start, the backend can take
+      // >5s to process the POST /api/agent + emit the user event back. If
+      // the optimistic pending message was added >5s before the backend's
+      // echo arrives, the dedup missed it and a duplicate user message
+      // appeared ("Hey kimi 2.6 privatemode ai" showed twice). 10s covers
+      // the cold-start latency comfortably while still being narrow enough
+      // to allow the user to legitimately send the same message twice in
+      // a row (e.g. "Hello" then "Hello" again 15s later — those should
+      // both appear).
       const evTextTrim = evText.trim();
       if (evTextTrim && out.some((m) =>
         m.role === "user" &&
         !m.pending &&
         m.content.trim() === evTextTrim &&
-        Math.abs(m.timestamp - ts) < 5000
+        Math.abs(m.timestamp - ts) < 10000
       )) {
         return out;
       }
@@ -701,23 +715,43 @@ function appendEvent(existing: ChatMessage[], ev: AgentEvent): ChatMessage[] {
       // events with the same seq should MERGE into one growing bubble.
       // We also merge by position: if the last thinking bubble is streaming,
       // merge into it. This handles both same-seq and positional merging.
+      //
+      // CHAT-COMPLETE-FIX (Bug 4): the previous merge only handled the
+      // prefix relationship (newText.startsWith(oldText)). But if the SSE
+      // stream delivers events out of order or drops chunks, the new text
+      // might contain the old text as a non-prefix substring (e.g. oldText
+      // ="The", newText ="the user said The..."). The `includes` check below
+      // handles this case — if the new text contains the old text ANYWHERE,
+      // it's the accumulated version, so replace. This prevents the thinking
+      // bubble from getting stuck at the first chunk ("The") when the
+      // subsequent merged events arrive out of order or are re-fetched by
+      // the polling fallback with a stale `since` cursor.
       for (let i = out.length - 1; i >= 0; i--) {
         if (out[i].role === "thinking") {
           // Found a thinking bubble — merge into it.
           const newText = ev.text || "";
           const oldText = out[i].content || "";
-          // The backend sends accumulated text (growing). If the new text
-          // starts with the old text, it's the accumulated version — replace.
-          // Otherwise append (fragment mode).
-          if (newText.length >= oldText.length && newText.startsWith(oldText)) {
-            out[i] = { ...out[i], content: newText, seq, timestamp: ts, isStreaming: true };
-          } else if (oldText.startsWith(newText)) {
-            // New text is a prefix of old — ignore (stale/duplicate)
+          if (newText === oldText) {
+            // Identical — no-op (skip to avoid redundant state update).
             return out;
-          } else {
-            // Fragment — append
-            out[i] = { ...out[i], content: oldText + newText, seq, timestamp: ts, isStreaming: true };
           }
+          // Case 1: new contains old (anywhere, not just prefix) → REPLACE.
+          // This is the accumulated-version case. `includes` covers both
+          // startsWith (normal) and non-prefix contains (out-of-order).
+          if (newText.length >= oldText.length && newText.includes(oldText)) {
+            out[i] = { ...out[i], content: newText, seq, timestamp: ts, isStreaming: true };
+            return out;
+          }
+          // Case 2: old contains new (newText is a substring of old) → SKIP.
+          // This is the stale-prefix case (backend re-emits an earlier
+          // prefix after we already have the full text).
+          if (oldText.length > newText.length && oldText.includes(newText)) {
+            return out;
+          }
+          // Case 3: neither contains the other → APPEND (genuine fragment,
+          // e.g. a new reasoning chunk after a tool call that the backend
+          // couldn't merge into the same event).
+          out[i] = { ...out[i], content: oldText + newText, seq, timestamp: ts, isStreaming: true };
           return out;
         }
         // If we hit a non-thinking message, stop scanning — start a new bubble.
@@ -1894,7 +1928,14 @@ async function _runTurn(
     isBusy: true,
     isStreaming: true,
     error: null,
-    status: "running",
+    // CHAT-COMPLETE-FIX (Bug 1): set status to "starting" immediately so the
+    // user sees a "starting…" indicator in the chat header the moment they
+    // hit send. Previously this was "running", which meant the UI showed
+    // "working…" even before the SSE stream connected — no visual feedback
+    // that the request was in-flight. "starting…" clearly signals the
+    // connection phase. The backend's status event will switch this to
+    // "running" once the agent turn actually begins.
+    status: "starting",
     inputText: "",
     requestedModel: model || null,
   }));
@@ -1970,16 +2011,16 @@ async function _runTurn(
       set({ _lastEventSeq: 0 });
     }
 
-    // ISSUE-4 (RESPONSIVE-FIX): Reduced the pre-SSE delay from 300ms to 50ms.
-    // The original 300ms delay was added to give the backend time to buffer
-    // early events before the SSE stream connects. But the backend's
-    // subscribe() method uses a lock to atomically snapshot events + register
-    // the queue, so there's no race condition — events emitted BEFORE we
-    // subscribe are in the replay, events emitted AFTER are pushed live.
-    // The 300ms delay made the UI feel sluggish (no streaming cursor for
-    // 300ms after sending a message). 50ms is enough for the HTTP response
-    // to settle without noticeable lag.
-    await new Promise((r) => setTimeout(r, 50));
+    // CHAT-COMPLETE-FIX (Bug 1): REMOVED the 50ms pre-SSE delay. The backend's
+    // _handle_agent_stream already waits up to 5s for the session to appear
+    // (sending heartbeats), and the frontend's stream() now retries on 404
+    // (up to 3 times with 200ms backoff). The delay was added to give the
+    // backend time to buffer early events, but the backend's subscribe()
+    // method uses a lock to atomically snapshot events + register the queue,
+    // so there's no race — events emitted BEFORE we subscribe are in the
+    // replay, events emitted AFTER are pushed live. The 50ms delay just made
+    // the UI feel sluggish with no benefit. The "starting…" status (set
+    // above) gives the user immediate feedback that the request is in-flight.
 
     // Open SSE stream for live events. If SSE fails, fall back to polling.
     await new Promise<void>((resolve) => {
@@ -2089,10 +2130,26 @@ async function _runTurn(
           // Fire first poll immediately so the user sees the response
           // ASAP (catches the common case where the SSE failed AFTER
           // the agent finished and the events are already buffered).
+          //
+          // CHAT-COMPLETE-FIX (Bug 4): the first poll uses since=0 to catch
+          // any MERGED thinking events we missed when the SSE dropped. The
+          // backend's emit() merges consecutive thinking events into one
+          // event with the SAME seq (i). When the SSE stream delivers the
+          // first thinking event (text="The"), the frontend's `since` cursor
+          // advances past it. If the SSE then drops the subsequent merged
+          // thinking events (text="The user said..."), the polling fallback
+          // with the normal `since` would NOT re-fetch them (because they
+          // have the same i, which is < since). Polling with since=0 re-
+          // fetches ALL events; the handleEvent dedup guard drops non-
+          // thinking events we've already seen (by seq), but thinking
+          // events are exempted and re-processed — the appendEvent thinking
+          // merge then REPLACES the bubble's content with the accumulated
+          // text. This fixes "thinking text truncated to 'The'".
+          const firstPollSince = 0;
           Promise.resolve()
             .then(async () => {
               try {
-                const snap = await client.poll(agentSid!, since);
+                const snap = await client.poll(agentSid!, firstPollSince);
                 for (const ev of snap.events) handleEvent(ev);
                 if (snap.status !== "running" && snap.status !== "starting") {
                   set((s) => ({ messages: finalizeStreaming(s.messages) }));
