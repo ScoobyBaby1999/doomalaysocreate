@@ -2098,8 +2098,12 @@ async function _runTurn(
           }
           if (st.state === "idle" || st.state === "error") {
             set((s) => ({ messages: finalizeStreaming(s.messages) }));
-            // Give a brief moment for any trailing events, then finish.
-            setTimeout(finish, 200);
+            // Give a moment for any trailing events (assistant_delta, etc.)
+            // before finishing. 500ms is enough for the SSE stream to flush
+            // any buffered events. Without this, the poll might see the
+            // status:idle event and call finish() before the SSE delivers
+            // the final assistant text.
+            setTimeout(finish, 500);
           }
         }
       };
@@ -2118,7 +2122,11 @@ async function _runTurn(
           try {
             await new Promise((r) => setTimeout(r, 500));
             if (!pollActive || settled) break;
-            const snap = await client.poll(agentSid!, since);
+            // Poll with since=0 to catch MERGED thinking events (which have
+            // the same seq/i as the original — the dedup guard exempts
+            // thinking events so the merge replaces the bubble content).
+            // Regular events are deduped by the handleEvent guard.
+            const snap = await client.poll(agentSid!, 0);
             for (const ev of snap.events) handleEvent(ev);
             if (snap.status !== "running" && snap.status !== "starting") {
               set((s) => ({ messages: finalizeStreaming(s.messages) }));
