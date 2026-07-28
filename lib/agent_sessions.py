@@ -917,6 +917,34 @@ class StrandsAdapter(BaseAdapter):
         self.resolved_api_base = base_url
         self.resolved_provider = provider_label or key_env
 
+        # CHAT-COMPLETE-FIX (Bug 5): append the resolved model identity to the
+        # system prompt so the agent knows WHICH model it is. Without this,
+        # the agent has no idea it's "Kimi 2.6 via PrivateMode AI" — when the
+        # user asks "are you kimi 2.6?", the agent says "I don't know." The
+        # model name + provider are resolved by _resolve_open_model above
+        # (canonical litellm string like "openai/kimi-k2.6" + provider label
+        # like "privatemodeai"). We strip the "openai/" prefix from the
+        # litellm string so the agent tells the user "kimi-k2.6" (the model
+        # id) rather than "openai/kimi-k2.6" (the litellm routing prefix,
+        # which is confusing to a user).
+        _identity_model = model
+        if "/" in _identity_model:
+            _identity_model = _identity_model.rsplit("/", 1)[-1]
+        _identity_provider = self.resolved_provider or "unknown provider"
+        # Title-case the provider for readability (e.g. "privatemodeai" -> "Privatemodeai").
+        try:
+            _identity_provider = _identity_provider[:1].upper() + _identity_provider[1:]
+        except Exception:
+            pass
+        self.system_prompt = (
+            f"{self.system_prompt}\n\n"
+            f"--- Model Identity ---\n"
+            f"You are running as {_identity_model} via {_identity_provider}.\n"
+            f"If the user asks which model you are, tell them you are "
+            f"{_identity_model} (served by {_identity_provider}). Be honest "
+            f"about your identity — do not claim to be a different model.\n"
+        )
+
         # client_args pass straight to litellm.completion (api_base = custom
         # OpenAI-compatible endpoint, e.g. Z.ai for GLM, NVIDIA for Kimi).
         # extra_headers is REQUIRED for OpenRouter (HTTP-Referer + X-Title).
@@ -1459,6 +1487,19 @@ class StrandsAdapter(BaseAdapter):
         # complete text (finalized by the trailing `status: idle` event).
         self._assistant_streamed = False
         self._assistant_streamed_text = ""
+        # CHAT-COMPLETE-FIX (Bug 3): explicit flag for "any assistant text
+        # was emitted this turn" — set by BOTH the streaming callback (when
+        # assistant_delta fires) AND the post-turn walk (when a full
+        # `assistant` event fires). The AgentSession._run() finally block
+        # checks this flag (via getattr) to decide whether to emit the
+        # "(no response from the model)" placeholder. Previously the finally
+        # block scanned self.events[pre_count:] for assistant/assistant_delta
+        # events — but that scan could miss events in edge cases (e.g. if
+        # pre_count was stale, or if the streaming callback's emits were
+        # reordered relative to the lock). The flag is set IMMEDIATELY when
+        # the emit happens, so it's always accurate regardless of event
+        # ordering or pre_count tracking.
+        self._assistant_emitted = False
 
         # Build a streaming callback handler: thinking text + content deltas
         # in real-time, plus mid-turn cost ceiling enforcement for conscious
@@ -1475,6 +1516,10 @@ class StrandsAdapter(BaseAdapter):
             if data:
                 self._assistant_streamed = True
                 self._assistant_streamed_text = (self._assistant_streamed_text or "") + data
+                # CHAT-COMPLETE-FIX (Bug 3): mark that assistant text was
+                # emitted this turn so the AgentSession._run() finally block
+                # does NOT emit the "(no response from the model)" placeholder.
+                self._assistant_emitted = True
                 emit({"type": "assistant_delta", "text": data})
             # Cost ceiling check (conscious agents only)
             if sess is not None and getattr(sess, "conscious_id", None):
@@ -1499,7 +1544,25 @@ class StrandsAdapter(BaseAdapter):
             pass
         # Record the message count BEFORE the agent call so the post-turn
         # walk only emits NEW messages (not the entire history).
+        #
+        # CHAT-COMPLETE-FIX (Bug 6): VERIFIED this is set BEFORE self.agent()
+        # is called (line ~1567). The order is:
+        #   1. self._pre_count = len(self.agent.messages)   <- HERE
+        #   2. _t = Thread(target=_run_agent); _t.start()    <- agent call
+        #   3. _t.join(timeout)                              <- wait for done
+        #   4. _start = self._pre_count; walk msgs[_start:]  <- post-turn walk
+        # The _pre_count captures the message count BEFORE the agent appends
+        # the new user message + assistant response. So msgs[_pre_count:]
+        # contains ONLY the new messages from this turn. If _pre_count were
+        # set to 0 (e.g. by a bug), the walk would re-emit ALL messages,
+        # duplicating old assistant text. The defensive log below verifies
+        # _pre_count is sane (non-zero when the agent has history).
         self._pre_count = len(getattr(self.agent, "messages", []) or [])
+        try:
+            log_event("agent_pre_count", pre_count=self._pre_count,
+                      session_id=getattr(getattr(self, "_session", None), "id", "?"))
+        except Exception:
+            pass
         # Run the agent call with a thread + timeout. The GIL means we can't
         # hard-kill a blocking C extension call, but we CAN set a timeout and
         # process whatever messages were produced so far (best-effort).
@@ -1601,6 +1664,15 @@ class StrandsAdapter(BaseAdapter):
                         if (getattr(self, "_assistant_streamed", False)
                                 and getattr(self, "_assistant_streamed_text", "")):
                             continue
+                        # CHAT-COMPLETE-FIX (Bug 3): mark that assistant text
+                        # was emitted this turn (via a full `assistant` event,
+                        # not just deltas) so the AgentSession._run() finally
+                        # block does NOT emit the "(no response from the
+                        # model)" placeholder. This covers the non-streaming
+                        # path (e.g. Mock adapter, or Strands when streaming
+                        # is disabled) where the full assistant event is the
+                        # ONLY signal that the model replied.
+                        self._assistant_emitted = True
                         emit({"type": "assistant", "text": block["text"]})
         self._msg_cursor = len(msgs)
         self._pre_count = len(msgs)  # update for next turn
@@ -2469,12 +2541,27 @@ class AgentSession:
                 # The fix: count `assistant_delta` events as well so the
                 # placeholder ONLY fires when the model genuinely produced no
                 # output (empty response, init error, provider 400, etc.).
+                #
+                # CHAT-COMPLETE-FIX (Bug 3): PRIMARY check is now the
+                # `_assistant_emitted` flag on the adapter (set by the
+                # streaming callback AND the post-turn walk). The flag is
+                # set IMMEDIATELY when an assistant event is emitted, so it's
+                # always accurate regardless of event ordering or pre_count
+                # tracking. The self.events scan is kept as a FALLBACK for
+                # adapters that don't set the flag (e.g. ClaudeAdapter,
+                # MockAdapter, ResearchAdapter). If EITHER the flag OR the
+                # scan finds an assistant event, skip the placeholder.
                 if not self._interrupting:
-                    with self.lock:
-                        for ev in self.events[pre_count:]:
-                            if ev.get("type") in ("assistant", "assistant_delta"):
-                                assistant_emitted = True
-                                break
+                    # Primary: check the adapter's flag (set in turn()).
+                    if getattr(self.adapter, "_assistant_emitted", False):
+                        assistant_emitted = True
+                    # Fallback: scan self.events for adapters without the flag.
+                    if not assistant_emitted:
+                        with self.lock:
+                            for ev in self.events[pre_count:]:
+                                if ev.get("type") in ("assistant", "assistant_delta"):
+                                    assistant_emitted = True
+                                    break
                     if not assistant_emitted:
                         self.emit({"type": "assistant",
                                    "text": "(no response from the model — "
