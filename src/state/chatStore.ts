@@ -2029,6 +2029,7 @@ async function _runTurn(
       const finish = () => {
         if (settled) return;
         settled = true;
+        pollActive = false; // stop the safety-net poll
         if (pollTimer) clearInterval(pollTimer);
         resolve();
       };
@@ -2102,6 +2103,34 @@ async function _runTurn(
           }
         }
       };
+
+      // CHAT-COMPLETE-FIX: start a polling safety net ALONGSIDE the SSE
+      // stream. The SSE stream should deliver events in real-time, but HF
+      // Space's proxy may buffer the SSE response. The poll checks every
+      // 500ms for new events — if the SSE already delivered them, the poll's
+      // since cursor matches and no duplicate events are emitted (the
+      // handleEvent dedup guard drops them). If the SSE is buffered/stalled,
+      // the poll delivers events the SSE missed. The poll stops when the
+      // turn finishes (status idle/error).
+      let pollActive = true;
+      const pollNet = async () => {
+        while (pollActive && !settled) {
+          try {
+            await new Promise((r) => setTimeout(r, 500));
+            if (!pollActive || settled) break;
+            const snap = await client.poll(agentSid!, since);
+            for (const ev of snap.events) handleEvent(ev);
+            if (snap.status !== "running" && snap.status !== "starting") {
+              set((s) => ({ messages: finalizeStreaming(s.messages) }));
+              finish();
+              break;
+            }
+          } catch {
+            /* keep polling */
+          }
+        }
+      };
+      pollNet(); // start the safety-net poll
 
       controller = client.stream(
         agentSid!,
