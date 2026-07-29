@@ -135,12 +135,14 @@ class ChatSession:
         self.updated = self.created
         self._assistant_emitted = False
         self._thread = None
+        self._turn_start_idx = 0  # Index in self.events where the current turn starts
 
     def send(self, message: str) -> None:
         """Send a message. Runs the agent in a background thread."""
         self.updated = time.time()
         self.status = "running"
         self._assistant_emitted = False
+        self._turn_start_idx = len(self.events)
 
         # Emit user event
         self._emit({"type": "user", "text": message})
@@ -312,9 +314,18 @@ class ChatSession:
                 pass
 
     def snapshot(self, since: int = 0) -> dict:
-        """Get a snapshot of events for polling."""
+        """Get a snapshot of events for polling.
+        
+        If since=0, returns only events from the CURRENT turn (not all history).
+        If since>0, returns events from that index (for catching up).
+        """
         with self._lock:
-            events = self.events[max(0, since):]
+            if since == 0:
+                # Return only current turn's events (user + assistant + tools)
+                start = self._turn_start_idx
+            else:
+                start = max(0, since)
+            events = self.events[start:]
             return {
                 "session_id": self.id,
                 "status": self.status,
