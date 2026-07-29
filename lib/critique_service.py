@@ -1133,6 +1133,19 @@ class Handler(BaseHTTPRequestHandler):
         )
         self._send_json(201, cs)
 
+    def _handle_v2_session_events(self, route: str) -> None:
+        """GET /api/v2/chat/sessions/<id>/events — load conversation history."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        session_id = route[len("/api/v2/chat/sessions/"):-len("/events")]
+        try:
+            import chat_routes
+            events = chat_routes.get_chat_events(session_id) or []
+            self._send_json(200, {"events": events, "session_id": session_id})
+        except Exception as e:
+            self._send_json(500, {"error": str(e)[:200]})
+
     def _handle_v2_list_sessions(self) -> None:
         """GET /api/v2/chat/sessions — list chat sessions."""
         if not self._auth_ok():
@@ -1198,6 +1211,47 @@ class Handler(BaseHTTPRequestHandler):
 
         # Send the message (non-blocking — runs in background thread)
         sess.send(message)
+
+        # SP1.1: Sync DB to HF dataset (throttled, background)
+        try:
+            import db
+            db.sync_db_to_dataset()
+        except Exception:
+            pass
+
+        # SP1.3: Auto-title generation (if this is the first message)
+        try:
+            import chat_routes
+            cs = chat_routes.get_chat_session(chat_session_id)
+            if cs and (not cs.get("title") or cs["title"].startswith("Chat ")):
+                # Generate title in background (don't block the response)
+                import threading
+                def _gen_title():
+                    try:
+                        import agent_sessions
+                        title_msg = message[:200]
+                        # Use a quick LLM call to generate a 3-5 word title
+                        from agent_sessions import complete
+                        result = complete("zai", "glm-4.6", [
+                            {"role": "system", "content": "Generate a concise 3-5 word title for this message. Output ONLY the title, no quotes, no punctuation."},
+                            {"role": "user", "content": title_msg},
+                        ], {"maxTokens": 30})
+                        title = result.content.strip().replace('"', '').replace("'", "")[:60]
+                        if title:
+                            chat_routes.rename_chat_session(chat_session_id, title)
+                            # Emit title event to the session
+                            sess._emit({"type": "title", "title": title, "session_id": chat_session_id})
+                    except Exception:
+                        # Fallback: truncate the message
+                        try:
+                            fallback = message[:30].strip() or "New Chat"
+                            chat_routes.rename_chat_session(chat_session_id, fallback)
+                            sess._emit({"type": "title", "title": fallback, "session_id": chat_session_id})
+                        except Exception:
+                            pass
+                threading.Thread(target=_gen_title, daemon=True).start()
+        except Exception:
+            pass
 
         self._send_json(202, {
             "session_id": sess.id,
@@ -1445,6 +1499,9 @@ class Handler(BaseHTTPRequestHandler):
         # === NEW V2 CHAT API ===
         if route == "/api/v2/chat/sessions":
             self._handle_v2_list_sessions()
+            return
+        if route.endswith("/events") and route.startswith("/api/v2/chat/sessions/"):
+            self._handle_v2_session_events(route)
             return
         if route.endswith("/stream") and route.startswith("/api/v2/agent/"):
             self._handle_v2_stream(route)
