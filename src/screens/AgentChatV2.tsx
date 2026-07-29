@@ -351,17 +351,7 @@ function MessageBubbleV2({ msg }: { msg: V2Message }) {
   const isTool = msg.role === "tool" || msg.role === "tool_result";
 
   if (isThinking) {
-    return (
-      <div className="px-3 py-1.5">
-        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground mb-0.5">
-          <Brain className="size-2.5" />
-          {msg.isStreaming ? "thinking..." : "thought process"}
-        </div>
-        <div className="text-[11px] text-muted-foreground/70 italic whitespace-pre-wrap pl-4 border-l border-accent/20">
-          {msg.content}
-        </div>
-      </div>
-    );
+    return <ThinkingBubble msg={msg} />;
   }
 
   if (isTool) {
@@ -391,6 +381,38 @@ function MessageBubbleV2({ msg }: { msg: V2Message }) {
           <span className="inline-block w-1.5 h-3.5 bg-accent animate-pulse ml-0.5 align-middle" />
         )}
       </div>
+    </div>
+  );
+}
+
+
+// === Thinking Bubble (expandable/collapsible) ===
+function ThinkingBubble({ msg }: { msg: V2Message }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasContent = msg.content && msg.content.trim().length > 0;
+  const preview = hasContent ? msg.content.slice(0, 100) + (msg.content.length > 100 ? "..." : "") : "";
+  
+  return (
+    <div className="px-3 py-1">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <Brain className="size-2.5" />
+        {msg.isStreaming ? "thinking..." : "thought process"}
+        {hasContent && (
+          <span className="text-[9px] text-muted-foreground/50">
+            ({expanded ? "click to collapse" : "click to expand"})
+          </span>
+        )}
+      </button>
+      {hasContent && (
+        <div className={`mt-1 pl-4 border-l border-accent/20 ${expanded ? "" : "max-h-8 overflow-hidden"}`}>
+          <div className="text-[11px] text-muted-foreground/70 italic whitespace-pre-wrap">
+            {expanded ? msg.content : preview}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
