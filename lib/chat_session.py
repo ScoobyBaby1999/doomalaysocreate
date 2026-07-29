@@ -182,8 +182,7 @@ class ChatSession:
         from strands import Agent
         from strands.models.litellm import LiteLLMModel
         from strands.agent.conversation_manager import SlidingWindowConversationManager
-        from strands.session.file_session_manager import FileSessionManager
-
+        
         # Resolve model + provider
         model_id, api_key, api_base, extra_headers, provider_name = self._resolve_model()
 
@@ -225,22 +224,15 @@ class ChatSession:
             proactive_compression=True,  # Auto-compress when 70% context used
         )
 
-        # Build session manager
-        sessions_dir = str(self.workspace_path / ".sessions")
-        (self.workspace_path / ".sessions").mkdir(parents=True, exist_ok=True)
-        session_mgr = FileSessionManager(
-            session_id=self.chat_session_id,
-            storage_dir=sessions_dir,
-        )
-
-        # Create the agent
+        # Create the agent — NO FileSessionManager (it replays old conversations
+        # from /data which causes the agent to re-generate previous responses).
+        # The SlidingWindowConversationManager handles in-memory context.
         self._agent = Agent(
             model=llm,
             tools=tools,
             system_prompt=system_prompt,
             callback_handler=self._callback,
             conversation_manager=conv_manager,
-            session_manager=session_mgr,
         )
 
         log_event("chat_agent_created", session_id=self.id,
