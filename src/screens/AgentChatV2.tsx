@@ -127,7 +127,7 @@ export function AgentChatV2({ settings }: { settings: Settings }) {
     inputRef.current?.focus();
   }, [client, createSession, effectiveModelId]);
 
-  if (!settings.baseUrl && !settings.token) {
+  if (!settings.baseUrl && !settings.token && !settings.rotationSecret) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <MessageSquare className="size-10 text-muted-foreground mb-3" />
