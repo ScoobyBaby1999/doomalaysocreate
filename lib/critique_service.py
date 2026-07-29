@@ -1114,6 +1114,195 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return payload
 
+    # === NEW V2 CHAT API HANDLERS ===
+
+    def _handle_v2_create_session(self) -> None:
+        """POST /api/v2/chat/sessions — create a chat session."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        except Exception:
+            body = {}
+        import chat_routes
+        cs = chat_routes.create_chat_session(
+            model=body.get("model"),
+            workspace_id=body.get("workspace_id"),
+            user_id=self._require_user_from_jwt(),
+        )
+        self._send_json(201, cs)
+
+    def _handle_v2_list_sessions(self) -> None:
+        """GET /api/v2/chat/sessions — list chat sessions."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        import chat_routes
+        user_id = self._require_user_from_jwt()
+        sessions = chat_routes.list_chat_sessions(user_id=user_id)
+        self._send_json(200, {"sessions": sessions})
+
+    def _handle_v2_agent_post(self) -> None:
+        """POST /api/v2/agent — send a message (new simplified flow)."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        except Exception:
+            self._send_json(400, {"error": "invalid JSON body"})
+            return
+
+        message = body.get("message", "").strip()
+        chat_session_id = body.get("chat_session_id", "").strip()
+        model = body.get("model", "").strip() or None
+        effort = body.get("effort", "").strip() or None
+        web_search = bool(body.get("web_search") or body.get("webSearch"))
+        deep_research = bool(body.get("deep_research") or body.get("deepResearch"))
+
+        if not message:
+            self._send_json(400, {"error": "message is required"})
+            return
+        if not chat_session_id:
+            self._send_json(400, {"error": "chat_session_id is required"})
+            return
+
+        # Persist the user message immediately (before agent runs)
+        try:
+            import chat_routes
+            chat_routes.append_chat_event(chat_session_id, 0, "user", message)
+        except Exception:
+            pass
+
+        # Get or create a ChatSession
+        import chat_session
+        panel: Panel = self.server.panel  # type: ignore[attr-defined]
+        workspace_path = None
+        workspace_id = body.get("workspace_id")
+        if workspace_id:
+            import db
+            ws = db.get_workspace(workspace_id)
+            if ws and ws.get("sandbox_path"):
+                workspace_path = Path(ws["sandbox_path"])
+
+        sess = chat_session.get_or_create(
+            chat_session_id=chat_session_id,
+            model=model,
+            workspace_path=workspace_path,
+            effort=effort,
+            web_search=web_search,
+            deep_research=deep_research,
+            panel=panel,
+        )
+
+        # Send the message (non-blocking — runs in background thread)
+        sess.send(message)
+
+        self._send_json(202, {
+            "session_id": sess.id,
+            "chat_session_id": chat_session_id,
+            "status": sess.status,
+            "model": model,
+        })
+
+    def _handle_v2_stream(self, route: str) -> None:
+        """GET /api/v2/agent/<sid>/stream — SSE stream for live events."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+
+        sid = route[len("/api/v2/agent/"):-len("/stream")]
+        import chat_session
+
+        # Open SSE response immediately
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        # Wait for session to appear (up to 5s)
+        sess = chat_session.get_session(sid)
+        deadline = time.time() + 5.0
+        while sess is None and time.time() < deadline:
+            try:
+                self.wfile.write(b": heartbeat\n\n")
+                self.wfile.flush()
+            except Exception:
+                return
+            time.sleep(0.1)
+            sess = chat_session.get_session(sid)
+
+        if sess is None:
+            err = {"i": -1, "ts": time.time(), "type": "error",
+                   "error": f"session {sid} not found within 5s"}
+            try:
+                self.wfile.write(f"data: {json.dumps(err)}\n\n".encode())
+                self.wfile.flush()
+            except Exception:
+                pass
+            return
+
+        # Subscribe to events
+        q = sess.subscribe(0)  # Always since=0 — idempotent handler
+        try:
+            while True:
+                try:
+                    ev = q.get(timeout=30)
+                except queue.Empty:
+                    try:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                    except Exception:
+                        break
+                    continue
+                if ev is None:
+                    break
+                # Send the event
+                line = f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                try:
+                    self.wfile.write(line.encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    break
+                # Check if the turn is done
+                if ev.get("type") == "status" and ev.get("state") in ("idle", "error"):
+                    # Wait a moment for any trailing events
+                    time.sleep(0.2)
+                    while not q.empty():
+                        try:
+                            trailing = q.get_nowait()
+                            line = f"data: {json.dumps(trailing, ensure_ascii=False)}\n\n"
+                            self.wfile.write(line.encode("utf-8"))
+                            self.wfile.flush()
+                        except Exception:
+                            break
+                    break
+        finally:
+            sess.unsubscribe(q)
+
+    def _handle_v2_get_session(self, route: str) -> None:
+        """GET /api/v2/agent/<sid> — poll for events."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        sid = route[len("/api/v2/agent/"):]
+        import chat_session
+        sess = chat_session.get_session(sid)
+        if sess is None:
+            self._send_json(404, {"error": "session not found"})
+            return
+        from urllib.parse import parse_qs, urlsplit
+        q = parse_qs(urlsplit(self.path).query)
+        try:
+            since = int(q.get("since", ["0"])[0])
+        except ValueError:
+            since = 0
+        self._send_json(200, sess.snapshot(since))
+
     def do_OPTIONS(self) -> None:
         #   CORS preflight for cross-origin POSTs with Authorization/Content-Type.
         self.send_response(204)
@@ -1250,6 +1439,19 @@ class Handler(BaseHTTPRequestHandler):
             self._log_request("GET", self.path, self._last_status, (time.time() - start) * 1000, error_msg)
 
     def _do_GET(self) -> None:
+        from urllib.parse import urlsplit
+        route = urlsplit(self.path).path.rstrip("/")
+        
+        # === NEW V2 CHAT API ===
+        if route == "/api/v2/chat/sessions":
+            self._handle_v2_list_sessions()
+            return
+        if route.endswith("/stream") and route.startswith("/api/v2/agent/"):
+            self._handle_v2_stream(route)
+            return
+        if route.startswith("/api/v2/agent/") and not route.endswith("/stream"):
+            self._handle_v2_get_session(route)
+            return
         from urllib.parse import urlsplit
         route = urlsplit(self.path).path.rstrip("/")
         # --- POST /api/models/resync — force re-fetch + re-cache models ---
@@ -4665,6 +4867,16 @@ class Handler(BaseHTTPRequestHandler):
             self._log_request("POST", self.path, self._last_status, (time.time() - start) * 1000, error_msg)
 
     def _do_POST(self) -> None:
+        from urllib.parse import urlsplit
+        route = urlsplit(self.path).path.rstrip("/")
+        
+        # === NEW V2 CHAT API ===
+        if route == "/api/v2/agent":
+            self._handle_v2_agent_post()
+            return
+        if route == "/api/v2/chat/sessions":
+            self._handle_v2_create_session()
+            return
         route = self.path.rstrip("/")
         # --- Debug log ingestion (auth-gated) ---
         if route == "/api/debug/log":
