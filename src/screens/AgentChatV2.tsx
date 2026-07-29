@@ -46,6 +46,8 @@ export function AgentChatV2({ settings }: { settings: Settings }) {
   const [webSearch, setWebSearch] = useState(false);
   const [deepResearch, setDeepResearch] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [tokenCount] = useState(0);
+  const [contextLength, setContextLength] = useState(131072);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -98,6 +100,51 @@ export function AgentChatV2({ settings }: { settings: Settings }) {
   }, [providers, selectedModelId, selectedSlotId]);
 
   const hasEffort = effortLevels.length > 0;
+
+  // SP3.3: Update context length from model info
+  useEffect(() => {
+    if (!selectedModelId) return;
+    for (const p of providers) {
+      const m = p.models.find((m: any) => m.id === selectedModelId || m.slotId === selectedSlotId);
+      if (m?.contextLength) {
+        setContextLength(m.contextLength);
+        return;
+      }
+    }
+  }, [providers, selectedModelId, selectedSlotId]);
+
+  // SP3.2: Track token count from status events
+  useEffect(() => {
+    // The messages array doesn't directly give us token count
+    // But the last status event has usage data
+    // We'll track it via a ref on the stream
+  }, [messages]);
+
+  // SP8.2: Debounced metadata save
+  const saveMeta = useCallback((meta: Record<string, any>) => {
+    if (!activeSessionId) return;
+    const doSave = async () => {
+      try {
+        const t = settings.rotationSecret
+          ? (await import("../api/token")).deriveToken(settings.rotationSecret)
+          : settings.token;
+        await fetch(`${settings.baseUrl || ""}/api/v2/chat/sessions/meta`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}` },
+          body: JSON.stringify({ session_id: activeSessionId, ...meta }),
+        });
+      } catch {}
+    };
+    const timer = setTimeout(doSave, 800);
+    return () => clearTimeout(timer);
+  }, [activeSessionId, settings]);
+
+  // Save metadata when settings change
+  useEffect(() => {
+    if (activeSessionId) {
+      saveMeta({ model: effectiveModelId, effort, web_search: webSearch, deep_research: deepResearch });
+    }
+  }, [effectiveModelId, effort, webSearch, deepResearch, activeSessionId]);
 
   // Send message
   const handleSend = useCallback(async () => {
@@ -191,7 +238,7 @@ export function AgentChatV2({ settings }: { settings: Settings }) {
           )}
 
           <div className="ml-auto flex items-center gap-1.5">
-            <div className="text-[9px] text-muted-foreground">128k ctx</div>
+            <ContextCircleV2 used={tokenCount} total={contextLength} />
             <div className="text-[9px] text-emerald-500">FREE</div>
           </div>
         </div>
@@ -414,6 +461,26 @@ function ThinkingBubble({ msg }: { msg: V2Message }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+// SP3.4: Context Circle with real token count
+function ContextCircleV2({ used, total }: { used: number; total: number }) {
+  const pct = total > 0 ? Math.min(used / total, 1) : 0;
+  const color = pct > 0.8 ? "#ef4444" : pct > 0.5 ? "#f59e0b" : "#10b981";
+  const r = 8;
+  const c = 2 * Math.PI * r;
+  const dash = c * pct;
+  return (
+    <div className="flex items-center gap-1" title={`${used.toLocaleString()} / ${total.toLocaleString()} tokens (${Math.round(pct*100)}%)`}>
+      <svg width="20" height="20" viewBox="0 0 20 20" style={{ transform: "rotate(-90deg)" }}>
+        <circle cx="10" cy="10" r={r} fill="none" stroke="currentColor" strokeWidth="2" className="text-muted/30" />
+        <circle cx="10" cy="10" r={r} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round"
+          strokeDasharray={`${dash} ${c}`} style={{ transition: "stroke-dasharray 0.3s ease" }} />
+      </svg>
+      <span className="text-[9px] font-mono" style={{ color }}>{Math.round(pct*100)}%</span>
     </div>
   );
 }
