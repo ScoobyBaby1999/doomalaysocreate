@@ -1,13 +1,5 @@
 /**
  * V2 Chat Store — simplified, no cursor, no polling, no dedup complexity.
- *
- * Key principles:
- * - SSE stream is the ONLY event source (no polling fallback)
- * - Always since=0 (idempotent event handler)
- * - thinking events REPLACE the bubble (reasoningText is accumulated)
- * - assistant_delta events APPEND to the bubble
- * - user events mark the pending message as confirmed
- * - No _lastEventSeq, no _pre_count, no _msg_cursor
  */
 import { create } from "zustand";
 import { V2ChatClient, type V2AgentEvent, type V2ChatSession } from "../api/v2chat";
@@ -23,24 +15,13 @@ export interface V2Message {
 }
 
 interface V2ChatState {
-  // Sessions
   sessions: V2ChatSession[];
   activeSessionId: string | null;
-  
-  // Messages
   messages: V2Message[];
   isBusy: boolean;
-  
-  // Queue
   queue: string[];
-  
-  // Error
   error: string | null;
-  
-  // Stream controller
   _streamController: AbortController | null;
-  
-  // Actions
   init: (client: V2ChatClient) => Promise<void>;
   sendMessage: (client: V2ChatClient, text: string, opts?: {
     model?: string; effort?: string; web_search?: boolean; deep_research?: boolean;
@@ -77,69 +58,37 @@ export const useV2Chat = create<V2ChatState>((set, get) => ({
 
   sendMessage: async (client, text, opts) => {
     if (!text.trim()) return;
-    
-    // If busy, queue the message
     if (get().isBusy) {
       set(s => ({ queue: [...s.queue, text] }));
       return;
     }
-
     let sessionId = get().activeSessionId;
     if (!sessionId) {
       sessionId = await get().createSession(client, opts?.model);
     }
-
-    // Add user message optimistically
     const userMsg: V2Message = {
-      id: genMsgId(),
-      role: "user",
-      content: text,
-      pending: true,
-      timestamp: Date.now(),
+      id: genMsgId(), role: "user", content: text, pending: true, timestamp: Date.now(),
     };
-    set(s => ({
-      messages: [...s.messages, userMsg],
-      isBusy: true,
-      error: null,
-    }));
-
+    set(s => ({ messages: [...s.messages, userMsg], isBusy: true, error: null }));
     try {
-      // Send the message
       const { session_id } = await client.send(sessionId, text, opts || {});
-
-      // Open SSE stream — ALWAYS since=0, idempotent handler
       const ac = client.stream(
         session_id,
-        // onEvent — the SINGLE event handler
         (ev: V2AgentEvent) => {
-          set(s => ({ messages: handleEvent(s.messages, ev) }));
-
-          // Handle status changes
-          if (ev.type === "status" && (ev.state === "idle" || ev.state === "error")) {
-            set(s => ({
-              messages: finalizeStreaming(s.messages),
-              isBusy: false,
-            }));
+          set(state => ({ messages: handleEvent(state.messages, ev) }));
+          if (ev.type === "title") {
+            set(s => ({ sessions: s.sessions.map(ses => ses.id === sessionId ? { ...ses, title: ev.title || ses.title } : ses) }));
           }
-
-          // Handle errors
+          if (ev.type === "status" && (ev.state === "idle" || ev.state === "error")) {
+            set(s => ({ messages: finalizeStreaming(s.messages), isBusy: false }));
+          }
           if (ev.type === "error") {
             set({ error: ev.error || "Unknown error" });
           }
         },
-        // onError
-        (err: Error) => {
-          set({ error: err.message, isBusy: false });
-        },
-        // onClose — stream ended
+        (err: Error) => { set({ error: err.message, isBusy: false }); },
         () => {
-          set(s => ({
-            messages: finalizeStreaming(s.messages),
-            isBusy: false,
-            _streamController: null,
-          }));
-          
-          // Drain the queue
+          set(s => ({ messages: finalizeStreaming(s.messages), isBusy: false, _streamController: null }));
           const next = get().queue[0];
           if (next) {
             set(s => ({ queue: s.queue.slice(1) }));
@@ -149,161 +98,82 @@ export const useV2Chat = create<V2ChatState>((set, get) => ({
       );
       set({ _streamController: ac });
     } catch (e) {
-      set({
-        error: e instanceof Error ? e.message : "Failed to send message",
-        isBusy: false,
-        messages: finalizeStreaming(get().messages),
-      });
+      set({ error: e instanceof Error ? e.message : "Failed to send", isBusy: false, messages: finalizeStreaming(get().messages) });
     }
   },
 
   createSession: async (client, model) => {
     const session = await client.createSession({ model, title: `Chat ${Math.random().toString(16).slice(2, 6)}` });
-    set(s => ({
-      sessions: [session, ...s.sessions],
-      activeSessionId: session.id,
-      messages: [],
-      error: null,
-      isBusy: false,
-      queue: [],
-    }));
+    set(s => ({ sessions: [session, ...s.sessions], activeSessionId: session.id, messages: [], error: null, isBusy: false, queue: [] }));
     return session.id;
   },
 
   switchSession: async (client, sessionId) => {
-    // Abort any in-flight stream
     const ctrl = get()._streamController;
-    if (ctrl) ctrl.abort();
-
-    set({
-      activeSessionId: sessionId,
-      messages: [],
-      isBusy: false,
-      error: null,
-      queue: [],
-      _streamController: null,
-    });
-
-    // Load messages from the backend
+    if (ctrl) { try { ctrl.abort(); } catch {} }
+    set({ activeSessionId: sessionId, messages: [], isBusy: false, error: null, queue: [], _streamController: null });
     try {
-      // Poll to get existing events
-      const { events } = await client.poll(sessionId, 0);
-      set(() => ({
-        messages: events.reduce((msgs: V2Message[], ev) => handleEvent(msgs, ev), []),
-      }));
-    } catch {
-      // Non-fatal — session might be new
-    }
+      const token = await client.getToken();
+      const res = await fetch(`${client.baseUrl}/api/v2/chat/sessions/${sessionId}/events`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const msgs: V2Message[] = (data.events || []).reduce((acc: V2Message[], ev: any) => handleEvent(acc, ev), []);
+        set({ messages: msgs });
+      }
+    } catch { /* new session */ }
   },
 
   stopGeneration: () => {
     const ctrl = get()._streamController;
-    if (ctrl) ctrl.abort();
-    set(s => ({
-      isBusy: false,
-      messages: finalizeStreaming(s.messages),
-      _streamController: null,
-    }));
+    if (ctrl) { try { ctrl.abort(); } catch {} }
+    set(s => ({ isBusy: false, messages: finalizeStreaming(s.messages), _streamController: null }));
   },
 }));
 
-/**
- * Handle a single event — idempotent (safe to replay).
- * This is the ONLY place messages are modified.
- */
 function handleEvent(messages: V2Message[], ev: V2AgentEvent): V2Message[] {
   switch (ev.type) {
     case "user": {
-      // Mark the pending user message as confirmed
-      const pendingIdx = findLastIdx(messages, (m: V2Message) => m.role === "user" && !!m.pending);
-      if (pendingIdx !== -1) {
+      const idx = findLastIdx(messages, (m: V2Message) => m.role === "user" && !!m.pending);
+      if (idx !== -1) {
         const out = [...messages];
-        out[pendingIdx] = { ...out[pendingIdx], pending: false };
+        out[idx] = { ...out[idx], pending: false };
         return out;
       }
-      // No pending message — add it (e.g. loading from backend)
-      return [...messages, {
-        id: genMsgId(), role: "user", content: ev.text || "",
-        timestamp: (ev.ts || 0) * 1000,
-      }];
+      return [...messages, { id: genMsgId(), role: "user", content: ev.text || "", timestamp: (ev.ts || 0) * 1000 }];
     }
-
     case "thinking": {
-      // reasoningText is ACCUMULATED — REPLACE the thinking bubble
       const idx = findLastIdx(messages, (m: V2Message) => m.role === "thinking" && !!m.isStreaming);
       if (idx !== -1) {
         const out = [...messages];
         out[idx] = { ...out[idx], content: ev.text || "" };
         return out;
       }
-      return [...messages, {
-        id: genMsgId(), role: "thinking", content: ev.text || "",
-        isStreaming: true, timestamp: (ev.ts || 0) * 1000,
-      }];
+      return [...messages, { id: genMsgId(), role: "thinking", content: ev.text || "", isStreaming: true, timestamp: (ev.ts || 0) * 1000 }];
     }
-
     case "assistant_delta": {
-      // APPEND to the streaming assistant bubble
       const idx = findLastIdx(messages, (m: V2Message) => m.role === "assistant" && !!m.isStreaming);
       if (idx !== -1) {
         const out = [...messages];
         out[idx] = { ...out[idx], content: out[idx].content + (ev.text || "") };
         return out;
       }
-      return [...messages, {
-        id: genMsgId(), role: "assistant", content: ev.text || "",
-        isStreaming: true, timestamp: (ev.ts || 0) * 1000,
-      }];
+      return [...messages, { id: genMsgId(), role: "assistant", content: ev.text || "", isStreaming: true, timestamp: (ev.ts || 0) * 1000 }];
     }
-
-    case "assistant_complete": {
-      // Finalize the streaming bubble
-      return messages.map(m =>
-        m.role === "assistant" && m.isStreaming ? { ...m, isStreaming: false } : m
-      );
-    }
-
+    case "assistant_complete":
+      return messages.map(m => m.role === "assistant" && m.isStreaming ? { ...m, isStreaming: false } : m);
     case "assistant": {
-      // Full assistant message (non-streaming fallback or placeholder)
-      // Skip if we already have a streaming bubble with content
       const hasStreaming = messages.some(m => m.role === "assistant" && m.isStreaming && m.content);
-      if (hasStreaming) {
-        return messages.map(m =>
-          m.role === "assistant" && m.isStreaming ? { ...m, isStreaming: false } : m
-        );
+      if (hasStreaming || ev.text === "(no response from the model)") {
+        return messages.map(m => m.role === "assistant" && m.isStreaming ? { ...m, isStreaming: false } : m);
       }
-      // Skip placeholder
-      if (ev.text === "(no response from the model)") {
-        return messages.map(m =>
-          m.role === "assistant" && m.isStreaming ? { ...m, isStreaming: false } : m
-        );
-      }
-      return [...messages, {
-        id: genMsgId(), role: "assistant", content: ev.text || "",
-        timestamp: (ev.ts || 0) * 1000,
-      }];
+      return [...messages, { id: genMsgId(), role: "assistant", content: ev.text || "", timestamp: (ev.ts || 0) * 1000 }];
     }
-
-    case "tool_use": {
-      return [...messages, {
-        id: genMsgId(), role: "tool", content: ev.summary || "",
-        toolName: ev.name, timestamp: (ev.ts || 0) * 1000,
-      }];
-    }
-
-    case "tool_result": {
-      return [...messages, {
-        id: genMsgId(), role: "tool_result", content: ev.text || "",
-        timestamp: (ev.ts || 0) * 1000,
-      }];
-    }
-
-    case "status":
-    case "error":
-    case "title":
-      // These don't add messages — they update state
-      return messages;
-
+    case "tool_use":
+      return [...messages, { id: genMsgId(), role: "tool", content: ev.summary || ev.text || "", toolName: ev.name, timestamp: (ev.ts || 0) * 1000 }];
+    case "tool_result":
+      return [...messages, { id: genMsgId(), role: "tool_result", content: ev.text || "", timestamp: (ev.ts || 0) * 1000 }];
     default:
       return messages;
   }
@@ -313,8 +183,6 @@ function finalizeStreaming(messages: V2Message[]): V2Message[] {
   return messages.map(m => m.isStreaming ? { ...m, isStreaming: false } : m);
 }
 
-
-/** ES2015-compatible findLastIndex. */
 function findLastIdx<T>(arr: T[], predicate: (item: T) => boolean): number {
   for (let i = arr.length - 1; i >= 0; i--) {
     if (predicate(arr[i])) return i;

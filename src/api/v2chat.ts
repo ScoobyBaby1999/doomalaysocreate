@@ -34,10 +34,13 @@ export interface V2ChatSession {
 }
 
 export class V2ChatClient {
-  constructor(
-    private baseUrl: string,
-    private getToken: () => Promise<string>,
-  ) {}
+  baseUrl: string;
+  getToken: () => Promise<string>;
+
+  constructor(baseUrl: string, getToken: () => Promise<string>) {
+    this.baseUrl = baseUrl;
+    this.getToken = getToken;
+  }
 
   async createSession(opts: { model?: string; title?: string; workspace_id?: string }): Promise<V2ChatSession> {
     const token = await this.getToken();
