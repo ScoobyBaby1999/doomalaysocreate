@@ -388,9 +388,10 @@ function MessageBubbleV2({ msg }: { msg: V2Message }) {
 
 // === Thinking Bubble (expandable/collapsible) ===
 function ThinkingBubble({ msg }: { msg: V2Message }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true); // Default EXPANDED
   const hasContent = msg.content && msg.content.trim().length > 0;
-  const preview = hasContent ? msg.content.slice(0, 100) + (msg.content.length > 100 ? "..." : "") : "";
+  const isLong = hasContent && msg.content.length > 300;
+  const displayContent = expanded ? msg.content : (hasContent ? msg.content.slice(0, 150) + "..." : "");
   
   return (
     <div className="px-3 py-1">
@@ -400,16 +401,16 @@ function ThinkingBubble({ msg }: { msg: V2Message }) {
       >
         <Brain className="size-2.5" />
         {msg.isStreaming ? "thinking..." : "thought process"}
-        {hasContent && (
+        {hasContent && isLong && (
           <span className="text-[9px] text-muted-foreground/50">
-            ({expanded ? "click to collapse" : "click to expand"})
+            ({expanded ? "collapse" : "expand"})
           </span>
         )}
       </button>
       {hasContent && (
-        <div className={`mt-1 pl-4 border-l border-accent/20 ${expanded ? "" : "max-h-8 overflow-hidden"}`}>
+        <div className={`mt-1 pl-4 border-l border-accent/20 ${expanded ? "max-h-60 overflow-y-auto" : "max-h-8 overflow-hidden"}`}>
           <div className="text-[11px] text-muted-foreground/70 italic whitespace-pre-wrap">
-            {expanded ? msg.content : preview}
+            {displayContent}
           </div>
         </div>
       )}
