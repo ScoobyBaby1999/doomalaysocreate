@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSettings, saveSettings, loadSettings } from "./state/settings";
-import { AgentChat } from "./screens/AgentChat";
+// import { AgentChat } from "./screens/AgentChat"; // V1 (deprecated)
+import { AgentChatV2 } from "./screens/AgentChatV2";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
@@ -250,7 +251,7 @@ export default function App() {
 
       <main className="flex-1 min-h-0">
         {tab === "agentchat" ? (
-          <AgentChat settings={settings} />
+          <AgentChatV2 settings={settings} />
         ) : tab === "conscious" ? (
           // Reachable programmatically (WorkspaceMindsPanel); not in the nav.
           <ConsciousScreen settings={settings} />
