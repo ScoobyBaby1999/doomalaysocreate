@@ -290,7 +290,8 @@ class ChatSession:
         with self._lock:
             q: queue.Queue = queue.Queue(maxsize=512)
             # Replay events from `since`
-            for ev in self.events[max(0, since):]:
+            start = self._turn_start_idx if since == 0 else max(0, since)
+            for ev in self.events[start:]:
                 try:
                     q.put_nowait(ev)
                 except queue.Full:
