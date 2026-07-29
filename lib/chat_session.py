@@ -430,4 +430,72 @@ class ChatSession:
         except Exception:
             pass
 
+        # Add web search tools (DuckDuckGo, no API key needed)
+        try:
+            from strands import tool as strands_tool
+
+            @strands_tool(name="web_search", description=(
+                "Search the web using DuckDuckGo. Returns search results with titles, URLs, and snippets. "
+                "Use this for finding current information, news, documentation, or any web content."
+            ))
+            def web_search(query: str) -> str:
+                """Search the web using DuckDuckGo HTML scraping."""
+                import urllib.request
+                import urllib.parse
+                import re
+                url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; doomalaysocreate-agent/1.0)"
+                })
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    html = resp.read().decode("utf-8", errors="replace")
+                # Parse results from DuckDuckGo HTML
+                results = []
+                for match in re.finditer(r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL):
+                    url = match.group(1)
+                    title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+                    if url.startswith("//duckduckgo.com/l/?uddg="):
+                        url = urllib.parse.unquote(url.split("uddg=")[1].split("&")[0])
+                    results.append(f"[{len(results)+1}] {title}\n    {url}")
+                # Also get snippets
+                snippets = re.findall(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
+                for i, s in enumerate(snippets[:len(results)]):
+                    clean = re.sub(r'<[^>]+>', '', s).strip()
+                    if i < len(results):
+                        results[i] += f"\n    {clean}"
+                if results:
+                    return "\n\n".join(results[:8])
+                return "No results found for: " + query
+
+            @strands_tool(name="web_fetch", description=(
+                "Fetch and read the content of a web page. Returns the text content of the page. "
+                "Use this after web_search to read specific pages."
+            ))
+            def web_fetch(url: str) -> str:
+                """Fetch a web page and return its text content."""
+                import urllib.request
+                import re
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; doomalaysocreate-agent/1.0)"
+                })
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    html = resp.read().decode("utf-8", errors="replace")
+                # Strip HTML tags
+                text = re.sub(r'<script[\s\S]*?</script>', '', html)
+                text = re.sub(r'<style[\s\S]*?</style>', '', text)
+                text = re.sub(r'<[^>]+>', ' ', text)
+                text = re.sub(r'\s+', ' ', text).strip()
+                return text[:10000]  # Cap at 10k chars
+
+            tools.extend([web_search, web_fetch])
+        except Exception as e:
+            log_event("web_search_tool_error", error=str(e)[:200])
+
+        # Add think tool (for reasoning)
+        try:
+            from strands_tools import think
+            tools.append(think)
+        except Exception:
+            pass
+
         return tools
