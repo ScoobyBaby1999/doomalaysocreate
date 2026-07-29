@@ -1357,6 +1357,190 @@ class Handler(BaseHTTPRequestHandler):
             since = 0
         self._send_json(200, sess.snapshot(since))
 
+    # SP4.1: File list
+    def _handle_v2_file_list(self, route: str) -> None:
+        """GET /api/v2/files/<chat_session_id> — list workspace files."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        chat_session_id = route[len("/api/v2/files/"):]
+        import chat_session
+        # Find the ChatSession for this chat_session_id
+        sess = None
+        for s in chat_session._sessions.values():
+            if s.chat_session_id == chat_session_id:
+                sess = s
+                break
+        if sess is None:
+            self._send_json(404, {"error": "session not found"})
+            return
+        workspace = sess.workspace_path
+        files = []
+        try:
+            for item in workspace.rglob("*"):
+                if item.is_file() and not item.name.startswith("."):
+                    rel = str(item.relative_to(workspace))
+                    stat = item.stat()
+                    files.append({
+                        "name": rel,
+                        "size": stat.st_size,
+                        "modified": stat.st_mtime,
+                    })
+        except Exception as e:
+            self._send_json(500, {"error": str(e)[:200]})
+            return
+        self._send_json(200, {"files": files})
+
+    # SP4.2: File download
+    def _handle_v2_file_download(self, route: str) -> None:
+        """GET /api/v2/files/<chat_session_id>/<filename> — download a file."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        parts = route[len("/api/v2/files/"):].split("/", 1)
+        if len(parts) != 2:
+            self._send_json(400, {"error": "invalid file path"})
+            return
+        chat_session_id, filename = parts[0], parts[1]
+        # SP4.6: Path traversal protection
+        if ".." in filename or filename.startswith("/"):
+            self._send_json(403, {"error": "path traversal detected"})
+            return
+        import chat_session
+        sess = None
+        for s in chat_session._sessions.values():
+            if s.chat_session_id == chat_session_id:
+                sess = s
+                break
+        if sess is None:
+            self._send_json(404, {"error": "session not found"})
+            return
+        filepath = sess.workspace_path / filename
+        # SP4.6: Verify the resolved path is within the workspace
+        try:
+            filepath.resolve().relative_to(sess.workspace_path.resolve())
+        except ValueError:
+            self._send_json(403, {"error": "path traversal detected"})
+            return
+        if not filepath.exists() or not filepath.is_file():
+            self._send_json(404, {"error": "file not found"})
+            return
+        # Serve the file
+        import mimetypes
+        mime = mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
+        with open(filepath, "rb") as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filepath.name}"')
+        self.end_headers()
+        self.wfile.write(data)
+
+    # SP5.1: Judge panel
+    def _handle_v2_judge(self) -> None:
+        """POST /api/v2/judge — in-chat multi-model judge panel."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        except Exception:
+            self._send_json(400, {"error": "invalid JSON body"})
+            return
+        input_text = body.get("input", "").strip()
+        template = body.get("template", "critique")
+        count = min(max(1, int(body.get("count", 3))), 6)
+        chat_session_id = body.get("chat_session_id")
+        if not input_text:
+            self._send_json(400, {"error": "input is required"})
+            return
+        # SP5.5: Run judges in parallel
+        import concurrent.futures
+        from agent_sessions import runJudge, parseSlot
+        from providers import buildRoster, DEFAULT_PANEL
+        roster = buildRoster()
+        user_keys = {}
+        for m in roster:
+            for h in m.hosts:
+                if h.provider == "zai":
+                    user_keys["zai"] = {"provider": "zai", "apiKey": "builtin"}
+                elif h.provider not in user_keys:
+                    k = None
+                    try:
+                        import db as _db
+                        from crypto import decrypt
+                        row = _db.providerKey.findFirst(where={"userId": "default", "provider": h.provider})
+                        if row:
+                            k = decrypt(row.encryptedKey)
+                    except Exception:
+                        pass
+                    if k:
+                        user_keys[h.provider] = {"provider": h.provider, "apiKey": k}
+        # Build diverse panel
+        panel = DEFAULT_PANEL[:count]
+        # SP5.5: Run in parallel
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=count) as executor:
+            futures = []
+            for slot in panel:
+                futures.append(executor.submit(
+                    runJudge, "default", slot, input_text, "critiquer", None, {"maxTokens": 2048}
+                ))
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    results.append({"model": "unknown", "routedTo": "unknown", "ok": False, "output": None, "error": str(e)[:200], "latencyMs": 0})
+        # Merge
+        from agent_sessions import mergeOutputs
+        merged = mergeOutputs(results, "dedupe", "critiquer")
+        ok_count = sum(1 for r in results if r.get("ok"))
+        # Persist as chat event if we have a session
+        if chat_session_id:
+            try:
+                import chat_routes
+                chat_routes.append_chat_event(chat_session_id, 0, "assistant", merged)
+            except Exception:
+                pass
+        self._send_json(200, {
+            "merged": merged,
+            "judges": [{"model": r.get("model"), "ok": r.get("ok"), "error": r.get("error")} for r in results],
+            "ok": ok_count,
+            "total": len(results),
+        })
+
+    # SP8.1: Update session metadata
+    def _handle_v2_update_session_meta(self) -> None:
+        """POST /api/v2/chat/sessions/meta — update per-chat metadata."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        except Exception:
+            self._send_json(400, {"error": "invalid JSON body"})
+            return
+        session_id = body.get("session_id", "").strip()
+        if not session_id:
+            self._send_json(400, {"error": "session_id is required"})
+            return
+        import chat_routes
+        try:
+            # Update allowed fields
+            allowed = ["model", "effort", "web_search", "web_template", 
+                       "deep_research", "deep_template", "deep_mode",
+                       "judge_count", "judge_template", "title"]
+            for field in allowed:
+                if field in body:
+                    val = body[field]
+                    if field in ("web_search", "deep_research"):
+                        val = 1 if val else 0
+                    chat_routes.update_chat_session_meta(session_id, **{field: val})
+            self._send_json(200, {"ok": True})
+        except Exception as e:
+            self._send_json(500, {"error": str(e)[:200]})
+
     def do_OPTIONS(self) -> None:
         #   CORS preflight for cross-origin POSTs with Authorization/Content-Type.
         self.send_response(204)
@@ -1502,6 +1686,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route.endswith("/events") and route.startswith("/api/v2/chat/sessions/"):
             self._handle_v2_session_events(route)
+            return
+        # SP4.1: File list endpoint
+        if route.startswith("/api/v2/files/") and not route.count("/") > 5:
+            self._handle_v2_file_list(route)
+            return
+        # SP4.2: File download endpoint
+        if route.startswith("/api/v2/files/") and route.count("/") > 5:
+            self._handle_v2_file_download(route)
             return
         if route.endswith("/stream") and route.startswith("/api/v2/agent/"):
             self._handle_v2_stream(route)
@@ -4930,6 +5122,12 @@ class Handler(BaseHTTPRequestHandler):
         # === NEW V2 CHAT API ===
         if route == "/api/v2/agent":
             self._handle_v2_agent_post()
+            return
+        if route == "/api/v2/judge":
+            self._handle_v2_judge()
+            return
+        if route == "/api/v2/chat/sessions/meta":
+            self._handle_v2_update_session_meta()
             return
         if route == "/api/v2/chat/sessions":
             self._handle_v2_create_session()
