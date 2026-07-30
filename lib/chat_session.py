@@ -272,8 +272,24 @@ class ChatSession:
 
         if tool_use:
             tool_name = tool_use.get("name", "tool")
+            tool_input = tool_use.get("input", {})
             self._emit({"type": "tool_use", "name": tool_name,
-                       "summary": str(tool_use.get("input", ""))[:200]})
+                       "summary": str(tool_input)[:200],
+                       "text": json.dumps(tool_input, default=str)[:2000]})
+
+        # Capture tool results
+        tool_result = event.get("contentBlockDelta", {}).get("toolResult")
+        if tool_result:
+            result_text = ""
+            content_blocks = tool_result.get("content", [])
+            if isinstance(content_blocks, list):
+                for block in content_blocks:
+                    if isinstance(block, dict) and "text" in block:
+                        result_text += block["text"]
+            elif isinstance(content_blocks, str):
+                result_text = content_blocks
+            self._emit({"type": "tool_result", "text": result_text[:2000],
+                       "is_error": tool_result.get("status") == "error"})
 
         if complete:
             self._emit({"type": "assistant_complete"})
