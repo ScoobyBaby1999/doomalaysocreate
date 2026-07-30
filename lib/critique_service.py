@@ -1541,6 +1541,34 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json(500, {"error": str(e)[:200]})
 
+    # SP: Delete session
+    def _handle_v2_delete_session(self) -> None:
+        """POST /api/v2/chat/sessions/delete — delete a chat session."""
+        if not self._auth_ok():
+            self._send_json(401, {"error": "missing or invalid bearer token"})
+            return
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        except Exception:
+            self._send_json(400, {"error": "invalid JSON body"})
+            return
+        session_id = body.get("session_id", "").strip()
+        if not session_id:
+            self._send_json(400, {"error": "session_id is required"})
+            return
+        try:
+            import chat_routes
+            chat_routes.delete_chat_session(session_id)
+            # Sync to dataset
+            try:
+                import db
+                db.sync_db_to_dataset()
+            except Exception:
+                pass
+            self._send_json(200, {"ok": True})
+        except Exception as e:
+            self._send_json(500, {"error": str(e)[:200]})
+
     def do_OPTIONS(self) -> None:
         #   CORS preflight for cross-origin POSTs with Authorization/Content-Type.
         self.send_response(204)
@@ -5128,6 +5156,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route == "/api/v2/chat/sessions/meta":
             self._handle_v2_update_session_meta()
+            return
+        if route == "/api/v2/chat/sessions/delete":
+            self._handle_v2_delete_session()
             return
         if route == "/api/v2/chat/sessions":
             self._handle_v2_create_session()
