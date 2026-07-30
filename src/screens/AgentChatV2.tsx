@@ -40,9 +40,11 @@ export function AgentChatV2({ settings }: { settings: Settings }) {
   const openOverlay = useModelStore((s) => s.openOverlay);
 
   const [input, setInput] = useState("");
-  const [effort, setEffort] = useState<string | null>(null);
-  const [webSearch, setWebSearch] = useState(false);
-  const [deepResearch, setDeepResearch] = useState(false);
+  // SP11.1: Use store-backed per-chat state
+  const effort = useV2Chat((s) => s.currentEffort);
+  const webSearch = useV2Chat((s) => s.currentWebSearch);
+  const deepResearch = useV2Chat((s) => s.currentDeepResearch);
+  const setChatState = useV2Chat((s) => s.setChatState);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [headerExpanded, setHeaderExpanded] = useState(false);
   const [tokenCount] = useState(0);
@@ -88,12 +90,7 @@ export function AgentChatV2({ settings }: { settings: Settings }) {
     if (!input.trim() || isBusy) return;
     const text = input.trim();
     setInput("");
-    await sendMessage(client, text, {
-      model: effectiveModelId || undefined,
-      effort: effort || undefined,
-      web_search: webSearch,
-      deep_research: deepResearch,
-    });
+    await sendMessage(client, text);  // SP11.1: opts come from store state
   }, [input, isBusy, client, sendMessage, effectiveModelId, effort, webSearch, deepResearch]);
 
   const handleNewChat = useCallback(async () => {
@@ -211,24 +208,24 @@ export function AgentChatV2({ settings }: { settings: Settings }) {
                 onClick={() => {
                   const idx = effortLevels.indexOf(effort || "");
                   const next = idx < effortLevels.length - 1 ? effortLevels[idx + 1] : effortLevels[0];
-                  setEffort(effort === next ? null : next);
+                  setChatState({ effort: effort === next ? null : next });
                 }}
                 className={`flex items-center gap-1 px-1.5 h-6 rounded-full text-[9px] ${effort ? "bg-accent/15 text-accent" : "text-muted-foreground hover:bg-muted/40"}`}
               >
                 <Gauge className="size-2.5" />{effort || "effort"}
               </button>
             )}
-            <button onClick={() => { setWebSearch(!webSearch); if (deepResearch) setDeepResearch(false); }}
+            <button onClick={() => { setChatState({ webSearch: !webSearch, deepResearch: false }); }}
               className={`flex items-center gap-1 px-1.5 h-6 rounded-full text-[9px] ${webSearch ? "bg-blue-500/15 text-blue-400" : "text-muted-foreground hover:bg-muted/40"}`}>
               <Globe className="size-2.5" />Web
             </button>
-            <button onClick={() => { setDeepResearch(!deepResearch); if (webSearch) setWebSearch(false); }}
+            <button onClick={() => { setChatState({ deepResearch: !deepResearch }); if (webSearch) setChatState({ webSearch: false }); }}
               className={`flex items-center gap-1 px-1.5 h-6 rounded-full text-[9px] ${deepResearch ? "bg-teal-500/15 text-teal-400" : "text-muted-foreground hover:bg-muted/40"}`}
               title="Deep research: agent searches multiple sources and synthesizes a comprehensive answer">
               <Telescope className="size-2.5" />Deep
             </button>
             {(effort || webSearch || deepResearch) && (
-              <button onClick={() => { setEffort(null); setWebSearch(false); setDeepResearch(false); }}
+              <button onClick={() => { setChatState({ effort: null, webSearch: false, deepResearch: false }); }}
                 className="px-1.5 h-6 rounded-full text-[9px] text-muted-foreground hover:text-foreground">Reset</button>
             )}
           </div>

@@ -27,11 +27,24 @@ export interface V2SessionMeta {
   updatedAt: number;
 }
 
+interface SessionState {
+  model: string | null;
+  effort: string | null;
+  webSearch: boolean;
+  deepResearch: boolean;
+}
+
 interface V2ChatState {
   sessions: V2ChatSession[];
   activeSessionId: string | null;
   messages: V2Message[];
   sessionMessages: Record<string, V2Message[]>;
+  // SP11.1: Per-chat isolated state
+  sessionStates: Record<string, SessionState>;
+  currentModel: string | null;
+  currentEffort: string | null;
+  currentWebSearch: boolean;
+  currentDeepResearch: boolean;
   isBusy: boolean;
   queue: string[];
   error: string | null;
@@ -44,6 +57,7 @@ interface V2ChatState {
   switchSession: (client: V2ChatClient, sessionId: string) => Promise<void>;
   deleteSession: (client: V2ChatClient, sessionId: string) => Promise<void>;
   renameSession: (sessionId: string, title: string) => void;
+  setChatState: (state: Partial<SessionState>) => void;
   stopGeneration: () => void;
 }
 
@@ -57,6 +71,11 @@ export const useV2Chat = create<V2ChatState>()(
       activeSessionId: null,
       messages: [],
       sessionMessages: {},
+      sessionStates: {},
+      currentModel: null,
+      currentEffort: null,
+      currentWebSearch: false,
+      currentDeepResearch: false,
       isBusy: false,
       queue: [],
       error: null,
@@ -86,6 +105,15 @@ export const useV2Chat = create<V2ChatState>()(
         if (!sessionId) {
           sessionId = await get().createSession(client, opts?.model);
         }
+        // SP11.1: Use per-chat state
+        const state = get();
+        const chatState = state.sessionStates[sessionId] || {};
+        const sendOpts = opts || {};
+        if (!sendOpts.model) sendOpts.model = chatState.model || state.currentModel || undefined;
+        if (!sendOpts.effort) sendOpts.effort = chatState.effort || state.currentEffort || undefined;
+        if (sendOpts.web_search === undefined) sendOpts.web_search = chatState.webSearch ?? state.currentWebSearch;
+        if (sendOpts.deep_research === undefined) sendOpts.deep_research = chatState.deepResearch ?? state.currentDeepResearch;
+
         const userMsg: V2Message = {
           id: genMsgId(), role: "user", content: text, pending: true, timestamp: Date.now(),
         };
@@ -96,7 +124,7 @@ export const useV2Chat = create<V2ChatState>()(
         }));
 
         try {
-          const { session_id } = await client.send(sessionId, text, opts || {});
+          const { session_id } = await client.send(sessionId, text, sendOpts);
           const ac = client.stream(
             session_id,
             (ev: V2AgentEvent) => {
@@ -170,11 +198,34 @@ export const useV2Chat = create<V2ChatState>()(
       switchSession: async (client, sessionId) => {
         const ctrl = get()._streamController;
         if (ctrl) { try { ctrl.abort(); } catch {} }
+
+        // SP11.1: Save current chat state before switching
+        const oldId = get().activeSessionId;
+        if (oldId) {
+          set(s => ({
+            sessionStates: {
+              ...s.sessionStates,
+              [oldId]: {
+                model: s.currentModel,
+                effort: s.currentEffort,
+                webSearch: s.currentWebSearch,
+                deepResearch: s.currentDeepResearch,
+              },
+            },
+          }));
+        }
+
         // Load messages from localStorage first (instant)
         const cachedMsgs = get().sessionMessages[sessionId] || [];
+        // SP11.1: Load the new session's state
+        const newState = get().sessionStates[sessionId] || { model: null, effort: null, webSearch: false, deepResearch: false };
         set({
           activeSessionId: sessionId,
           messages: cachedMsgs,
+          currentModel: newState.model,
+          currentEffort: newState.effort,
+          currentWebSearch: newState.webSearch,
+          currentDeepResearch: newState.deepResearch,
           isBusy: false, error: null, queue: [], _streamController: null,
         });
         // Then try to load from backend (may have newer messages)
@@ -230,6 +281,31 @@ export const useV2Chat = create<V2ChatState>()(
         }));
       },
 
+      // SP11.1: Update current chat state
+      setChatState: (state) => {
+        set(() => ({
+          ...("model" in state ? { currentModel: state.model } : {}),
+          ...("effort" in state ? { currentEffort: state.effort } : {}),
+          ...("webSearch" in state ? { currentWebSearch: state.webSearch } : {}),
+          ...("deepResearch" in state ? { currentDeepResearch: state.deepResearch } : {}),
+        }));
+        // Also save to sessionStates for the active session
+        const activeId = get().activeSessionId;
+        if (activeId) {
+          set(s => ({
+            sessionStates: {
+              ...s.sessionStates,
+              [activeId]: {
+                model: get().currentModel,
+                effort: get().currentEffort,
+                webSearch: get().currentWebSearch,
+                deepResearch: get().currentDeepResearch,
+              },
+            },
+          }));
+        }
+      },
+
       stopGeneration: () => {
         const ctrl = get()._streamController;
         if (ctrl) { try { ctrl.abort(); } catch {} }
@@ -242,6 +318,7 @@ export const useV2Chat = create<V2ChatState>()(
         sessions: state.sessions,
         activeSessionId: state.activeSessionId,
         sessionMessages: state.sessionMessages,
+        sessionStates: state.sessionStates,
       }),
     },
   ),
@@ -258,7 +335,18 @@ function handleEvent(messages: V2Message[], ev: V2AgentEvent): V2Message[] {
       }
       return [...messages, { id: genMsgId(), role: "user", content: ev.text || "", timestamp: (ev.ts || 0) * 1000 }];
     }
+    case "thinking_delta": {
+      // SP11.2: Fragment-style reasoning — APPEND
+      const idx = findLastIdx(messages, (m: V2Message) => m.role === "thinking" && !!m.isStreaming);
+      if (idx !== -1) {
+        const out = [...messages];
+        out[idx] = { ...out[idx], content: out[idx].content + (ev.text || "") };
+        return out;
+      }
+      return [...messages, { id: genMsgId(), role: "thinking", content: ev.text || "", isStreaming: true, timestamp: (ev.ts || 0) * 1000 }];
+    }
     case "thinking": {
+      // SP11.2: Accumulated-style reasoning — REPLACE
       const idx = findLastIdx(messages, (m: V2Message) => m.role === "thinking" && !!m.isStreaming);
       if (idx !== -1) {
         const out = [...messages];

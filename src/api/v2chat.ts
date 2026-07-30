@@ -11,7 +11,7 @@
 export interface V2AgentEvent {
   i: number;
   ts: number;
-  type: "user" | "assistant" | "assistant_delta" | "assistant_complete" | "thinking" | "tool_use" | "tool_result" | "status" | "error" | "title";
+  type: "user" | "assistant" | "assistant_delta" | "assistant_complete" | "thinking" | "thinking_delta" | "tool_use" | "tool_result" | "status" | "error" | "title";
   text?: string;
   state?: string;
   detail?: string;
