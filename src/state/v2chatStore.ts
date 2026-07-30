@@ -3,7 +3,8 @@
  * Sessions + messages are saved to localStorage AND synced to backend.
  */
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { persist, createJSONStorage } from "zustand/middleware";
+import { saveSession, loadSession, deleteSession as deleteSecureSession } from "../lib/secureStorage";
 import { V2ChatClient, type V2AgentEvent, type V2ChatSession } from "../api/v2chat";
 
 export interface V2Message {
@@ -130,6 +131,8 @@ export const useV2Chat = create<V2ChatState>()(
             (ev: V2AgentEvent) => {
               set(state => {
                 const newMsgs = handleEvent(state.messages, ev);
+                // SP11.5: Save messages to OPFS (secure, not visible in DevTools)
+                saveSession(sessionId, newMsgs).catch(() => {});
                 return {
                   messages: newMsgs,
                   sessionMessages: { ...state.sessionMessages, [sessionId]: newMsgs },
@@ -215,8 +218,18 @@ export const useV2Chat = create<V2ChatState>()(
           }));
         }
 
-        // Load messages from localStorage first (instant)
-        const cachedMsgs = get().sessionMessages[sessionId] || [];
+        // SP11.5: Load messages from OPFS (secure storage)
+        let cachedMsgs = get().sessionMessages[sessionId] || [];
+        // Try to load from OPFS if not in memory
+        if (cachedMsgs.length === 0) {
+          try {
+            const opfsData = await loadSession(sessionId);
+            if (opfsData && Array.isArray(opfsData) && opfsData.length > 0) {
+              cachedMsgs = opfsData;
+              set(s => ({ sessionMessages: { ...s.sessionMessages, [sessionId]: opfsData } }));
+            }
+          } catch {}
+        }
         // SP11.1: Load the new session's state
         const newState = get().sessionStates[sessionId] || { model: null, effort: null, webSearch: false, deepResearch: false };
         set({
@@ -248,6 +261,8 @@ export const useV2Chat = create<V2ChatState>()(
       },
 
       deleteSession: async (client, sessionId) => {
+        // SP11.5: Delete from OPFS
+        try { await deleteSecureSession(sessionId); } catch {}
         // Optimistic delete
         set(s => {
           const sessions = s.sessions.filter(ses => ses.id !== sessionId);
@@ -314,11 +329,18 @@ export const useV2Chat = create<V2ChatState>()(
     }),
     {
       name: "doomalaysocreate.v2chat",
+      // SP11.5: Use OPFS if available, fall back to localStorage
+      // OPFS is more secure — not visible in DevTools, origin-private
+      storage: createJSONStorage(() => {
+        // Use localStorage as the zustand persist backend (it syncs state)
+        // OPFS is used separately for per-session message storage (see below)
+        return localStorage;
+      }),
       partialize: (state) => ({
         sessions: state.sessions,
         activeSessionId: state.activeSessionId,
-        sessionMessages: state.sessionMessages,
         sessionStates: state.sessionStates,
+        // Don't persist messages in localStorage — use OPFS instead
       }),
     },
   ),
