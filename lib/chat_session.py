@@ -242,10 +242,9 @@ class ChatSession:
     def _callback(self, **kwargs: Any) -> None:
         """THE single source of events. Called by Strands for each token/chunk.
 
-        - reasoningText: ACCUMULATED reasoning (replace, don't append)
-        - data: content DELTA (append)
-        - complete: final chunk
-        - tool_use: tool call starting
+        SP11.2: Handle BOTH thinking styles:
+        - Accumulated: reasoningText grows each call (new starts with old) → emit 'thinking' (replace)
+        - Fragment: reasoningText is just the new chunk → emit 'thinking_delta' (append)
         """
         reasoningText = kwargs.get("reasoningText")
         data = kwargs.get("data")
@@ -254,9 +253,18 @@ class ChatSession:
         tool_use = event.get("contentBlockStart", {}).get("start", {}).get("toolUse")
 
         if reasoningText:
-            # reasoningText is the ACCUMULATED string — send as-is
-            # The frontend REPLACES the thinking bubble content
-            self._emit({"type": "thinking", "text": reasoningText})
+            # SP11.2: Detect accumulated vs fragment style
+            old_thinking = getattr(self, "_last_reasoning", "")
+            if old_thinking and reasoningText.startswith(old_thinking) and len(reasoningText) > len(old_thinking):
+                # Accumulated style — new text includes old text → REPLACE
+                self._emit({"type": "thinking", "text": reasoningText})
+            elif old_thinking and old_thinking.startswith(reasoningText):
+                # Stale re-emit of a shorter prefix → SKIP
+                pass
+            else:
+                # Fragment style — new text is a separate chunk → APPEND
+                self._emit({"type": "thinking_delta", "text": reasoningText})
+            self._last_reasoning = reasoningText
 
         if data:
             self._assistant_emitted = True
@@ -435,37 +443,90 @@ class ChatSession:
             from strands import tool as strands_tool
 
             @strands_tool(name="web_search", description=(
-                "Search the web using DuckDuckGo. Returns search results with titles, URLs, and snippets. "
-                "Use this for finding current information, news, documentation, or any web content."
+                "Search the web for current information. Returns results with titles, URLs, and snippets. "
+                "Use for news, documentation, facts, or any web content."
             ))
             def web_search(query: str) -> str:
-                """Search the web using DuckDuckGo HTML scraping."""
-                import urllib.request
-                import urllib.parse
-                import re
-                url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
-                req = urllib.request.Request(url, headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; doomalaysocreate-agent/1.0)"
-                })
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    html = resp.read().decode("utf-8", errors="replace")
-                # Parse results from DuckDuckGo HTML
-                results = []
-                for match in re.finditer(r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL):
-                    url = match.group(1)
-                    title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
-                    if url.startswith("//duckduckgo.com/l/?uddg="):
-                        url = urllib.parse.unquote(url.split("uddg=")[1].split("&")[0])
-                    results.append(f"[{len(results)+1}] {title}\n    {url}")
-                # Also get snippets
-                snippets = re.findall(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
-                for i, s in enumerate(snippets[:len(results)]):
-                    clean = re.sub(r'<[^>]+>', '', s).strip()
-                    if i < len(results):
-                        results[i] += f"\n    {clean}"
-                if results:
-                    return "\n\n".join(results[:8])
-                return "No results found for: " + query
+                """Multi-provider web search: DDG → Wikipedia → Tavily → Brave."""
+                import urllib.request, urllib.parse, re, json
+
+                # Provider 1: DuckDuckGo HTML (free, no key)
+                try:
+                    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+                    req = urllib.request.Request(url, headers={
+                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+                    })
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        html = resp.read().decode("utf-8", errors="replace")
+                    results = []
+                    for m in re.finditer(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL):
+                        u = m.group(1)
+                        t = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+                        if u.startswith("//duckduckgo.com/l/?uddg="):
+                            u = urllib.parse.unquote(u.split("uddg=")[1].split("&")[0])
+                        results.append(f"[{len(results)+1}] {t}\n    {u}")
+                    snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
+                    for i, s in enumerate(snippets[:len(results)]):
+                        c = re.sub(r'<[^>]+>', '', s).strip()
+                        if i < len(results): results[i] += f"\n    {c}"
+                    if results:
+                        return "\n\n".join(results[:8])
+                except Exception:
+                    pass
+
+                # Provider 2: Wikipedia API (free, no key, good for factual queries)
+                try:
+                    wurl = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote(query)}&format=json&srlimit=5"
+                    req = urllib.request.Request(wurl, headers={"User-Agent": "doomalaysocreate/1.0"})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read())
+                    wresults = []
+                    for r in data.get("query", {}).get("search", []):
+                        title = r.get("title", "")
+                        snippet = re.sub(r'<[^>]+>', '', r.get("snippet", ""))
+                        wresults.append(f"[{len(wresults)+1}] {title}\n    https://en.wikipedia.org/wiki/{urllib.parse.quote(title)}\n    {snippet}")
+                    if wresults:
+                        return "Wikipedia results:\n\n" + "\n\n".join(wresults)
+                except Exception:
+                    pass
+
+                # Provider 3: Tavily (if API key set)
+                tavily_key = os.environ.get("TAVILY_API_KEY", "")
+                if tavily_key:
+                    try:
+                        turl = "https://api.tavily.com/search"
+                        body = json.dumps({"api_key": tavily_key, "query": query, "max_results": 5}).encode()
+                        req = urllib.request.Request(turl, data=body, headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            data = json.loads(resp.read())
+                        tresults = []
+                        for r in data.get("results", []):
+                            tresults.append(f"[{len(tresults)+1}] {r.get('title','')}\n    {r.get('url','')}\n    {r.get('content','')[:200]}")
+                        if tresults:
+                            return "\n\n".join(tresults)
+                    except Exception:
+                        pass
+
+                # Provider 4: Brave Search (if API key set)
+                brave_key = os.environ.get("BRAVE_API_KEY", "")
+                if brave_key:
+                    try:
+                        burl = f"https://api.search.brave.com/res/v1/web/search?q={urllib.parse.quote(query)}&count=5"
+                        req = urllib.request.Request(burl, headers={
+                            "X-Subscription-Token": brave_key,
+                            "Accept": "application/json",
+                        })
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            data = json.loads(resp.read())
+                        bresults = []
+                        for r in data.get("web", {}).get("results", []):
+                            bresults.append(f"[{len(bresults)+1}] {r.get('title','')}\n    {r.get('url','')}\n    {r.get('description','')[:200]}")
+                        if bresults:
+                            return "\n\n".join(bresults)
+                    except Exception:
+                        pass
+
+                return f"No web search results found for: {query}. The search providers may be rate-limited. Try using web_fetch to read a specific URL."
 
             @strands_tool(name="web_fetch", description=(
                 "Fetch and read the content of a web page. Returns the text content of the page. "
