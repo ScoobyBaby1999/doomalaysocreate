@@ -47,7 +47,7 @@ export function AgentChatV2({ settings }: { settings: Settings }) {
   const setChatState = useV2Chat((s) => s.setChatState);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [headerExpanded, setHeaderExpanded] = useState(false);
-  const [tokenCount] = useState(0);
+  const tokenCount = useV2Chat((s) => s.tokenCount);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -68,10 +68,14 @@ export function AgentChatV2({ settings }: { settings: Settings }) {
 
   const effectiveModelId = selectedSlotId || selectedModelId;
 
+  const currentModelFromStore = useV2Chat((s) => s.currentModel);
+  
   const modelInfo = useMemo(() => {
-    if (!selectedModelId) return null;
+    // Try store model first, then selectedModelId
+    const modelId = currentModelFromStore || selectedModelId;
+    if (!modelId) return null;
     for (const p of providers) {
-      const m = p.models.find((m: any) => m.id === selectedModelId || m.slotId === selectedSlotId);
+      const m = p.models.find((mm: any) => mm.id === modelId || mm.slotId === modelId || mm.id === selectedModelId || mm.slotId === selectedSlotId);
       if (m) return { label: m.displayName || m.id, provider: p.displayName, color: p.color, ctx: m.contextLength || 131072 };
     }
     return { label: selectedModelId?.split("/").pop() || "Select model", provider: "", color: "#a855f7", ctx: 131072 };
@@ -344,14 +348,7 @@ function MessageBubble({ msg }: { msg: V2Message }) {
   if (isThinking) return <ThinkingBubble msg={msg} />;
 
   if (isTool) {
-    return (
-      <div className="px-3 py-0.5">
-        <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground">
-          <span className="px-1.5 py-0.5 rounded bg-muted/40 font-mono">{msg.toolName || "tool"}</span>
-          <span className="truncate max-w-[200px]">{msg.content.slice(0, 80)}</span>
-        </div>
-      </div>
-    );
+    return <ToolBubble msg={msg} />;
   }
 
   return (
@@ -429,4 +426,33 @@ function exportChat(messages: V2Message[], title: string | undefined) {
   a.download = `${title || "chat"}.md`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+
+// === Expandable Tool Bubble ===
+function ToolBubble({ msg }: { msg: V2Message }) {
+  const [expanded, setExpanded] = useState(false);
+  const isResult = msg.role === "tool_result";
+  const hasContent = msg.content && msg.content.trim().length > 0;
+  const preview = hasContent ? msg.content.slice(0, 60) + (msg.content.length > 60 ? "..." : "") : "";
+  
+  return (
+    <div className="px-3 py-0.5">
+      <button
+        onClick={() => hasContent && setExpanded(!expanded)}
+        className={`flex items-center gap-1.5 text-[9px] w-full text-left ${hasContent ? "hover:text-foreground cursor-pointer" : ""}`}
+      >
+        <span className={`px-1.5 py-0.5 rounded font-mono ${isResult ? (msg.isError ? "bg-red-500/20 text-red-400" : "bg-emerald-500/20 text-emerald-400") : "bg-blue-500/20 text-blue-400"}`}>
+          {isResult ? "result" : (msg.toolName || "tool")}
+        </span>
+        <span className="truncate flex-1 text-muted-foreground">{preview || "(empty)"}</span>
+        {hasContent && <span className="text-[8px] text-muted-foreground/50 shrink-0">{expanded ? "▼" : "▶"}</span>}
+      </button>
+      {hasContent && expanded && (
+        <div className="mt-0.5 ml-4 p-1.5 rounded bg-muted/20 border border-border/20 max-h-40 overflow-y-auto">
+          <pre className="text-[9px] font-mono whitespace-pre-wrap break-words text-muted-foreground/80">{msg.content}</pre>
+        </div>
+      )}
+    </div>
+  );
 }

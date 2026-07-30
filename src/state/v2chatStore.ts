@@ -1,11 +1,11 @@
 /**
- * V2 Chat Store — with localStorage persistence for offline access.
- * Sessions + messages are saved to localStorage AND synced to backend.
+ * V2 Chat Store — with per-chat state isolation + OPFS persistence.
+ * Fixed: per-chat restore from backend, token tracking, title updates.
  */
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import { saveSession, loadSession, deleteSession as deleteSecureSession } from "../lib/secureStorage";
 import { V2ChatClient, type V2AgentEvent, type V2ChatSession } from "../api/v2chat";
+import { saveSession, loadSession, deleteSession as deleteSecureSession } from "../lib/secureStorage";
 
 export interface V2Message {
   id: string;
@@ -14,18 +14,9 @@ export interface V2Message {
   isStreaming?: boolean;
   pending?: boolean;
   toolName?: string;
+  toolInput?: string;
+  isError?: boolean;
   timestamp: number;
-}
-
-export interface V2SessionMeta {
-  id: string;
-  title: string;
-  model: string | null;
-  provider: string | null;
-  effort: string | null;
-  webSearch: boolean;
-  deepResearch: boolean;
-  updatedAt: number;
 }
 
 interface SessionState {
@@ -40,12 +31,12 @@ interface V2ChatState {
   activeSessionId: string | null;
   messages: V2Message[];
   sessionMessages: Record<string, V2Message[]>;
-  // SP11.1: Per-chat isolated state
   sessionStates: Record<string, SessionState>;
   currentModel: string | null;
   currentEffort: string | null;
   currentWebSearch: boolean;
   currentDeepResearch: boolean;
+  tokenCount: number;
   isBusy: boolean;
   queue: string[];
   error: string | null;
@@ -77,6 +68,7 @@ export const useV2Chat = create<V2ChatState>()(
       currentEffort: null,
       currentWebSearch: false,
       currentDeepResearch: false,
+      tokenCount: 0,
       isBusy: false,
       queue: [],
       error: null,
@@ -91,7 +83,6 @@ export const useV2Chat = create<V2ChatState>()(
             await get().switchSession(client, activeId);
           }
         } catch (e) {
-          // If backend is down, load from localStorage (persisted by zustand)
           console.log("Failed to load sessions from backend, using localStorage:", e);
         }
       },
@@ -106,7 +97,7 @@ export const useV2Chat = create<V2ChatState>()(
         if (!sessionId) {
           sessionId = await get().createSession(client, opts?.model);
         }
-        // SP11.1: Use per-chat state
+        // Use per-chat state
         const state = get();
         const chatState = state.sessionStates[sessionId] || {};
         const sendOpts = opts || {};
@@ -131,13 +122,14 @@ export const useV2Chat = create<V2ChatState>()(
             (ev: V2AgentEvent) => {
               set(state => {
                 const newMsgs = handleEvent(state.messages, ev);
-                // SP11.5: Save messages to OPFS (secure, not visible in DevTools)
-                saveSession(sessionId, newMsgs).catch(() => {});
+                // Save to OPFS
+                saveSession(sessionId!, newMsgs).catch(() => {});
                 return {
                   messages: newMsgs,
-                  sessionMessages: { ...state.sessionMessages, [sessionId]: newMsgs },
+                  sessionMessages: { ...state.sessionMessages, [sessionId!]: newMsgs },
                 };
               });
+              // Handle title updates
               if (ev.type === "title") {
                 set(s => ({
                   sessions: s.sessions.map(ses =>
@@ -145,6 +137,11 @@ export const useV2Chat = create<V2ChatState>()(
                   ),
                 }));
               }
+              // SP: Track token count from usage
+              if (ev.type === "status" && ev.usage) {
+                set({ tokenCount: ev.usage.total_tokens || 0 });
+              }
+              // Handle status changes
               if (ev.type === "status" && (ev.state === "idle" || ev.state === "error")) {
                 set(s => ({ messages: finalizeStreaming(s.messages), isBusy: false }));
               }
@@ -177,11 +174,11 @@ export const useV2Chat = create<V2ChatState>()(
             activeSessionId: session.id,
             messages: [],
             sessionMessages: { ...s.sessionMessages, [session.id]: [] },
+            sessionStates: { ...s.sessionStates, [session.id]: { model: model || null, effort: null, webSearch: false, deepResearch: false } },
             error: null, isBusy: false, queue: [],
           }));
           return session.id;
         } catch {
-          // Backend failed — create a local-only session
           const localId = `local-${Date.now()}`;
           const localSession: V2ChatSession = {
             id: localId, title, model: model || null, workspace_id: null,
@@ -202,7 +199,7 @@ export const useV2Chat = create<V2ChatState>()(
         const ctrl = get()._streamController;
         if (ctrl) { try { ctrl.abort(); } catch {} }
 
-        // SP11.1: Save current chat state before switching
+        // Save current chat state before switching
         const oldId = get().activeSessionId;
         if (oldId) {
           set(s => ({
@@ -218,9 +215,8 @@ export const useV2Chat = create<V2ChatState>()(
           }));
         }
 
-        // SP11.5: Load messages from OPFS (secure storage)
+        // Load messages from OPFS/memory
         let cachedMsgs = get().sessionMessages[sessionId] || [];
-        // Try to load from OPFS if not in memory
         if (cachedMsgs.length === 0) {
           try {
             const opfsData = await loadSession(sessionId);
@@ -230,18 +226,17 @@ export const useV2Chat = create<V2ChatState>()(
             }
           } catch {}
         }
-        // SP11.1: Load the new session's state
-        const newState = get().sessionStates[sessionId] || { model: null, effort: null, webSearch: false, deepResearch: false };
-        set({
-          activeSessionId: sessionId,
-          messages: cachedMsgs,
-          currentModel: newState.model,
-          currentEffort: newState.effort,
-          currentWebSearch: newState.webSearch,
-          currentDeepResearch: newState.deepResearch,
-          isBusy: false, error: null, queue: [], _streamController: null,
-        });
-        // Then try to load from backend (may have newer messages)
+
+        // Load per-chat state from sessionStates OR from backend session metadata
+        let newState = get().sessionStates[sessionId] || { model: null, effort: null, webSearch: false, deepResearch: false };
+        
+        // Also try to restore from backend session metadata (like V1 did)
+        const sessionMeta = get().sessions.find(s => s.id === sessionId);
+        if (sessionMeta) {
+          if (sessionMeta.model && !newState.model) newState.model = sessionMeta.model;
+        }
+
+        // Try to load from backend events endpoint
         try {
           const token = await client.getToken();
           const res = await fetch(`${client.baseUrl}/api/v2/chat/sessions/${sessionId}/events`, {
@@ -251,41 +246,51 @@ export const useV2Chat = create<V2ChatState>()(
             const data = await res.json();
             const msgs: V2Message[] = (data.events || []).reduce((acc: V2Message[], ev: any) => handleEvent(acc, ev), []);
             if (msgs.length >= cachedMsgs.length) {
-              set(s => ({
-                messages: msgs,
-                sessionMessages: { ...s.sessionMessages, [sessionId]: msgs },
-              }));
+              cachedMsgs = msgs;
+              set(s => ({ sessionMessages: { ...s.sessionMessages, [sessionId]: msgs } }));
             }
           }
-        } catch { /* use cached */ }
+        } catch {}
+
+        set({
+          activeSessionId: sessionId,
+          messages: cachedMsgs,
+          currentModel: newState.model,
+          currentEffort: newState.effort,
+          currentWebSearch: newState.webSearch,
+          currentDeepResearch: newState.deepResearch,
+          tokenCount: 0,
+          isBusy: false, error: null, queue: [], _streamController: null,
+        });
       },
 
       deleteSession: async (client, sessionId) => {
-        // SP11.5: Delete from OPFS
         try { await deleteSecureSession(sessionId); } catch {}
-        // Optimistic delete
         set(s => {
           const sessions = s.sessions.filter(ses => ses.id !== sessionId);
           const sessionMessages = { ...s.sessionMessages };
           delete sessionMessages[sessionId];
+          const sessionStates = { ...s.sessionStates };
+          delete sessionStates[sessionId];
           const activeSessionId = s.activeSessionId === sessionId
             ? (sessions[0]?.id || null)
             : s.activeSessionId;
           return {
             sessions,
             sessionMessages,
+            sessionStates,
             activeSessionId,
             messages: activeSessionId ? (sessionMessages[activeSessionId] || []) : [],
           };
         });
-        // Try to delete from backend
         try {
           const token = await client.getToken();
-          await fetch(`${client.baseUrl}/api/v2/chat/sessions/${sessionId}`, {
-            method: "DELETE",
-            headers: { Authorization: `Bearer ${token}` },
+          await fetch(`${client.baseUrl}/api/v2/chat/sessions/delete`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ session_id: sessionId }),
           });
-        } catch { /* already deleted locally */ }
+        } catch {}
       },
 
       renameSession: (sessionId, title) => {
@@ -296,7 +301,6 @@ export const useV2Chat = create<V2ChatState>()(
         }));
       },
 
-      // SP11.1: Update current chat state
       setChatState: (state) => {
         set(() => ({
           ...("model" in state ? { currentModel: state.model } : {}),
@@ -304,7 +308,6 @@ export const useV2Chat = create<V2ChatState>()(
           ...("webSearch" in state ? { currentWebSearch: state.webSearch } : {}),
           ...("deepResearch" in state ? { currentDeepResearch: state.deepResearch } : {}),
         }));
-        // Also save to sessionStates for the active session
         const activeId = get().activeSessionId;
         if (activeId) {
           set(s => ({
@@ -329,18 +332,11 @@ export const useV2Chat = create<V2ChatState>()(
     }),
     {
       name: "doomalaysocreate.v2chat",
-      // SP11.5: Use OPFS if available, fall back to localStorage
-      // OPFS is more secure — not visible in DevTools, origin-private
-      storage: createJSONStorage(() => {
-        // Use localStorage as the zustand persist backend (it syncs state)
-        // OPFS is used separately for per-session message storage (see below)
-        return localStorage;
-      }),
+      storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         sessions: state.sessions,
         activeSessionId: state.activeSessionId,
         sessionStates: state.sessionStates,
-        // Don't persist messages in localStorage — use OPFS instead
       }),
     },
   ),
@@ -358,7 +354,6 @@ function handleEvent(messages: V2Message[], ev: V2AgentEvent): V2Message[] {
       return [...messages, { id: genMsgId(), role: "user", content: ev.text || "", timestamp: (ev.ts || 0) * 1000 }];
     }
     case "thinking_delta": {
-      // SP11.2: Fragment-style reasoning — APPEND
       const idx = findLastIdx(messages, (m: V2Message) => m.role === "thinking" && !!m.isStreaming);
       if (idx !== -1) {
         const out = [...messages];
@@ -368,7 +363,6 @@ function handleEvent(messages: V2Message[], ev: V2AgentEvent): V2Message[] {
       return [...messages, { id: genMsgId(), role: "thinking", content: ev.text || "", isStreaming: true, timestamp: (ev.ts || 0) * 1000 }];
     }
     case "thinking": {
-      // SP11.2: Accumulated-style reasoning — REPLACE
       const idx = findLastIdx(messages, (m: V2Message) => m.role === "thinking" && !!m.isStreaming);
       if (idx !== -1) {
         const out = [...messages];
@@ -396,9 +390,15 @@ function handleEvent(messages: V2Message[], ev: V2AgentEvent): V2Message[] {
       return [...messages, { id: genMsgId(), role: "assistant", content: ev.text || "", timestamp: (ev.ts || 0) * 1000 }];
     }
     case "tool_use":
-      return [...messages, { id: genMsgId(), role: "tool", content: ev.summary || ev.text || "", toolName: ev.name, timestamp: (ev.ts || 0) * 1000 }];
+      return [...messages, { 
+        id: genMsgId(), role: "tool", content: ev.summary || ev.text || "", 
+        toolName: ev.name, toolInput: ev.summary, timestamp: (ev.ts || 0) * 1000 
+      }];
     case "tool_result":
-      return [...messages, { id: genMsgId(), role: "tool_result", content: ev.text || "", timestamp: (ev.ts || 0) * 1000 }];
+      return [...messages, { 
+        id: genMsgId(), role: "tool_result", content: ev.text || "", 
+        isError: (ev as any).is_error, timestamp: (ev.ts || 0) * 1000 
+      }];
     default:
       return messages;
   }
