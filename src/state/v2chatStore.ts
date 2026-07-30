@@ -1,7 +1,9 @@
 /**
- * V2 Chat Store — simplified, no cursor, no polling, no dedup complexity.
+ * V2 Chat Store — with localStorage persistence for offline access.
+ * Sessions + messages are saved to localStorage AND synced to backend.
  */
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import { V2ChatClient, type V2AgentEvent, type V2ChatSession } from "../api/v2chat";
 
 export interface V2Message {
@@ -14,10 +16,22 @@ export interface V2Message {
   timestamp: number;
 }
 
+export interface V2SessionMeta {
+  id: string;
+  title: string;
+  model: string | null;
+  provider: string | null;
+  effort: string | null;
+  webSearch: boolean;
+  deepResearch: boolean;
+  updatedAt: number;
+}
+
 interface V2ChatState {
   sessions: V2ChatSession[];
   activeSessionId: string | null;
   messages: V2Message[];
+  sessionMessages: Record<string, V2Message[]>;
   isBusy: boolean;
   queue: string[];
   error: string | null;
@@ -28,109 +42,210 @@ interface V2ChatState {
   }) => Promise<void>;
   createSession: (client: V2ChatClient, model?: string) => Promise<string>;
   switchSession: (client: V2ChatClient, sessionId: string) => Promise<void>;
+  deleteSession: (client: V2ChatClient, sessionId: string) => Promise<void>;
+  renameSession: (sessionId: string, title: string) => void;
   stopGeneration: () => void;
 }
 
 let msgIdCounter = 0;
 const genMsgId = () => `msg-${++msgIdCounter}`;
 
-export const useV2Chat = create<V2ChatState>((set, get) => ({
-  sessions: [],
-  activeSessionId: null,
-  messages: [],
-  isBusy: false,
-  queue: [],
-  error: null,
-  _streamController: null,
+export const useV2Chat = create<V2ChatState>()(
+  persist(
+    (set, get) => ({
+      sessions: [],
+      activeSessionId: null,
+      messages: [],
+      sessionMessages: {},
+      isBusy: false,
+      queue: [],
+      error: null,
+      _streamController: null,
 
-  init: async (client) => {
-    try {
-      const { sessions } = await client.listSessions();
-      const activeId = sessions[0]?.id ?? null;
-      set({ sessions, activeSessionId: activeId });
-      if (activeId) {
-        await get().switchSession(client, activeId);
-      }
-    } catch (e) {
-      set({ error: e instanceof Error ? e.message : "Failed to load sessions" });
-    }
-  },
-
-  sendMessage: async (client, text, opts) => {
-    if (!text.trim()) return;
-    if (get().isBusy) {
-      set(s => ({ queue: [...s.queue, text] }));
-      return;
-    }
-    let sessionId = get().activeSessionId;
-    if (!sessionId) {
-      sessionId = await get().createSession(client, opts?.model);
-    }
-    const userMsg: V2Message = {
-      id: genMsgId(), role: "user", content: text, pending: true, timestamp: Date.now(),
-    };
-    set(s => ({ messages: [...s.messages, userMsg], isBusy: true, error: null }));
-    try {
-      const { session_id } = await client.send(sessionId, text, opts || {});
-      const ac = client.stream(
-        session_id,
-        (ev: V2AgentEvent) => {
-          set(state => ({ messages: handleEvent(state.messages, ev) }));
-          if (ev.type === "title") {
-            set(s => ({ sessions: s.sessions.map(ses => ses.id === sessionId ? { ...ses, title: ev.title || ses.title } : ses) }));
+      init: async (client) => {
+        try {
+          const { sessions } = await client.listSessions();
+          const activeId = get().activeSessionId || sessions[0]?.id || null;
+          set({ sessions, activeSessionId: activeId });
+          if (activeId) {
+            await get().switchSession(client, activeId);
           }
-          if (ev.type === "status" && (ev.state === "idle" || ev.state === "error")) {
-            set(s => ({ messages: finalizeStreaming(s.messages), isBusy: false }));
-          }
-          if (ev.type === "error") {
-            set({ error: ev.error || "Unknown error" });
-          }
-        },
-        (err: Error) => { set({ error: err.message, isBusy: false }); },
-        () => {
-          set(s => ({ messages: finalizeStreaming(s.messages), isBusy: false, _streamController: null }));
-          const next = get().queue[0];
-          if (next) {
-            set(s => ({ queue: s.queue.slice(1) }));
-            get().sendMessage(client, next, opts);
-          }
-        },
-      );
-      set({ _streamController: ac });
-    } catch (e) {
-      set({ error: e instanceof Error ? e.message : "Failed to send", isBusy: false, messages: finalizeStreaming(get().messages) });
-    }
-  },
+        } catch (e) {
+          // If backend is down, load from localStorage (persisted by zustand)
+          console.log("Failed to load sessions from backend, using localStorage:", e);
+        }
+      },
 
-  createSession: async (client, model) => {
-    const session = await client.createSession({ model, title: `Chat ${Math.random().toString(16).slice(2, 6)}` });
-    set(s => ({ sessions: [session, ...s.sessions], activeSessionId: session.id, messages: [], error: null, isBusy: false, queue: [] }));
-    return session.id;
-  },
+      sendMessage: async (client, text, opts) => {
+        if (!text.trim()) return;
+        if (get().isBusy) {
+          set(s => ({ queue: [...s.queue, text] }));
+          return;
+        }
+        let sessionId = get().activeSessionId;
+        if (!sessionId) {
+          sessionId = await get().createSession(client, opts?.model);
+        }
+        const userMsg: V2Message = {
+          id: genMsgId(), role: "user", content: text, pending: true, timestamp: Date.now(),
+        };
+        set(s => ({
+          messages: [...s.messages, userMsg],
+          sessionMessages: { ...s.sessionMessages, [sessionId]: [...(s.sessionMessages[sessionId] || []), userMsg] },
+          isBusy: true, error: null,
+        }));
 
-  switchSession: async (client, sessionId) => {
-    const ctrl = get()._streamController;
-    if (ctrl) { try { ctrl.abort(); } catch {} }
-    set({ activeSessionId: sessionId, messages: [], isBusy: false, error: null, queue: [], _streamController: null });
-    try {
-      const token = await client.getToken();
-      const res = await fetch(`${client.baseUrl}/api/v2/chat/sessions/${sessionId}/events`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const msgs: V2Message[] = (data.events || []).reduce((acc: V2Message[], ev: any) => handleEvent(acc, ev), []);
-        set({ messages: msgs });
-      }
-    } catch { /* new session */ }
-  },
+        try {
+          const { session_id } = await client.send(sessionId, text, opts || {});
+          const ac = client.stream(
+            session_id,
+            (ev: V2AgentEvent) => {
+              set(state => {
+                const newMsgs = handleEvent(state.messages, ev);
+                return {
+                  messages: newMsgs,
+                  sessionMessages: { ...state.sessionMessages, [sessionId]: newMsgs },
+                };
+              });
+              if (ev.type === "title") {
+                set(s => ({
+                  sessions: s.sessions.map(ses =>
+                    ses.id === sessionId ? { ...ses, title: ev.title || ses.title } : ses
+                  ),
+                }));
+              }
+              if (ev.type === "status" && (ev.state === "idle" || ev.state === "error")) {
+                set(s => ({ messages: finalizeStreaming(s.messages), isBusy: false }));
+              }
+              if (ev.type === "error") {
+                set({ error: ev.error || "Unknown error" });
+              }
+            },
+            (err: Error) => { set({ error: err.message, isBusy: false }); },
+            () => {
+              set(s => ({ messages: finalizeStreaming(s.messages), isBusy: false, _streamController: null }));
+              const next = get().queue[0];
+              if (next) {
+                set(s => ({ queue: s.queue.slice(1) }));
+                get().sendMessage(client, next, opts);
+              }
+            },
+          );
+          set({ _streamController: ac });
+        } catch (e) {
+          set({ error: e instanceof Error ? e.message : "Failed to send", isBusy: false, messages: finalizeStreaming(get().messages) });
+        }
+      },
 
-  stopGeneration: () => {
-    const ctrl = get()._streamController;
-    if (ctrl) { try { ctrl.abort(); } catch {} }
-    set(s => ({ isBusy: false, messages: finalizeStreaming(s.messages), _streamController: null }));
-  },
-}));
+      createSession: async (client, model) => {
+        const title = `Chat ${Math.random().toString(16).slice(2, 6)}`;
+        try {
+          const session = await client.createSession({ model, title });
+          set(s => ({
+            sessions: [session, ...s.sessions],
+            activeSessionId: session.id,
+            messages: [],
+            sessionMessages: { ...s.sessionMessages, [session.id]: [] },
+            error: null, isBusy: false, queue: [],
+          }));
+          return session.id;
+        } catch {
+          // Backend failed — create a local-only session
+          const localId = `local-${Date.now()}`;
+          const localSession: V2ChatSession = {
+            id: localId, title, model: model || null, workspace_id: null,
+            created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+          };
+          set(s => ({
+            sessions: [localSession, ...s.sessions],
+            activeSessionId: localId,
+            messages: [],
+            sessionMessages: { ...s.sessionMessages, [localId]: [] },
+            error: null, isBusy: false, queue: [],
+          }));
+          return localId;
+        }
+      },
+
+      switchSession: async (client, sessionId) => {
+        const ctrl = get()._streamController;
+        if (ctrl) { try { ctrl.abort(); } catch {} }
+        // Load messages from localStorage first (instant)
+        const cachedMsgs = get().sessionMessages[sessionId] || [];
+        set({
+          activeSessionId: sessionId,
+          messages: cachedMsgs,
+          isBusy: false, error: null, queue: [], _streamController: null,
+        });
+        // Then try to load from backend (may have newer messages)
+        try {
+          const token = await client.getToken();
+          const res = await fetch(`${client.baseUrl}/api/v2/chat/sessions/${sessionId}/events`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const msgs: V2Message[] = (data.events || []).reduce((acc: V2Message[], ev: any) => handleEvent(acc, ev), []);
+            if (msgs.length >= cachedMsgs.length) {
+              set(s => ({
+                messages: msgs,
+                sessionMessages: { ...s.sessionMessages, [sessionId]: msgs },
+              }));
+            }
+          }
+        } catch { /* use cached */ }
+      },
+
+      deleteSession: async (client, sessionId) => {
+        // Optimistic delete
+        set(s => {
+          const sessions = s.sessions.filter(ses => ses.id !== sessionId);
+          const sessionMessages = { ...s.sessionMessages };
+          delete sessionMessages[sessionId];
+          const activeSessionId = s.activeSessionId === sessionId
+            ? (sessions[0]?.id || null)
+            : s.activeSessionId;
+          return {
+            sessions,
+            sessionMessages,
+            activeSessionId,
+            messages: activeSessionId ? (sessionMessages[activeSessionId] || []) : [],
+          };
+        });
+        // Try to delete from backend
+        try {
+          const token = await client.getToken();
+          await fetch(`${client.baseUrl}/api/v2/chat/sessions/${sessionId}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${token}` },
+          });
+        } catch { /* already deleted locally */ }
+      },
+
+      renameSession: (sessionId, title) => {
+        set(s => ({
+          sessions: s.sessions.map(ses =>
+            ses.id === sessionId ? { ...ses, title } : ses
+          ),
+        }));
+      },
+
+      stopGeneration: () => {
+        const ctrl = get()._streamController;
+        if (ctrl) { try { ctrl.abort(); } catch {} }
+        set(s => ({ isBusy: false, messages: finalizeStreaming(s.messages), _streamController: null }));
+      },
+    }),
+    {
+      name: "doomalaysocreate.v2chat",
+      partialize: (state) => ({
+        sessions: state.sessions,
+        activeSessionId: state.activeSessionId,
+        sessionMessages: state.sessionMessages,
+      }),
+    },
+  ),
+);
 
 function handleEvent(messages: V2Message[], ev: V2AgentEvent): V2Message[] {
   switch (ev.type) {

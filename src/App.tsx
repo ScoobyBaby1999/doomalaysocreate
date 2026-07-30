@@ -240,16 +240,13 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-full">
-       <header className="flex items-center gap-2 px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content bg-surface/60 backdrop-blur">
+       <header className="flex items-center gap-2 px-4 h-12 border-b border-border pt-[env(safe-area-inset-top)] box-content bg-surface/60 backdrop-blur shrink-0">
          <span className="font-semibold tracking-tight text-foreground">doomalaysocreate</span>
          <span className="text-[11px] text-muted hidden sm:inline">panel · agentic coder</span>
-         {/* NOTE: BATCH-2 Task 2 — removed duplicate model-select button here.
-          *  The model selector already lives in AgentChat's header (right of
-          *  the session title). Showing it twice was clutter + confusing. */}
          <div className="ml-auto" />
        </header>
 
-      <main className="flex-1 min-h-0">
+      <main className="flex-1 min-h-0 overflow-hidden">
         {tab === "agentchat" ? (
           <AgentChatV2 settings={settings} />
         ) : tab === "conscious" ? (
@@ -269,8 +266,8 @@ export default function App() {
         )}
       </main>
 
-      {/* Minimal icon-focused bottom nav: Chat · Workspaces · Models · Settings. */}
-      <nav className="flex border-t border-border">
+      {/* Bottom nav — below the chat. On chat tab, it's below the fold (scroll to access). */}
+      <nav className="flex border-t border-border shrink-0">
         {NAV_TABS.map((t) => (
           <button
             key={t}
