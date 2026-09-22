@@ -1,0 +1,11 @@
+{
+  "client_id": "https://scoobybaby1999.github.io/doomalaysocreate/.well-known/oauth-cimd",
+  "client_name": "Doomalay",
+  "redirect_uris": [
+    "http://localhost/api/hf/oauth/callback",
+    "http://127.0.0.1/api/hf/oauth/callback"
+  ],
+  "token_endpoint_auth_method": "none",
+  "logo_uri": "https://huggingface.co/front/assets/huggingface_logo-noborder.svg",
+  "client_uri": "https://github.com/ScoobyBaby1999/doomalay"
+}
